@@ -2,8 +2,8 @@
 # =============================================================================
 # download_giab_dnm_testdata.sh
 #
-# Extracts small BAM regions around known de novo mutations (DNMs) from the
-# GIAB HG002 (NA24385) Ashkenazi trio for integration testing.
+# Discovers child-private SNVs from the GIAB HG002 (NA24385) Ashkenazi trio
+# and extracts small BAM regions around them for integration testing.
 #
 # Overview
 # --------
@@ -14,11 +14,10 @@
 #   HG003 / NA24149  –  Father
 #   HG004 / NA24143  –  Mother
 #
-# De novo mutations (DNMs) are variants present in the child but absent in
-# both parents.  This script uses a curated list of known DNM positions from
-# the GIAB HG002 mosaic/de novo benchmark (usnistgov/giab-HG002-mosaic-
-# benchmark), verifies them against the GIAB v4.2.1 truth VCFs over HTTPS,
-# then extracts small BAM regions via samtools random access.
+# This script dynamically discovers SNVs that are present in the HG002
+# benchmark VCF (v4.2.1) but absent from both parents' benchmark VCFs.
+# These child-private variants serve as realistic candidates for testing
+# de novo mutation filtering tools.
 #
 # NO large file downloads are performed.  All VCF and BAM queries use
 # htslib HTTPS random access against the public GIAB FTP, transferring only
@@ -26,48 +25,37 @@
 #
 # Algorithm
 # ---------
-#   1. Start with a curated list of published DNM positions (SNVs) sourced
-#      from the GIAB HG002 mosaic benchmark (Strelka2 somatic caller,
-#      IGV-curated, see usnistgov/giab-HG002-mosaic-benchmark).
-#   2. For each candidate, verify via bcftools over HTTPS that the variant
-#      is present in the HG002 benchmark VCF and absent from both parents.
+#   1. Stream small windows (~50 kb) from the HG002 benchmark VCF across
+#      multiple chromosomes, collecting SNVs via HTTPS random access.
+#   2. For each HG002 SNV, verify via bcftools that it is absent from
+#      both HG003 and HG004 benchmark VCFs (child-private).
 #   3. Select a subset of verified candidates (default 5).
 #   4. Extract ±500 bp BAM slices around each candidate from the public GIAB
 #      Illumina 2×250 bp WGS BAMs (remote HTTPS via htslib).
-#   5. Extract corresponding reference FASTA regions.
-#   6. Write a candidate VCF containing the selected DNMs.
+#   5. Write a candidate VCF containing the selected child-private SNVs.
 #
 # Prerequisites
 # -------------
 #   • samtools  ≥ 1.10  (compiled with htslib HTTP/S support)
 #   • bcftools  ≥ 1.10
-#   • A local copy of the GRCh38 reference FASTA (with .fai index)
 #
 # Usage
 # -----
 #   ./scripts/download_giab_dnm_testdata.sh \
-#       -r /path/to/GRCh38_no_alt.fa       \
 #       [-o output_dir]                     \
 #       [-n num_variants]                   \
 #       [-p padding_bp]
 #
 # Options
 # -------
-#   -r REF_FASTA   Path to local GRCh38 reference FASTA (.fai index required).
-#                  Download from:
-#                    https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/
-#                      release/references/GRCh38/
-#                      GCA_000001405.15_GRCh38_no_alt_analysis_set.fasta.gz
 #   -o OUTPUT_DIR  Output directory  (default: tests/data/giab)
 #   -n NUM         Number of DNM candidates to select  (default: 5)
 #   -p PADDING     Base-pairs of padding around each variant  (default: 500)
 #
 # Data sources
 # ------------
-#   DNMs  :  usnistgov/giab-HG002-mosaic-benchmark (Strelka2, IGV-curated)
 #   BAMs  :  NIST Illumina 2×250 bp WGS, novoalign, GRCh38
 #   VCFs  :  GIAB v4.2.1 benchmark  (GRCh38, chr1-22)  [queried over HTTPS]
-#   Ref   :  GCA_000001405.15  GRCh38 no-alt analysis set
 # =============================================================================
 
 set -euo pipefail
@@ -78,9 +66,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUTPUT_DIR="${REPO_DIR}/tests/data/giab"
-NUM_VARIANTS=5
+NUM_VARIANTS=20
 PADDING=500
-REF_FASTA=""
 
 # ---------------------------------------------------------------------------
 # GIAB data URLs (all accessed via HTTPS random access – no bulk downloads)
@@ -94,44 +81,88 @@ HG003_BAM="${BAM_BASE}/HG003_NA24149_father/NIST_Illumina_2x250bps/novoalign_bam
 HG004_BAM="${BAM_BASE}/HG004_NA24143_mother/NIST_Illumina_2x250bps/novoalign_bams/HG004.GRCh38.2x250.bam"
 
 # GIAB v4.2.1 benchmark VCFs (GRCh38) – queried over HTTPS, never downloaded
+# NOTE: Use explicit version directory (NISTv4.2.1), NOT the 'latest' symlink,
+# because 'latest' may point to a newer release that uses different filenames.
 BENCH_BASE="${GIAB_BASE}/release/AshkenazimTrio"
-HG002_VCF="${BENCH_BASE}/HG002_NA24385_son/latest/GRCh38/HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz"
-HG003_VCF="${BENCH_BASE}/HG003_NA24149_father/latest/GRCh38/HG003_GRCh38_1_22_v4.2.1_benchmark.vcf.gz"
-HG004_VCF="${BENCH_BASE}/HG004_NA24143_mother/latest/GRCh38/HG004_GRCh38_1_22_v4.2.1_benchmark.vcf.gz"
+HG002_VCF="${BENCH_BASE}/HG002_NA24385_son/NISTv4.2.1/GRCh38/HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz"
+HG003_VCF="${BENCH_BASE}/HG003_NA24149_father/NISTv4.2.1/GRCh38/HG003_GRCh38_1_22_v4.2.1_benchmark.vcf.gz"
+HG004_VCF="${BENCH_BASE}/HG004_NA24143_mother/NISTv4.2.1/GRCh38/HG004_GRCh38_1_22_v4.2.1_benchmark.vcf.gz"
 
 # ---------------------------------------------------------------------------
-# Curated DNM candidate positions (GRCh38)
-#
-# Source: usnistgov/giab-HG002-mosaic-benchmark data/igv_curated_variants_RM.tsv
-# These are SNVs identified by Strelka2 somatic calling (HG002 as tumor,
-# parents as normal), then IGV-curated.  Selected "candidate" variants with
-# high SomaticEVS scores (>17) across different chromosomes.
-#
-# Format: CHROM  POS  REF  ALT
+# Discovery windows – small regions on different chromosomes to stream
+# from HG002's benchmark VCF.  Each ~50 kb window typically contains
+# 100–200 HG002 benchmark SNVs, of which a few are child-private.
 # ---------------------------------------------------------------------------
-CANDIDATE_POSITIONS=(
-    "chr1	79144396	T	C"
-    "chr2	4482351	G	A"
-    "chr3	21601448	G	C"
-    "chr4	58670824	G	A"
-    "chr5	41022783	A	G"
-    "chr6	27836914	A	G"
-    "chr7	550099	G	A"
-    "chr8	16522616	C	A"
-    "chr9	95143456	C	A"
-    "chr10	18475692	A	T"
-    "chr11	97685827	C	A"
-    "chr12	112675498	T	G"
-    "chr13	100629230	G	T"
-    "chr14	48779433	A	G"
-    "chr15	32467857	A	G"
-    "chr16	11815294	T	C"
-    "chr17	7131851	G	A"
-    "chr18	25733623	C	T"
-    "chr19	18888816	C	T"
-    "chr20	12956555	T	C"
-    "chr21	30498752	T	C"
-    "chr22	38620848	C	T"
+DISCOVERY_WINDOWS=(
+    # Round 1 – one window per chromosome
+    "chr1:5000000-5050000"
+    "chr2:10000000-10050000"
+    "chr3:15000000-15050000"
+    "chr4:20000000-20050000"
+    "chr5:25000000-25050000"
+    "chr6:30000000-30050000"
+    "chr7:35000000-35050000"
+    "chr8:40000000-40050000"
+    "chr9:45000000-45050000"
+    "chr10:50000000-50050000"
+    "chr11:55000000-55050000"
+    "chr12:60000000-60050000"
+    "chr13:40000000-40050000"
+    "chr14:50000000-50050000"
+    "chr15:35000000-35050000"
+    "chr16:20000000-20050000"
+    "chr17:25000000-25050000"
+    "chr18:30000000-30050000"
+    "chr19:15000000-15050000"
+    "chr20:10000000-10050000"
+    "chr21:20000000-20050000"
+    "chr22:25000000-25050000"
+    # Round 2 – different offsets as fallback
+    "chr1:100000000-100050000"
+    "chr2:50000000-50050000"
+    "chr3:80000000-80050000"
+    "chr4:90000000-90050000"
+    "chr5:70000000-70050000"
+    "chr6:60000000-60050000"
+    "chr7:80000000-80050000"
+    "chr8:70000000-70050000"
+    "chr9:30000000-30050000"
+    "chr10:80000000-80050000"
+    "chr11:30000000-30050000"
+    "chr12:40000000-40050000"
+    "chr13:60000000-60050000"
+    "chr14:30000000-30050000"
+    "chr15:50000000-50050000"
+    "chr16:40000000-40050000"
+    "chr17:45000000-45050000"
+    "chr18:50000000-50050000"
+    "chr19:30000000-30050000"
+    "chr20:30000000-30050000"
+    "chr21:25000000-25050000"
+    "chr22:30000000-30050000"
+    # Round 3 – further fallback at yet another offset
+    "chr1:150000000-150050000"
+    "chr2:120000000-120050000"
+    "chr3:120000000-120050000"
+    "chr4:130000000-130050000"
+    "chr5:110000000-110050000"
+    "chr6:100000000-100050000"
+    "chr7:100000000-100050000"
+    "chr8:100000000-100050000"
+    "chr9:80000000-80050000"
+    "chr10:100000000-100050000"
+    "chr11:80000000-80050000"
+    "chr12:90000000-90050000"
+    "chr13:70000000-70050000"
+    "chr14:60000000-60050000"
+    "chr15:60000000-60050000"
+    "chr16:50000000-50050000"
+    "chr17:50000000-50050000"
+    "chr18:40000000-40050000"
+    "chr19:20000000-20050000"
+    "chr20:40000000-40050000"
+    "chr21:30000000-30050000"
+    "chr22:35000000-35050000"
 )
 
 # ---------------------------------------------------------------------------
@@ -141,7 +172,7 @@ log()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2; }
 die()  { log "ERROR: $*"; exit 1; }
 
 usage() {
-    sed -n '/^# Usage/,/^# Data sources/p' "$0" | head -n -1 | sed 's/^# \?//'
+    sed -n '/^# Usage/,/^# Data sources/p' "$0" | sed '$d' | sed 's/^# \?//'
     exit 1
 }
 
@@ -152,9 +183,8 @@ check_tool() {
 # ---------------------------------------------------------------------------
 # Parse arguments
 # ---------------------------------------------------------------------------
-while getopts ":r:o:n:p:h" opt; do
+while getopts ":o:n:p:h" opt; do
     case ${opt} in
-        r) REF_FASTA="${OPTARG}" ;;
         o) OUTPUT_DIR="${OPTARG}" ;;
         n) NUM_VARIANTS="${OPTARG}" ;;
         p) PADDING="${OPTARG}" ;;
@@ -164,21 +194,25 @@ while getopts ":r:o:n:p:h" opt; do
     esac
 done
 
-[[ -n "${REF_FASTA}" ]] || die "Reference FASTA is required (-r).  See usage (-h)."
-[[ -f "${REF_FASTA}" ]] || die "Reference FASTA not found: ${REF_FASTA}"
-[[ -f "${REF_FASTA}.fai" ]] || die "Reference FASTA index not found: ${REF_FASTA}.fai"
-
 # ---------------------------------------------------------------------------
 # Preflight checks
 # ---------------------------------------------------------------------------
 check_tool samtools
 check_tool bcftools
 
-log "=== GIAB HG002 trio DNM test-data extractor ==="
-log "Reference FASTA : ${REF_FASTA}"
+log "=== GIAB HG002 trio – child-private variant test-data extractor ==="
 log "Output directory: ${OUTPUT_DIR}"
 log "Num variants    : ${NUM_VARIANTS}"
 log "Padding (bp)    : ${PADDING}"
+
+# Quick connectivity check: fetch the VCF header to confirm remote access works
+log "Checking GIAB FTP connectivity ..."
+if ! bcftools view -h "${HG002_VCF}" >/dev/null 2>&1; then
+    die "Cannot access HG002 benchmark VCF at: ${HG002_VCF}
+         Check network connectivity and that the URL is still valid.
+         Browse: https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab/release/AshkenazimTrio/HG002_NA24385_son/"
+fi
+log "  OK – remote VCF accessible"
 
 # ---------------------------------------------------------------------------
 # Set up directories
@@ -190,50 +224,69 @@ log "Working directory: ${WORK_DIR}"
 mkdir -p "${OUTPUT_DIR}"
 
 # ---------------------------------------------------------------------------
-# Step 1 – Verify DNM candidates against GIAB truth VCFs over HTTPS
+# Step 1 – Discover child-private SNVs from GIAB benchmark VCFs
 # ---------------------------------------------------------------------------
-log "Step 1: Verifying DNM candidates against GIAB v4.2.1 benchmark VCFs ..."
-log "  (querying remote VCFs via HTTPS – no bulk downloads)"
+log "Step 1: Discovering child-private SNVs from GIAB v4.2.1 benchmark VCFs ..."
+log "  (streaming small windows via HTTPS – no bulk downloads)"
+log "  Each window = 3 HTTP range requests (child + father + mother)"
 
 VERIFIED=0
 
-for entry in "${CANDIDATE_POSITIONS[@]}"; do
+for window in "${DISCOVERY_WINDOWS[@]}"; do
     [[ "${VERIFIED}" -ge "${NUM_VARIANTS}" ]] && break
 
-    chrom=$(echo "${entry}" | cut -f1)
-    pos=$(echo "${entry}" | cut -f2)
-    ref=$(echo "${entry}" | cut -f3)
-    alt=$(echo "${entry}" | cut -f4)
-    region="${chrom}:${pos}-${pos}"
+    log "  Scanning window ${window} ..."
 
-    log "  Checking ${chrom}:${pos} ${ref}>${alt} ..."
+    # Fetch all three VCFs for this window in one batch (3 HTTP requests).
+    # Extract only CHROM and POS to build position sets for comparison.
+    bcftools view -H -v snps -r "${window}" "${HG002_VCF}" 2>/dev/null \
+        > "${WORK_DIR}/hg002_window.tsv" || continue
+    bcftools view -H -v snps -r "${window}" "${HG003_VCF}" 2>/dev/null \
+        | awk -F'\t' '{print $1"\t"$2}' > "${WORK_DIR}/hg003_positions.tsv" || true
+    bcftools view -H -v snps -r "${window}" "${HG004_VCF}" 2>/dev/null \
+        | awk -F'\t' '{print $1"\t"$2}' > "${WORK_DIR}/hg004_positions.tsv" || true
 
-    # Verify variant is in HG002 benchmark VCF
-    in_child=$(bcftools view -H -r "${region}" "${HG002_VCF}" 2>/dev/null | wc -l)
-    if [[ "${in_child}" -eq 0 ]]; then
-        log "    SKIP – not in HG002 benchmark VCF"
+    num_child=$(wc -l < "${WORK_DIR}/hg002_window.tsv" | tr -d ' ')
+    num_father=$(wc -l < "${WORK_DIR}/hg003_positions.tsv" | tr -d ' ')
+    num_mother=$(wc -l < "${WORK_DIR}/hg004_positions.tsv" | tr -d ' ')
+    log "    HG002: ${num_child} SNVs, HG003: ${num_father}, HG004: ${num_mother}"
+
+    if [[ "${num_child}" -eq 0 ]]; then
         continue
     fi
 
-    # Verify variant is absent from both parents
-    in_father=$(bcftools view -H -r "${region}" "${HG003_VCF}" 2>/dev/null | wc -l)
-    in_mother=$(bcftools view -H -r "${region}" "${HG004_VCF}" 2>/dev/null | wc -l)
-    if [[ "${in_father}" -gt 0 || "${in_mother}" -gt 0 ]]; then
-        log "    SKIP – present in parent(s) (father=${in_father}, mother=${in_mother})"
-        continue
-    fi
+    # Find child-private SNVs: in HG002 but not in either parent.
+    # Compare locally – no additional HTTP requests needed.
+    while IFS=$'\t' read -r chrom pos _ ref alt _rest; do
+        [[ "${VERIFIED}" -ge "${NUM_VARIANTS}" ]] && break
 
-    log "    VERIFIED – child-only variant"
-    printf "%s\t%s\t%s\t%s\n" "${chrom}" "${pos}" "${ref}" "${alt}" \
-        >> "${WORK_DIR}/dnm_verified.tsv"
-    VERIFIED=$((VERIFIED + 1))
+        # Only consider biallelic SNVs (single base ref and alt)
+        [[ ${#ref} -ne 1 || ${#alt} -ne 1 ]] && continue
+        # Skip multi-allelic
+        [[ "${alt}" == *","* ]] && continue
+
+        # Check if this position exists in either parent (local grep)
+        if grep -q "^${chrom}	${pos}$" "${WORK_DIR}/hg003_positions.tsv" 2>/dev/null; then
+            continue
+        fi
+        if grep -q "^${chrom}	${pos}$" "${WORK_DIR}/hg004_positions.tsv" 2>/dev/null; then
+            continue
+        fi
+
+        log "    FOUND child-private SNV: ${chrom}:${pos} ${ref}>${alt}"
+        printf "%s\t%s\t%s\t%s\n" "${chrom}" "${pos}" "${ref}" "${alt}" \
+            >> "${WORK_DIR}/dnm_verified.tsv"
+        VERIFIED=$((VERIFIED + 1))
+    done < "${WORK_DIR}/hg002_window.tsv"
+
+    log "    ${VERIFIED}/${NUM_VARIANTS} candidates found so far"
 done
 
 if [[ "${VERIFIED}" -eq 0 ]]; then
-    die "No DNM candidates could be verified. Check network connectivity."
+    die "No child-private SNVs found. Check network connectivity to GIAB FTP."
 fi
 
-log "  Verified ${VERIFIED} DNM candidates"
+log "  Discovered ${VERIFIED} child-private SNVs"
 
 # ---------------------------------------------------------------------------
 # Step 2 – Create extraction regions (±PADDING around each candidate)
@@ -258,20 +311,7 @@ done < "${WORK_DIR}/regions.bed"
 REGIONS=$(awk 'BEGIN{OFS=""} {printf "%s%s:%d-%d", (NR>1 ? " " : ""), $1, $2+1, $3}' "${WORK_DIR}/regions.bed")
 
 # ---------------------------------------------------------------------------
-# Step 3 – Extract reference FASTA for selected regions
-# ---------------------------------------------------------------------------
-log "Step 3: Extracting reference FASTA for selected regions ..."
-
-REGION_LIST=$(awk '{printf "%s:%d-%d\n", $1, $2+1, $3}' "${WORK_DIR}/regions.bed")
-while read -r reg; do
-    samtools faidx "${REF_FASTA}" "${reg}"
-done <<< "${REGION_LIST}" > "${OUTPUT_DIR}/reference.fa"
-
-samtools faidx "${OUTPUT_DIR}/reference.fa"
-log "  Reference: ${OUTPUT_DIR}/reference.fa"
-
-# ---------------------------------------------------------------------------
-# Step 4 – Extract BAM regions for each trio member (via HTTPS)
+# Step 3 – Extract BAM regions for each trio member (via HTTPS)
 # ---------------------------------------------------------------------------
 extract_bam_regions() {
     local url="$1" label="$2" outbam="$3"
@@ -288,42 +328,50 @@ extract_bam_regions() {
     log "    ${count} reads -> ${outbam}"
 }
 
-log "Step 4: Extracting BAM regions from GIAB Illumina 2x250bp WGS (HTTPS) ..."
+log "Step 3: Extracting BAM regions from GIAB Illumina 2x250bp WGS (HTTPS) ..."
 extract_bam_regions "${HG002_BAM}" "HG002_child"  "${OUTPUT_DIR}/HG002_child.bam"
 extract_bam_regions "${HG003_BAM}" "HG003_father" "${OUTPUT_DIR}/HG003_father.bam"
 extract_bam_regions "${HG004_BAM}" "HG004_mother" "${OUTPUT_DIR}/HG004_mother.bam"
 
 # ---------------------------------------------------------------------------
-# Step 5 – Create candidate VCF with verified DNMs
+# Step 4 – Create candidate VCF with verified DNMs
 # ---------------------------------------------------------------------------
-log "Step 5: Creating candidate VCF ..."
+log "Step 4: Creating candidate VCF ..."
+
+# Sort candidates by chromosome (natural/version sort) then position
+sort -k1,1V -k2,2n "${WORK_DIR}/dnm_verified.tsv" > "${WORK_DIR}/dnm_sorted.tsv"
 
 {
     echo "##fileformat=VCFv4.2"
     echo "##source=download_giab_dnm_testdata.sh"
     echo "##reference=GRCh38"
     echo "##INFO=<ID=ORIGIN,Number=1,Type=String,Description=\"Variant origin\">"
-    awk '{printf "##contig=<ID=%s>\n", $1}' "${WORK_DIR}/dnm_verified.tsv" | sort -u
+    awk '{printf "##contig=<ID=%s>\n", $1}' "${WORK_DIR}/dnm_sorted.tsv" | sort -u
     echo -e "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO"
     awk 'BEGIN{OFS="\t"} {
-        print $1, $2, ".", $3, $4, ".", "PASS", "ORIGIN=GIAB_mosaic_benchmark_denovo"
-    }' "${WORK_DIR}/dnm_verified.tsv"
+        print $1, $2, ".", $3, $4, ".", "PASS", "ORIGIN=GIAB_child_private_SNV"
+    }' "${WORK_DIR}/dnm_sorted.tsv"
 } > "${WORK_DIR}/candidates.vcf"
 
-bgzip -c "${WORK_DIR}/candidates.vcf" > "${OUTPUT_DIR}/candidates.vcf.gz"
+bcftools sort "${WORK_DIR}/candidates.vcf" -Oz -o "${OUTPUT_DIR}/candidates.vcf.gz"
 bcftools index -t "${OUTPUT_DIR}/candidates.vcf.gz"
 log "  Candidates VCF: ${OUTPUT_DIR}/candidates.vcf.gz"
 
 # ---------------------------------------------------------------------------
-# Step 6 – Write manifest
+# Step 5 – Write manifest
 # ---------------------------------------------------------------------------
-log "Step 6: Writing manifest ..."
+log "Step 5: Writing manifest ..."
 
 cat > "${OUTPUT_DIR}/README.md" << 'MANIFEST_EOF'
-# GIAB HG002 Trio – De Novo Mutation Test Data
+# GIAB HG002 Trio – Child-Private Variant Test Data
 
-Small BAM slices around known de novo mutations (DNMs) from the GIAB
-Ashkenazi trio, for integration testing of `kmer_denovo_filter`.
+Small BAM slices around child-private SNVs from the GIAB Ashkenazi trio,
+for integration testing of `kmer_denovo_filter`.
+
+Child-private variants are SNVs present in the HG002 (child) GIAB v4.2.1
+benchmark VCF but absent from both HG003 (father) and HG004 (mother)
+benchmark VCFs.  These serve as realistic candidates for testing de novo
+mutation filtering workflows.
 
 ## Samples
 
@@ -337,19 +385,17 @@ Ashkenazi trio, for integration testing of `kmer_denovo_filter`.
 
 - **BAMs**: NIST Illumina 2×250 bp WGS, aligned with novoalign to GRCh38
   (queried via HTTPS random access – never downloaded in full)
-- **DNM positions**: Curated from usnistgov/giab-HG002-mosaic-benchmark
-  (Strelka2 somatic caller, IGV-curated candidate SNVs)
-- **Verification**: Each position verified against GIAB v4.2.1 benchmark VCFs
-  over HTTPS (present in HG002, absent from HG003 and HG004)
-- **Reference**: GCA_000001405.15 GRCh38 no-alt analysis set
+- **Variant discovery**: SNVs streamed from HG002 GIAB v4.2.1 benchmark VCF
+  across small chromosomal windows, filtered for absence in both parents
+- **Verification**: Each position verified against HG003 and HG004 GIAB
+  v4.2.1 benchmark VCFs over HTTPS
 
 ## Files
 
-- `HG002_child.bam` / `.bai` – Child reads around DNM sites
-- `HG003_father.bam` / `.bai` – Father reads around DNM sites
-- `HG004_mother.bam` / `.bai` – Mother reads around DNM sites
-- `reference.fa` / `.fai` – Reference FASTA (selected regions only)
-- `candidates.vcf.gz` / `.tbi` – VCF with verified DNM variants
+- `HG002_child.bam` / `.bai` – Child reads around variant sites
+- `HG003_father.bam` / `.bai` – Father reads around variant sites
+- `HG004_mother.bam` / `.bai` – Mother reads around variant sites
+- `candidates.vcf.gz` / `.tbi` – VCF with child-private SNVs
 
 ## Usage with kmer-denovo
 
@@ -358,7 +404,6 @@ kmer-denovo \
     --child   tests/data/giab/HG002_child.bam   \
     --father  tests/data/giab/HG003_father.bam  \
     --mother  tests/data/giab/HG004_mother.bam  \
-    --ref-fasta tests/data/giab/reference.fa     \
     --vcf     tests/data/giab/candidates.vcf.gz  \
     --output  output.vcf
 ```
