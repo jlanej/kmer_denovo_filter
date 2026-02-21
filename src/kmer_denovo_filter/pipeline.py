@@ -207,6 +207,56 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations):
     vcf_in.close()
 
 
+def _write_informative_reads(
+    child_bam, ref_fasta, informative_reads_by_variant, output_bam,
+):
+    """Write child reads carrying informative k-mers to a BAM file.
+
+    Each output read is tagged with ``DV`` (the variant key it supports).
+    Reads are sorted and indexed for IGV visualization.
+
+    Args:
+        child_bam: Path to the child BAM file.
+        ref_fasta: Path to the reference FASTA.
+        informative_reads_by_variant: dict mapping variant key
+            (chrom:pos) to a set of read names.
+        output_bam: Path for the output BAM file.
+    """
+    bam_in = pysam.AlignmentFile(child_bam, reference_filename=ref_fasta)
+
+    unsorted_path = output_bam + ".unsorted.bam"
+    bam_out = pysam.AlignmentFile(unsorted_path, "wb", header=bam_in.header)
+
+    # Invert: read_name -> set of variant keys
+    read_to_variants = {}
+    for var_key, read_names in informative_reads_by_variant.items():
+        for rname in read_names:
+            read_to_variants.setdefault(rname, set()).add(var_key)
+
+    # Collect unique regions to fetch
+    regions = set()
+    for var_key in informative_reads_by_variant:
+        chrom, pos_str = var_key.rsplit(":", 1)
+        pos = int(pos_str)
+        regions.add((chrom, pos))
+
+    written = set()
+    for chrom, pos in sorted(regions):
+        for read in bam_in.fetch(chrom, pos, pos + 1):
+            if read.query_name in read_to_variants and read.query_name not in written:
+                var_keys = sorted(read_to_variants[read.query_name])
+                read.set_tag("DV", ",".join(var_keys), value_type="Z")
+                bam_out.write(read)
+                written.add(read.query_name)
+
+    bam_out.close()
+    bam_in.close()
+
+    pysam.sort("-o", output_bam, unsorted_path)
+    pysam.index(output_bam)
+    os.remove(unsorted_path)
+
+
 def run_pipeline(args):
     """Run the de novo k-mer analysis pipeline."""
     logging.basicConfig(
@@ -273,17 +323,24 @@ def run_pipeline(args):
 
     # 4. Count proband-unique reads per variant
     annotations = {}
+    informative_reads_by_variant = {}
     for var in variants:
         var_key = f"{var['chrom']}:{var['pos']}"
         read_kmers_list = variant_read_kmers.get(var_key, [])
 
         dkt = len(read_kmers_list)
         dku = 0
-        for _read_name, kmers in read_kmers_list:
+        informative_names = set()
+        for read_name, kmers in read_kmers_list:
+            # A read is informative if it has at least one variant-spanning
+            # k-mer that is absent from both parents.
             if kmers - parent_found_kmers:
                 dku += 1
+                informative_names.add(read_name)
 
         annotations[var_key] = {"dku": dku, "dkt": dkt}
+        if informative_names:
+            informative_reads_by_variant[var_key] = informative_names
 
         if args.debug_kmers:
             logger.info("Variant %s: DKU=%d DKT=%d", var_key, dku, dkt)
@@ -292,7 +349,25 @@ def run_pipeline(args):
     logger.info("Writing annotated VCF: %s", args.output)
     _write_annotated_vcf(args.vcf, args.output, annotations)
 
-    # 6. Write metrics
+    # 6. Write informative reads BAM
+    if args.informative_reads:
+        logger.info(
+            "Writing informative reads BAM: %s", args.informative_reads,
+        )
+        _write_informative_reads(
+            args.child, args.ref_fasta,
+            informative_reads_by_variant, args.informative_reads,
+        )
+        total_reads = sum(
+            len(names)
+            for names in informative_reads_by_variant.values()
+        )
+        logger.info(
+            "Wrote %d informative reads across %d variants",
+            total_reads, len(informative_reads_by_variant),
+        )
+
+    # 7. Write metrics
     if args.metrics:
         metrics = {
             "total_variants": len(variants),

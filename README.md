@@ -61,10 +61,12 @@ kmer-denovo \
 | `--ref-fasta` / `-r` | *required* | Reference FASTA with `.fai` index |
 | `--vcf` | *required* | Input VCF with candidate variants |
 | `--output` / `-o` | *required* | Output annotated VCF |
+| `--informative-reads` | – | Output BAM with reads carrying informative k-mers (for IGV) |
 | `--metrics` | – | Output summary metrics JSON file |
 | `--kmer-size` / `-k` | 31 | K-mer size |
 | `--min-baseq` | 20 | Minimum base quality for read k-mers |
 | `--min-mapq` | 20 | Minimum mapping quality for child reads |
+| `--threads` / `-t` | 4 | Number of threads for jellyfish |
 | `--debug-kmers` | false | Enable per-variant debug output |
 
 ### Output
@@ -78,6 +80,11 @@ The output VCF contains two additional INFO fields:
 The optional `--metrics` JSON file provides a summary including total
 variants, child-unique k-mer counts, and the number of variants with unique
 reads.
+
+The optional `--informative-reads` BAM file contains child reads that carry
+at least one variant-spanning k-mer absent from both parents. Each read is
+tagged with `DV` indicating which variant(s) it supports. The BAM is sorted
+and indexed for direct visualization in IGV.
 
 ## Testing
 

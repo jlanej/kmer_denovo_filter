@@ -123,6 +123,7 @@ class TestPipelineIntegration:
 
         out_vcf = os.path.join(tmpdir, "output.vcf")
         metrics_json = os.path.join(tmpdir, "metrics.json")
+        info_bam = os.path.join(tmpdir, "informative.bam")
 
         args = parse_args([
             "--child", child_bam,
@@ -133,6 +134,7 @@ class TestPipelineIntegration:
             "--output", out_vcf,
             "--metrics", metrics_json,
             "--kmer-size", "5",
+            "--informative-reads", info_bam,
         ])
         run_pipeline(args)
 
@@ -150,6 +152,18 @@ class TestPipelineIntegration:
             metrics = json.load(fh)
         assert metrics["total_variants"] == 1
         assert metrics["child_unique_kmers"] > 0
+
+        # Check informative reads BAM
+        assert os.path.exists(info_bam)
+        assert os.path.exists(info_bam + ".bai")
+        bam_info = pysam.AlignmentFile(info_bam)
+        info_reads = list(bam_info)
+        assert len(info_reads) >= 1
+        # Each read should have a DV tag
+        for read in info_reads:
+            assert read.has_tag("DV")
+            assert read.query_name == "read1"
+        bam_info.close()
 
     def test_inherited_variant_no_unique(self, tmpdir):
         """When the variant is also in a parent, DKU should be 0."""
@@ -185,6 +199,7 @@ class TestPipelineIntegration:
         _create_vcf(in_vcf, chrom, [(51, ref_seq[50], alt_base)])
 
         out_vcf = os.path.join(tmpdir, "output.vcf")
+        info_bam = os.path.join(tmpdir, "informative.bam")
 
         args = parse_args([
             "--child", child_bam,
@@ -194,6 +209,7 @@ class TestPipelineIntegration:
             "--vcf", in_vcf,
             "--output", out_vcf,
             "--kmer-size", "5",
+            "--informative-reads", info_bam,
         ])
         run_pipeline(args)
 
@@ -202,6 +218,12 @@ class TestPipelineIntegration:
         assert len(records) == 1
         assert records[0].info["DKU"] == 0
         vcf_out.close()
+
+        # No informative reads for inherited variant
+        bam_info = pysam.AlignmentFile(info_bam)
+        info_reads = list(bam_info)
+        assert len(info_reads) == 0
+        bam_info.close()
 
     def test_empty_vcf(self, tmpdir):
         """Pipeline should handle an empty VCF without error."""

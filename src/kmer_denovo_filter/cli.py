@@ -46,6 +46,11 @@ def parse_args(argv=None):
         help="Minimum mapping quality for child reads (default: 20)",
     )
     parser.add_argument(
+        "--informative-reads", default=None,
+        help="Output BAM with reads carrying informative (child-unique) "
+             "k-mers for IGV visualization",
+    )
+    parser.add_argument(
         "--threads", "-t", type=int, default=4,
         help="Number of threads for jellyfish (default: 4)",
     )

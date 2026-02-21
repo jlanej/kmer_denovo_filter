@@ -32,6 +32,7 @@ class TestParseArgs:
         assert args.threads == 4
         assert args.debug_kmers is False
         assert args.metrics is None
+        assert args.informative_reads is None
 
     def test_custom_kmer_size(self):
         args = parse_args(self.REQUIRED_ARGS + ["--kmer-size", "25"])
@@ -73,6 +74,12 @@ class TestParseArgs:
     def test_short_threads(self):
         args = parse_args(self.REQUIRED_ARGS + ["-t", "2"])
         assert args.threads == 2
+
+    def test_informative_reads(self):
+        args = parse_args(
+            self.REQUIRED_ARGS + ["--informative-reads", "info.bam"]
+        )
+        assert args.informative_reads == "info.bam"
 
     def test_missing_required(self):
         with pytest.raises(SystemExit):
