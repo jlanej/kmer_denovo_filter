@@ -42,10 +42,10 @@ def extract_variant_spanning_kmers(
     Returns:
         Set of canonical k-mer strings spanning the variant position.
     """
-    aligned_pairs = read.get_aligned_pairs()
+    aligned_pairs = read.get_aligned_pairs(matches_only=True)
     read_pos_at_variant = None
     for qpos, rpos in aligned_pairs:
-        if rpos == variant_pos and qpos is not None:
+        if rpos == variant_pos:
             read_pos_at_variant = qpos
             break
 
