@@ -41,6 +41,9 @@ def _collect_child_kmers(
     for var in variants:
         chrom = var["chrom"]
         pos = var["pos"]  # 0-based
+        ref = var["ref"]
+        alts = var["alts"]
+        alt = alts[0] if alts else None
         var_key = f"{chrom}:{pos}"
         read_kmers = []
 
@@ -53,7 +56,7 @@ def _collect_child_kmers(
                 continue
 
             kmers = extract_variant_spanning_kmers(
-                read, pos, kmer_size, min_baseq,
+                read, pos, kmer_size, min_baseq, ref=ref, alt=alt,
             )
             if kmers:
                 read_kmers.append((read.query_name, kmers))
@@ -158,7 +161,7 @@ def _parse_vcf_variants(vcf_path):
     for rec in vcf:
         variants.append({
             "chrom": rec.chrom,
-            "pos": rec.pos,
+            "pos": rec.start,  # 0-based
             "ref": rec.ref,
             "alts": rec.alts,
             "id": rec.id,
@@ -196,7 +199,7 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations):
     vcf_out = pysam.VariantFile(output_vcf, "w", header=vcf_in.header)
 
     for rec in vcf_in:
-        var_key = f"{rec.chrom}:{rec.pos}"
+        var_key = f"{rec.chrom}:{rec.start}"
         if var_key in annotations:
             ann = annotations[var_key]
             rec.info["DKU"] = ann["dku"]

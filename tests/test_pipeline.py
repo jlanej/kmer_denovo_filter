@@ -33,13 +33,17 @@ def _create_ref_fasta(path, chrom="chr1", length=200):
 def _create_bam(path, ref_fasta, chrom, reads):
     """Create a BAM file from a list of (name, pos, seq, quals) tuples.
 
-    ``pos`` is 0-based.
+    ``pos`` is 0-based.  An optional fifth element may supply a CIGAR
+    tuple list; otherwise a simple all-M alignment is used.
     """
     header = pysam.AlignmentHeader.from_references(
         [chrom], [300],
     )
     with pysam.AlignmentFile(path, "wb", header=header) as bam:
-        for name, pos, seq, quals in reads:
+        for entry in reads:
+            name, pos, seq = entry[0], entry[1], entry[2]
+            quals = entry[3] if len(entry) > 3 else None
+            cigar = entry[4] if len(entry) > 4 else [(0, len(seq))]
             seg = pysam.AlignedSegment()
             seg.query_name = name
             seg.query_sequence = seq
@@ -47,7 +51,7 @@ def _create_bam(path, ref_fasta, chrom, reads):
             seg.reference_id = 0
             seg.reference_start = pos
             seg.mapping_quality = 60
-            seg.cigar = [(0, len(seq))]  # all M
+            seg.cigar = cigar
             if quals is not None:
                 seg.query_qualities = pysam.qualitystring_to_array(quals)
             else:
@@ -253,4 +257,125 @@ class TestPipelineIntegration:
         vcf_out = pysam.VariantFile(out_vcf)
         records = list(vcf_out)
         assert len(records) == 0
+        vcf_out.close()
+
+    def test_deletion_variant_detected(self, tmpdir):
+        """A de novo deletion should yield DKU > 0."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        # Deletion: remove 2 bases at 0-based positions 51-52
+        # VCF anchor at 1-based pos 51 (0-based 50)
+        anchor_0 = 50
+        del_len = 2
+
+        # Child read: ref_seq[40:51] + ref_seq[53:80] with a 2-base deletion
+        child_seq = ref_seq[40:anchor_0 + 1] + ref_seq[anchor_0 + 1 + del_len:80]
+        left_match = anchor_0 + 1 - 40   # 11
+        right_match = 80 - (anchor_0 + 1 + del_len)  # 27
+        child_cigar = [(0, left_match), (2, del_len), (0, right_match)]
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [("read1", 40, child_seq, None, child_cigar)],
+        )
+
+        # Parents match reference (no deletion)
+        parent_seq = ref_seq[40:80]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(
+            mother_bam, ref_fa, chrom,
+            [("mread1", 40, parent_seq, None)],
+        )
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(
+            father_bam, ref_fa, chrom,
+            [("fread1", 40, parent_seq, None)],
+        )
+
+        ref_allele = ref_seq[anchor_0:anchor_0 + 1 + del_len]
+        alt_allele = ref_seq[anchor_0]
+        in_vcf = os.path.join(tmpdir, "input.vcf")
+        _create_vcf(in_vcf, chrom, [(anchor_0 + 1, ref_allele, alt_allele)])
+
+        out_vcf = os.path.join(tmpdir, "output.vcf")
+        args = parse_args([
+            "--child", child_bam,
+            "--mother", mother_bam,
+            "--father", father_bam,
+            "--ref-fasta", ref_fa,
+            "--vcf", in_vcf,
+            "--output", out_vcf,
+            "--kmer-size", "5",
+        ])
+        run_pipeline(args)
+
+        vcf_out = pysam.VariantFile(out_vcf)
+        records = list(vcf_out)
+        assert len(records) == 1
+        assert "DKU" in records[0].info
+        assert records[0].info["DKU"] > 0, "Deletion should produce DKU > 0"
+        vcf_out.close()
+
+    def test_insertion_variant_detected(self, tmpdir):
+        """A de novo insertion should yield DKU > 0."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        # Insertion: insert 3 bases after 0-based position 50
+        anchor_0 = 50
+        ins_bases = "GCA"
+
+        # Child read: ref_seq[40:51] + "GCA" + ref_seq[51:80]
+        child_seq = ref_seq[40:anchor_0 + 1] + ins_bases + ref_seq[anchor_0 + 1:80]
+        left_match = anchor_0 + 1 - 40   # 11
+        right_match = 80 - (anchor_0 + 1)  # 29
+        child_cigar = [
+            (0, left_match), (1, len(ins_bases)), (0, right_match),
+        ]
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [("read1", 40, child_seq, None, child_cigar)],
+        )
+
+        # Parents match reference (no insertion)
+        parent_seq = ref_seq[40:80]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(
+            mother_bam, ref_fa, chrom,
+            [("mread1", 40, parent_seq, None)],
+        )
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(
+            father_bam, ref_fa, chrom,
+            [("fread1", 40, parent_seq, None)],
+        )
+
+        ref_allele = ref_seq[anchor_0]
+        alt_allele = ref_seq[anchor_0] + ins_bases
+        in_vcf = os.path.join(tmpdir, "input.vcf")
+        _create_vcf(in_vcf, chrom, [(anchor_0 + 1, ref_allele, alt_allele)])
+
+        out_vcf = os.path.join(tmpdir, "output.vcf")
+        args = parse_args([
+            "--child", child_bam,
+            "--mother", mother_bam,
+            "--father", father_bam,
+            "--ref-fasta", ref_fa,
+            "--vcf", in_vcf,
+            "--output", out_vcf,
+            "--kmer-size", "5",
+        ])
+        run_pipeline(args)
+
+        vcf_out = pysam.VariantFile(out_vcf)
+        records = list(vcf_out)
+        assert len(records) == 1
+        assert "DKU" in records[0].info
+        assert records[0].info["DKU"] > 0, "Insertion should produce DKU > 0"
         vcf_out.close()
