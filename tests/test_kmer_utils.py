@@ -1,6 +1,7 @@
 """Tests for k-mer utility functions."""
 
 from kmer_denovo_filter.kmer_utils import (
+    _is_symbolic,
     canonicalize,
     extract_variant_spanning_kmers,
     reverse_complement,
@@ -180,3 +181,86 @@ class TestExtractVariantSpanningKmers:
         # No ref/alt → falls back to alt_len=1 (old behaviour)
         kmers = extract_variant_spanning_kmers(read, 103, 4, min_baseq=0)
         assert len(kmers) == 4  # only k k-mers
+
+    def test_symbolic_del_treated_as_snp(self):
+        """Symbolic <DEL> allele should not crash; treated like a SNP."""
+        seq = "ACGTACGT"
+        pairs = [(i, 100 + i) for i in range(8)]
+        read = self.MockRead(seq, pairs)
+
+        kmers = extract_variant_spanning_kmers(
+            read, 102, 4, min_baseq=0, ref="A", alt="<DEL>",
+        )
+        # alt_len defaults to 1 for symbolic alleles → same as SNP
+        assert len(kmers) == 3
+
+    def test_symbolic_ins_treated_as_snp(self):
+        """Symbolic <INS> allele should not crash; treated like a SNP."""
+        seq = "ACGTACGT"
+        pairs = [(i, 100 + i) for i in range(8)]
+        read = self.MockRead(seq, pairs)
+
+        kmers = extract_variant_spanning_kmers(
+            read, 102, 4, min_baseq=0, ref="A", alt="<INS>",
+        )
+        assert len(kmers) == 3
+
+    def test_star_allele_treated_as_snp(self):
+        """Star (*) allele should not crash; treated like a SNP."""
+        seq = "ACGTACGT"
+        pairs = [(i, 100 + i) for i in range(8)]
+        read = self.MockRead(seq, pairs)
+
+        kmers = extract_variant_spanning_kmers(
+            read, 102, 4, min_baseq=0, ref="A", alt="*",
+        )
+        assert len(kmers) == 3
+
+    def test_breakend_allele_treated_as_snp(self):
+        """Breakend notation should not crash; treated like a SNP."""
+        seq = "ACGTACGT"
+        pairs = [(i, 100 + i) for i in range(8)]
+        read = self.MockRead(seq, pairs)
+
+        kmers = extract_variant_spanning_kmers(
+            read, 102, 4, min_baseq=0, ref="A", alt="A]chr2:100]",
+        )
+        assert len(kmers) == 3
+
+
+class TestIsSymbolic:
+    def test_symbolic_del(self):
+        assert _is_symbolic("<DEL>") is True
+
+    def test_symbolic_ins(self):
+        assert _is_symbolic("<INS>") is True
+
+    def test_symbolic_dup(self):
+        assert _is_symbolic("<DUP>") is True
+
+    def test_symbolic_inv(self):
+        assert _is_symbolic("<INV>") is True
+
+    def test_symbolic_cnv(self):
+        assert _is_symbolic("<CNV>") is True
+
+    def test_star_allele(self):
+        assert _is_symbolic("*") is True
+
+    def test_breakend_right(self):
+        assert _is_symbolic("A]chr2:100]") is True
+
+    def test_breakend_left(self):
+        assert _is_symbolic("[chr2:100[A") is True
+
+    def test_normal_snp(self):
+        assert _is_symbolic("A") is False
+
+    def test_normal_insertion(self):
+        assert _is_symbolic("ACGT") is False
+
+    def test_none(self):
+        assert _is_symbolic(None) is True
+
+    def test_empty_string(self):
+        assert _is_symbolic("") is True

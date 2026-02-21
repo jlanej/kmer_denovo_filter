@@ -11,6 +11,7 @@ import tempfile
 import pysam
 
 from kmer_denovo_filter.kmer_utils import (
+    _is_symbolic,
     canonicalize,
     extract_variant_spanning_kmers,
 )
@@ -45,6 +46,13 @@ def _collect_child_kmers(
         alts = var["alts"]
         alt = alts[0] if alts else None
         var_key = f"{chrom}:{pos}"
+        if alt is not None and _is_symbolic(alt):
+            logger.debug(
+                "Skipping variant %s:%d with symbolic allele %s",
+                chrom, pos, alt,
+            )
+            variant_read_kmers[var_key] = []
+            continue
         read_kmers = []
 
         for read in bam.fetch(chrom, pos, pos + 1):
