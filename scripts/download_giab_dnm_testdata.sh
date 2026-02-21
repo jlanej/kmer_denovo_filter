@@ -276,6 +276,9 @@ for window in "${DISCOVERY_WINDOWS[@]}"; do
         log "    FOUND child-private SNV: ${chrom}:${pos} ${ref}>${alt}"
         printf "%s\t%s\t%s\t%s\n" "${chrom}" "${pos}" "${ref}" "${alt}" \
             >> "${WORK_DIR}/dnm_verified.tsv"
+        # Save the full VCF line for later extraction
+        grep "^${chrom}	${pos}	" "${WORK_DIR}/hg002_window.tsv" | head -1 \
+            >> "${WORK_DIR}/dnm_vcflines.tsv"
         VERIFIED=$((VERIFIED + 1))
     done < "${WORK_DIR}/hg002_window.tsv"
 
@@ -334,28 +337,31 @@ extract_bam_regions "${HG003_BAM}" "HG003_father" "${OUTPUT_DIR}/HG003_father.ba
 extract_bam_regions "${HG004_BAM}" "HG004_mother" "${OUTPUT_DIR}/HG004_mother.bam"
 
 # ---------------------------------------------------------------------------
-# Step 4 – Create candidate VCF with verified DNMs
+# Step 4 – Create candidate VCF from GIAB benchmark records
 # ---------------------------------------------------------------------------
 log "Step 4: Creating candidate VCF ..."
 
-# Sort candidates by chromosome (natural/version sort) then position
-sort -k1,1V -k2,2n "${WORK_DIR}/dnm_verified.tsv" > "${WORK_DIR}/dnm_sorted.tsv"
+# Grab the full VCF header from HG002's benchmark VCF (includes FORMAT
+# definitions, contig lines, FILTER, INFO, and the sample column).
+bcftools view -h "${HG002_VCF}" 2>/dev/null > "${WORK_DIR}/giab_header.txt" \
+    || die "Failed to fetch HG002 VCF header"
 
+# Sort the saved full-record lines by chromosome + position
+sort -k1,1V -k2,2n "${WORK_DIR}/dnm_vcflines.tsv" > "${WORK_DIR}/dnm_vcflines_sorted.tsv"
+
+# Combine GIAB header + sorted records into a valid VCF
 {
-    echo "##fileformat=VCFv4.2"
-    echo "##source=download_giab_dnm_testdata.sh"
-    echo "##reference=GRCh38"
-    echo "##INFO=<ID=ORIGIN,Number=1,Type=String,Description=\"Variant origin\">"
-    awk '{printf "##contig=<ID=%s>\n", $1}' "${WORK_DIR}/dnm_sorted.tsv" | sort -u
-    echo -e "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO"
-    awk 'BEGIN{OFS="\t"} {
-        print $1, $2, ".", $3, $4, ".", "PASS", "ORIGIN=GIAB_child_private_SNV"
-    }' "${WORK_DIR}/dnm_sorted.tsv"
+    cat "${WORK_DIR}/giab_header.txt"
+    cat "${WORK_DIR}/dnm_vcflines_sorted.tsv"
 } > "${WORK_DIR}/candidates.vcf"
 
 bcftools sort "${WORK_DIR}/candidates.vcf" -Oz -o "${OUTPUT_DIR}/candidates.vcf.gz"
 bcftools index -t "${OUTPUT_DIR}/candidates.vcf.gz"
 log "  Candidates VCF: ${OUTPUT_DIR}/candidates.vcf.gz"
+
+# Log the sample name from the VCF
+SAMPLE_NAME=$(bcftools query -l "${OUTPUT_DIR}/candidates.vcf.gz" | head -1)
+log "  Sample: ${SAMPLE_NAME}"
 
 # ---------------------------------------------------------------------------
 # Step 5 – Write manifest
