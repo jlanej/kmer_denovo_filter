@@ -12,7 +12,11 @@ from kmer_denovo_filter.pipeline import run_pipeline
 
 
 def _create_ref_fasta(path, chrom="chr1", length=200):
-    """Create a small reference FASTA with non-repetitive sequence."""
+    """Create a small reference FASTA with non-repetitive sequence.
+
+    Uses MD5 solely to produce a deterministic pseudo-random base sequence
+    for test data (not for any cryptographic purpose).
+    """
     import hashlib
     seq = []
     bases = "ACGT"
