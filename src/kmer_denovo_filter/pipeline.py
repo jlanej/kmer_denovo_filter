@@ -83,7 +83,7 @@ def _write_kmer_fasta(kmers, filepath):
 
 
 def _scan_parent_jellyfish(
-    parent_bam, ref_fasta, kmer_fasta, kmer_size, parent_dir,
+    parent_bam, ref_fasta, kmer_fasta, kmer_size, parent_dir, threads=4,
 ):
     """Scan a parent BAM and find which child k-mers are present.
 
@@ -96,7 +96,7 @@ def _scan_parent_jellyfish(
     os.makedirs(parent_dir, exist_ok=True)
     jf_output = os.path.join(parent_dir, "parent.jf")
 
-    samtools_cmd = ["samtools", "fasta", "-@", "2", parent_bam]
+    samtools_cmd = ["samtools", "fasta", "-F", "0x400", "-@", "2", parent_bam]
     if ref_fasta:
         samtools_cmd.extend(["--reference", ref_fasta])
 
@@ -104,7 +104,7 @@ def _scan_parent_jellyfish(
         "jellyfish", "count",
         "-m", str(kmer_size),
         "-s", "10M",
-        "-t", "4",
+        "-t", str(threads),
         "-C",
         "--if", kmer_fasta,
         "-o", jf_output,
@@ -251,7 +251,7 @@ def run_pipeline(args):
         logger.info("Scanning mother BAM: %s", args.mother)
         mother_kmers = _scan_parent_jellyfish(
             args.mother, args.ref_fasta, kmer_fasta, args.kmer_size,
-            os.path.join(tmpdir, "mother"),
+            os.path.join(tmpdir, "mother"), args.threads,
         )
         parent_found_kmers.update(mother_kmers)
         logger.info("Found %d child k-mers in mother", len(mother_kmers))
@@ -260,7 +260,7 @@ def run_pipeline(args):
         logger.info("Scanning father BAM: %s", args.father)
         father_kmers = _scan_parent_jellyfish(
             args.father, args.ref_fasta, kmer_fasta, args.kmer_size,
-            os.path.join(tmpdir, "father"),
+            os.path.join(tmpdir, "father"), args.threads,
         )
         parent_found_kmers.update(father_kmers)
         logger.info("Found %d child k-mers in father", len(father_kmers))

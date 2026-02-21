@@ -46,6 +46,10 @@ def parse_args(argv=None):
         help="Minimum mapping quality for child reads (default: 20)",
     )
     parser.add_argument(
+        "--threads", "-t", type=int, default=4,
+        help="Number of threads for jellyfish (default: 4)",
+    )
+    parser.add_argument(
         "--debug-kmers", action="store_true", default=False,
         help="Enable per-variant debug output",
     )

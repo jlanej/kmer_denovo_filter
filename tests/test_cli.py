@@ -29,6 +29,7 @@ class TestParseArgs:
         assert args.kmer_size == 31
         assert args.min_baseq == 20
         assert args.min_mapq == 20
+        assert args.threads == 4
         assert args.debug_kmers is False
         assert args.metrics is None
 
@@ -64,6 +65,14 @@ class TestParseArgs:
     def test_min_mapq(self):
         args = parse_args(self.REQUIRED_ARGS + ["--min-mapq", "10"])
         assert args.min_mapq == 10
+
+    def test_threads(self):
+        args = parse_args(self.REQUIRED_ARGS + ["--threads", "8"])
+        assert args.threads == 8
+
+    def test_short_threads(self):
+        args = parse_args(self.REQUIRED_ARGS + ["-t", "2"])
+        assert args.threads == 2
 
     def test_missing_required(self):
         with pytest.raises(SystemExit):
