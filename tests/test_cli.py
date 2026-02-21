@@ -86,6 +86,14 @@ class TestParseArgs:
         args = parse_args(self.REQUIRED_ARGS + ["--summary", "summary.txt"])
         assert args.summary == "summary.txt"
 
+    def test_proband_id(self):
+        args = parse_args(self.REQUIRED_ARGS + ["--proband-id", "HG002"])
+        assert args.proband_id == "HG002"
+
+    def test_proband_id_default(self):
+        args = parse_args(self.REQUIRED_ARGS)
+        assert args.proband_id is None
+
     def test_ref_fasta_optional(self):
         args = parse_args(self.REQUIRED_ARGS)
         assert args.ref_fasta is None
