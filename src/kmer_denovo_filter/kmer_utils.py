@@ -26,6 +26,62 @@ def canonicalize(kmer):
     return min(kmer, rc)
 
 
+def read_supports_alt(read, variant_pos, ref, alt):
+    """Return True if *read* carries the alternate allele at *variant_pos*.
+
+    For SNPs the read base must match *alt*.  For deletions the reference
+    bases beyond the anchor must be absent from the read.  For insertions
+    the inserted sequence must be present following the anchor.
+
+    Returns ``False`` for symbolic alleles or when *alt* is ``None``.
+    """
+    if alt is None or _is_symbolic(alt):
+        return False
+
+    seq = read.query_sequence
+    if seq is None:
+        return False
+
+    aligned_pairs = read.get_aligned_pairs(matches_only=False)
+
+    # Build ref-pos → read-pos map (only for aligned positions)
+    ref_to_qpos = {}
+    for qpos, rpos in aligned_pairs:
+        if rpos is not None and qpos is not None:
+            ref_to_qpos[rpos] = qpos
+
+    anchor_qpos = ref_to_qpos.get(variant_pos)
+    if anchor_qpos is None:
+        return False
+
+    if len(ref) == 1 and len(alt) == 1:
+        # SNP
+        return seq[anchor_qpos].upper() == alt.upper()
+
+    if len(alt) < len(ref):
+        # Deletion – anchor base must match and deleted ref positions must
+        # be absent from the read alignment.
+        if seq[anchor_qpos].upper() != alt[0].upper():
+            return False
+        for i in range(len(alt), len(ref)):
+            if ref_to_qpos.get(variant_pos + i) is not None:
+                return False
+        return True
+
+    if len(alt) > len(ref):
+        # Insertion – the inserted bases must follow the anchor in the read.
+        ins_bases = alt[len(ref):]
+        for i, base in enumerate(ins_bases):
+            rp = anchor_qpos + len(ref) + i
+            if rp >= len(seq):
+                return False
+            if seq[rp].upper() != base.upper():
+                return False
+        return True
+
+    return False
+
+
 def extract_variant_spanning_kmers(
     read, variant_pos, k, min_baseq=0, ref=None, alt=None,
 ):

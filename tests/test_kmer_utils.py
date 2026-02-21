@@ -4,6 +4,7 @@ from kmer_denovo_filter.kmer_utils import (
     _is_symbolic,
     canonicalize,
     extract_variant_spanning_kmers,
+    read_supports_alt,
     reverse_complement,
 )
 
@@ -269,3 +270,99 @@ class TestIsSymbolic:
 
     def test_empty_string(self):
         assert _is_symbolic("") is True
+
+
+class TestReadSupportsAlt:
+    """Tests for read_supports_alt using mock read objects."""
+
+    class MockRead:
+        """Minimal mock of pysam.AlignedSegment."""
+
+        def __init__(self, seq, aligned_pairs):
+            self.query_sequence = seq
+            self._aligned_pairs = aligned_pairs
+
+        def get_aligned_pairs(self, matches_only=False):
+            if matches_only:
+                return [
+                    (q, r) for q, r in self._aligned_pairs
+                    if q is not None and r is not None
+                ]
+            return self._aligned_pairs
+
+    def test_snp_supports_alt(self):
+        # Read has G at ref pos 102 (index 2 in "ACGTACGT"), alt is G
+        seq = "ACGTACGT"
+        pairs = [(i, 100 + i) for i in range(8)]
+        read = self.MockRead(seq, pairs)
+        assert read_supports_alt(read, 102, "A", "G") is True
+
+    def test_snp_does_not_support_alt(self):
+        seq = "ACGTACGT"
+        pairs = [(i, 100 + i) for i in range(8)]
+        read = self.MockRead(seq, pairs)
+        # Read has G at pos 102, alt is T
+        assert read_supports_alt(read, 102, "A", "T") is False
+
+    def test_deletion_supports_alt(self):
+        # Read: ACGTCGT (7 bases), deletion of base at ref pos 104
+        seq = "ACGTCGT"
+        pairs = [
+            (0, 100), (1, 101), (2, 102), (3, 103),
+            (None, 104),  # deleted base
+            (4, 105), (5, 106), (6, 107),
+        ]
+        read = self.MockRead(seq, pairs)
+        # REF=TX, ALT=T at anchor pos 103
+        assert read_supports_alt(read, 103, "TX", "T") is True
+
+    def test_deletion_does_not_support_alt(self):
+        # Read has all bases aligned (no deletion)
+        seq = "ACGTACGT"
+        pairs = [(i, 100 + i) for i in range(8)]
+        read = self.MockRead(seq, pairs)
+        # REF=TA, ALT=T (deletion) but read has the base at 104
+        assert read_supports_alt(read, 103, "TA", "T") is False
+
+    def test_insertion_supports_alt(self):
+        # Read: ACTGCATATCGA with 4-base insertion
+        seq = "ACTGCATATCGA"
+        pairs = [
+            (0, 100), (1, 101), (2, 102), (3, 103),
+            (4, None), (5, None), (6, None), (7, None),  # inserted
+            (8, 104), (9, 105), (10, 106), (11, 107),
+        ]
+        read = self.MockRead(seq, pairs)
+        # REF=G, ALT=GCATA at anchor pos 103
+        assert read_supports_alt(read, 103, "G", "GCATA") is True
+
+    def test_insertion_does_not_support_alt(self):
+        # Read matches reference (no insertion)
+        seq = "ACGTACGT"
+        pairs = [(i, 100 + i) for i in range(8)]
+        read = self.MockRead(seq, pairs)
+        # REF=T, ALT=TGCA but read doesn't have those inserted bases
+        assert read_supports_alt(read, 103, "T", "TGCA") is False
+
+    def test_symbolic_allele_returns_false(self):
+        seq = "ACGTACGT"
+        pairs = [(i, 100 + i) for i in range(8)]
+        read = self.MockRead(seq, pairs)
+        assert read_supports_alt(read, 102, "A", "<DEL>") is False
+
+    def test_none_alt_returns_false(self):
+        seq = "ACGTACGT"
+        pairs = [(i, 100 + i) for i in range(8)]
+        read = self.MockRead(seq, pairs)
+        assert read_supports_alt(read, 102, "A", None) is False
+
+    def test_none_sequence_returns_false(self):
+        pairs = [(i, 100 + i) for i in range(8)]
+        read = self.MockRead(None, pairs)
+        assert read_supports_alt(read, 102, "A", "T") is False
+
+    def test_variant_pos_not_in_read(self):
+        seq = "ACGT"
+        pairs = [(i, 100 + i) for i in range(4)]
+        read = self.MockRead(seq, pairs)
+        assert read_supports_alt(read, 200, "A", "T") is False
