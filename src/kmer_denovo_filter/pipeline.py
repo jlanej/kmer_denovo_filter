@@ -437,7 +437,10 @@ def run_pipeline(args):
             args.kmer_size, args.min_baseq, args.min_mapq, args.debug_kmers,
             kmer_fasta,
         )
-        logger.info("Collected %d unique child k-mers", total_child_kmers)
+        logger.info(
+            "Wrote %d child k-mers (partially deduplicated)",
+            total_child_kmers,
+        )
 
         # Scan mother
         logger.info("Scanning mother BAM: %s", args.mother)
@@ -457,9 +460,9 @@ def run_pipeline(args):
         parent_found_kmers.update(father_kmers)
         logger.info("Found %d child k-mers in father", len(father_kmers))
 
-    child_unique_kmers = total_child_kmers - len(parent_found_kmers)
+    child_unique_kmers = max(0, total_child_kmers - len(parent_found_kmers))
     logger.info(
-        "Child-unique k-mers (approx): %d / %d",
+        "Child-unique k-mers (approx): %d / %d (batched dedup)",
         child_unique_kmers,
         total_child_kmers,
     )
