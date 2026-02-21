@@ -168,7 +168,7 @@ class TestExtractVariantSpanningKmers:
         assert len(kmers) == 8
 
     def test_insertion_without_ref_alt(self):
-        """Without ref/alt, only k k-mers are extracted (old behaviour)."""
+        """Without ref/alt, only k k-mers are extracted (old behavior)."""
         seq = "ACTGCATATCGA"
         pairs = [
             (0, 100), (1, 101), (2, 102), (3, 103),

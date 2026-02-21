@@ -41,9 +41,9 @@ def _create_bam(path, ref_fasta, chrom, reads):
     )
     with pysam.AlignmentFile(path, "wb", header=header) as bam:
         for entry in reads:
-            name, pos, seq = entry[0], entry[1], entry[2]
-            quals = entry[3] if len(entry) > 3 else None
-            cigar = entry[4] if len(entry) > 4 else [(0, len(seq))]
+            name, pos, seq, *rest = entry
+            quals = rest[0] if rest else None
+            cigar = rest[1] if len(rest) > 1 else [(0, len(seq))]
             seg = pysam.AlignedSegment()
             seg.query_name = name
             seg.query_sequence = seq
