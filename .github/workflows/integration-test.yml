@@ -1,0 +1,55 @@
+name: Integration Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  integration-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq samtools jellyfish
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package
+        run: pip install -e '.[test]' || pip install -e . && pip install pytest
+
+      - name: Run unit tests
+        run: pytest tests/test_cli.py tests/test_kmer_utils.py -v
+
+      - name: Run integration tests
+        run: pytest tests/test_pipeline.py -v
+
+      - name: Run GIAB integration pipeline
+        run: |
+          mkdir -p integration_output
+          kmer-denovo \
+            --child   tests/data/giab/HG002_child.bam   \
+            --father  tests/data/giab/HG003_father.bam  \
+            --mother  tests/data/giab/HG004_mother.bam  \
+            --vcf     tests/data/giab/candidates.vcf.gz  \
+            --output  integration_output/annotated.vcf   \
+            --metrics integration_output/metrics.json    \
+            --summary integration_output/summary.txt
+
+      - name: Display summary
+        run: cat integration_output/summary.txt
+
+      - name: Upload integration results
+        uses: actions/upload-artifact@v4
+        with:
+          name: giab-integration-results
+          path: integration_output/
