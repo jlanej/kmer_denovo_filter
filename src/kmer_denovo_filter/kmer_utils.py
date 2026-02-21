@@ -3,6 +3,18 @@
 _COMP = str.maketrans("ACGTacgt", "TGCAtgca")
 
 
+def _is_symbolic(allele):
+    """Return True if *allele* is a symbolic VCF allele with no literal sequence.
+
+    Symbolic alleles include ``<DEL>``, ``<INS>``, ``<DUP>``, breakend
+    notation containing ``[`` or ``]``, and the overlapping-deletion
+    marker ``*``.
+    """
+    if not allele:
+        return True
+    return allele[0] == "<" or allele == "*" or "[" in allele or "]" in allele
+
+
 def reverse_complement(seq):
     """Return the reverse complement of a DNA sequence."""
     return seq.translate(_COMP)[::-1]
@@ -47,7 +59,7 @@ def extract_variant_spanning_kmers(
 
     # For insertions the variant occupies len(alt) bases in the read.
     # Extend the window so k-mers spanning the right junction are captured.
-    alt_len = len(alt) if alt else 1
+    alt_len = len(alt) if alt and not _is_symbolic(alt) else 1
     variant_end_in_read = read_pos_at_variant + alt_len - 1
 
     kmers = set()
