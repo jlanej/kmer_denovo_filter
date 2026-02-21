@@ -181,12 +181,33 @@ def _parse_vcf_variants(vcf_path):
     return variants
 
 
-def _write_annotated_vcf(input_vcf, output_vcf, annotations):
-    """Write annotated VCF with de novo k-mer metrics."""
+def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
+    """Write annotated VCF with de novo k-mer metrics.
+
+    When *proband_id* matches a sample in the VCF, DKU and DKT are written
+    as FORMAT fields on that sample.  Otherwise they are written as INFO
+    fields.
+    """
     vcf_in = pysam.VariantFile(input_vcf)
 
+    use_format = proband_id is not None and proband_id in list(vcf_in.header.samples)
+
+    if use_format:
+        logger.info(
+            "Proband '%s' found in VCF samples; annotating as FORMAT fields",
+            proband_id,
+        )
+    elif proband_id is not None:
+        logger.warning(
+            "Proband '%s' not found in VCF samples (%s); "
+            "falling back to INFO annotation",
+            proband_id, list(vcf_in.header.samples),
+        )
+
+    category = "FORMAT" if use_format else "INFO"
+
     vcf_in.header.add_meta(
-        "INFO",
+        category,
         items=[
             ("ID", "DKU"),
             ("Number", "1"),
@@ -197,7 +218,7 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations):
         ],
     )
     vcf_in.header.add_meta(
-        "INFO",
+        category,
         items=[
             ("ID", "DKT"),
             ("Number", "1"),
@@ -213,8 +234,12 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations):
         var_key = f"{rec.chrom}:{rec.start}"
         if var_key in annotations:
             ann = annotations[var_key]
-            rec.info["DKU"] = ann["dku"]
-            rec.info["DKT"] = ann["dkt"]
+            if use_format:
+                rec.samples[proband_id]["DKU"] = ann["dku"]
+                rec.samples[proband_id]["DKT"] = ann["dkt"]
+            else:
+                rec.info["DKU"] = ann["dku"]
+                rec.info["DKT"] = ann["dkt"]
         vcf_out.write(rec)
 
     vcf_out.close()
@@ -356,7 +381,7 @@ def run_pipeline(args):
 
     if not variants:
         logger.warning("No variants found in VCF")
-        _write_annotated_vcf(args.vcf, args.output, {})
+        _write_annotated_vcf(args.vcf, args.output, {}, args.proband_id)
         if args.metrics:
             with open(args.metrics, "w") as fh:
                 json.dump({"total_variants": 0}, fh, indent=2)
@@ -427,7 +452,7 @@ def run_pipeline(args):
 
     # 5. Write annotated VCF
     logger.info("Writing annotated VCF: %s", args.output)
-    _write_annotated_vcf(args.vcf, args.output, annotations)
+    _write_annotated_vcf(args.vcf, args.output, annotations, args.proband_id)
 
     # 6. Write informative reads BAM
     if args.informative_reads:

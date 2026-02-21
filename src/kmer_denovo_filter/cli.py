@@ -55,6 +55,12 @@ def parse_args(argv=None):
              "k-mers for IGV visualization",
     )
     parser.add_argument(
+        "--proband-id", default=None,
+        help="Sample ID of the proband in the VCF. When provided and "
+             "matching a VCF sample, DKU/DKT are written as FORMAT fields "
+             "on that sample; otherwise they are written as INFO fields.",
+    )
+    parser.add_argument(
         "--threads", "-t", type=int, default=4,
         help="Number of threads for jellyfish (default: 4)",
     )

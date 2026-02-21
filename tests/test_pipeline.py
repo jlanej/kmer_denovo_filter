@@ -66,13 +66,13 @@ def _create_bam(path, ref_fasta, chrom, reads):
     pysam.index(path)
 
 
-def _create_vcf(path, chrom, variants):
+def _create_vcf(path, chrom, variants, sample="HG002"):
     """Create a VCF with given variants.
 
     ``variants`` is a list of (pos_1based, ref, alt) tuples.
     """
     header = pysam.VariantHeader()
-    header.add_sample("CHILD")
+    header.add_sample(sample)
     header.add_line(f"##contig=<ID={chrom},length=300>")
     with pysam.VariantFile(path, "w", header=header) as vcf:
         for pos, ref, alt in variants:
@@ -142,16 +142,16 @@ class TestPipelineIntegration:
             "--metrics", metrics_json,
             "--kmer-size", "5",
             "--informative-reads", info_bam,
+            "--proband-id", "HG002",
         ])
         run_pipeline(args)
 
-        # Check output VCF has DKU annotation
+        # Check output VCF has DKU annotation as FORMAT (proband matched)
         vcf_out = pysam.VariantFile(out_vcf)
         records = list(vcf_out)
         assert len(records) == 1
-        assert "DKU" in records[0].info
-        assert records[0].info["DKU"] > 0
-        assert "DKT" in records[0].info
+        assert records[0].samples["HG002"]["DKU"] > 0
+        assert records[0].samples["HG002"]["DKT"] is not None
         vcf_out.close()
 
         # Check metrics file
@@ -217,13 +217,14 @@ class TestPipelineIntegration:
             "--output", out_vcf,
             "--kmer-size", "5",
             "--informative-reads", info_bam,
+            "--proband-id", "HG002",
         ])
         run_pipeline(args)
 
         vcf_out = pysam.VariantFile(out_vcf)
         records = list(vcf_out)
         assert len(records) == 1
-        assert records[0].info["DKU"] == 0
+        assert records[0].samples["HG002"]["DKU"] == 0
         vcf_out.close()
 
         # No informative reads for inherited variant
@@ -312,14 +313,15 @@ class TestPipelineIntegration:
             "--vcf", in_vcf,
             "--output", out_vcf,
             "--kmer-size", "5",
+            "--proband-id", "HG002",
         ])
         run_pipeline(args)
 
         vcf_out = pysam.VariantFile(out_vcf)
         records = list(vcf_out)
         assert len(records) == 1
-        assert "DKU" in records[0].info
-        assert records[0].info["DKU"] > 0, "Deletion should produce DKU > 0"
+        assert records[0].samples["HG002"]["DKU"] > 0, \
+            "Deletion should produce DKU > 0"
         vcf_out.close()
 
     def test_insertion_variant_detected(self, tmpdir):
@@ -373,6 +375,56 @@ class TestPipelineIntegration:
             "--vcf", in_vcf,
             "--output", out_vcf,
             "--kmer-size", "5",
+            "--proband-id", "HG002",
+        ])
+        run_pipeline(args)
+
+        vcf_out = pysam.VariantFile(out_vcf)
+        records = list(vcf_out)
+        assert len(records) == 1
+        assert records[0].samples["HG002"]["DKU"] > 0, \
+            "Insertion should produce DKU > 0"
+        vcf_out.close()
+
+    def test_info_annotation_when_proband_unmatched(self, tmpdir):
+        """When --proband-id does not match a VCF sample, use INFO fields."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        var_pos_0 = 50
+        child_seq = list(ref_seq[40:80])
+        child_seq[10] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [("read1", 40, child_seq, None)],
+        )
+
+        parent_seq = ref_seq[40:80]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom, [("mread1", 40, parent_seq, None)])
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(father_bam, ref_fa, chrom, [("fread1", 40, parent_seq, None)])
+
+        in_vcf = os.path.join(tmpdir, "input.vcf")
+        alt_base = child_seq[10]
+        _create_vcf(in_vcf, chrom, [(51, ref_seq[50], alt_base)])
+
+        out_vcf = os.path.join(tmpdir, "output.vcf")
+
+        # Use a proband ID that doesn't match any VCF sample
+        args = parse_args([
+            "--child", child_bam,
+            "--mother", mother_bam,
+            "--father", father_bam,
+            "--ref-fasta", ref_fa,
+            "--vcf", in_vcf,
+            "--output", out_vcf,
+            "--kmer-size", "5",
+            "--proband-id", "NO_MATCH",
         ])
         run_pipeline(args)
 
@@ -380,7 +432,57 @@ class TestPipelineIntegration:
         records = list(vcf_out)
         assert len(records) == 1
         assert "DKU" in records[0].info
-        assert records[0].info["DKU"] > 0, "Insertion should produce DKU > 0"
+        assert records[0].info["DKU"] > 0
+        assert "DKT" in records[0].info
+        vcf_out.close()
+
+    def test_info_annotation_when_no_proband_id(self, tmpdir):
+        """When --proband-id is not supplied, use INFO fields."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        var_pos_0 = 50
+        child_seq = list(ref_seq[40:80])
+        child_seq[10] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [("read1", 40, child_seq, None)],
+        )
+
+        parent_seq = ref_seq[40:80]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom, [("mread1", 40, parent_seq, None)])
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(father_bam, ref_fa, chrom, [("fread1", 40, parent_seq, None)])
+
+        in_vcf = os.path.join(tmpdir, "input.vcf")
+        alt_base = child_seq[10]
+        _create_vcf(in_vcf, chrom, [(51, ref_seq[50], alt_base)])
+
+        out_vcf = os.path.join(tmpdir, "output.vcf")
+
+        # No --proband-id at all
+        args = parse_args([
+            "--child", child_bam,
+            "--mother", mother_bam,
+            "--father", father_bam,
+            "--ref-fasta", ref_fa,
+            "--vcf", in_vcf,
+            "--output", out_vcf,
+            "--kmer-size", "5",
+        ])
+        run_pipeline(args)
+
+        vcf_out = pysam.VariantFile(out_vcf)
+        records = list(vcf_out)
+        assert len(records) == 1
+        assert "DKU" in records[0].info
+        assert records[0].info["DKU"] > 0
+        assert "DKT" in records[0].info
         vcf_out.close()
 
 
