@@ -118,6 +118,7 @@ CANDIDATE_POSITIONS=(
     "chr6	27836914	A	G"
     "chr7	550099	G	A"
     "chr8	16522616	C	A"
+    "chr9	95143456	C	A"
     "chr10	18475692	A	T"
     "chr11	97685827	C	A"
     "chr12	112675498	T	G"
@@ -126,8 +127,10 @@ CANDIDATE_POSITIONS=(
     "chr15	32467857	A	G"
     "chr16	11815294	T	C"
     "chr17	7131851	G	A"
+    "chr18	25733623	C	T"
     "chr19	18888816	C	T"
     "chr20	12956555	T	C"
+    "chr21	30498752	T	C"
     "chr22	38620848	C	T"
 )
 
