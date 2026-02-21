@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kmer-denovo-filter"
+version = "0.1.0"
+description = "De novo variant curation using k-mer analysis"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = [
+    "pysam>=0.21.0",
+]
+
+[project.scripts]
+kmer-denovo = "kmer_denovo_filter.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
