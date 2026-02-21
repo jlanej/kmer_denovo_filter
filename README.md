@@ -87,16 +87,19 @@ kmer-denovo \
 
 ### Output
 
-The output VCF is annotated with two fields, **DKU** and **DKT**:
+The output VCF is annotated with three fields, **DKU**, **DKT**, and **DKA**:
 
 * **DKU** – Number of child reads with at least one variant-spanning k-mer
   unique to the child (absent from both parents).
 * **DKT** – Total child reads with variant-spanning k-mers.
+* **DKA** – Number of child reads with at least one unique k-mer that also
+  exactly support the candidate allele. This helps distinguish real de novo
+  signal from spurious noise.
 
 When `--proband-id` is provided and the given ID matches a sample in the
-input VCF, DKU and DKT are written as **FORMAT** (per-sample) fields on that
-sample. If `--proband-id` is omitted or does not match any VCF sample, they
-are written as **INFO** fields instead.
+input VCF, DKU, DKT, and DKA are written as **FORMAT** (per-sample) fields
+on that sample. If `--proband-id` is omitted or does not match any VCF
+sample, they are written as **INFO** fields instead.
 
 The optional `--metrics` JSON file provides a summary including total
 variants, child-unique k-mer counts, and the number of variants with unique
@@ -104,7 +107,7 @@ reads.
 
 The optional `--summary` text file provides a human-readable overview
 including variant counts, read-support statistics, and a per-variant table
-showing DKU/DKT values and de novo calls.
+showing DKU/DKT/DKA values and de novo calls.
 
 The optional `--informative-reads` BAM file contains child reads that carry
 at least one variant-spanning k-mer absent from both parents. Each read is

@@ -291,7 +291,7 @@ class TestReadSupportsAlt:
             return self._aligned_pairs
 
     def test_snp_supports_alt(self):
-        # Read has T at ref pos 102, alt is T
+        # Read has G at ref pos 102 (index 2 in "ACGTACGT"), alt is G
         seq = "ACGTACGT"
         pairs = [(i, 100 + i) for i in range(8)]
         read = self.MockRead(seq, pairs)
