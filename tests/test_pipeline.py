@@ -156,6 +156,7 @@ class TestPipelineIntegration:
         assert len(records) == 1
         assert records[0].samples["HG002"]["DKU"] > 0
         assert records[0].samples["HG002"]["DKT"] is not None
+        assert records[0].samples["HG002"]["DKA"] > 0
         vcf_out.close()
 
         # Check metrics file
@@ -229,6 +230,7 @@ class TestPipelineIntegration:
         records = list(vcf_out)
         assert len(records) == 1
         assert records[0].samples["HG002"]["DKU"] == 0
+        assert records[0].samples["HG002"]["DKA"] == 0
         vcf_out.close()
 
         # No informative reads for inherited variant
@@ -437,6 +439,8 @@ class TestPipelineIntegration:
         assert "DKU" in records[0].info
         assert records[0].info["DKU"] > 0
         assert "DKT" in records[0].info
+        assert "DKA" in records[0].info
+        assert records[0].info["DKA"] > 0
         vcf_out.close()
 
     def test_info_annotation_when_no_proband_id(self, tmpdir):
@@ -485,6 +489,8 @@ class TestPipelineIntegration:
         assert "DKU" in records[0].info
         assert records[0].info["DKU"] > 0
         assert "DKT" in records[0].info
+        assert "DKA" in records[0].info
+        assert records[0].info["DKA"] > 0
         vcf_out.close()
 
 
@@ -527,6 +533,7 @@ class TestGIABIntegration:
         for rec in records:
             assert rec.samples["HG002"]["DKU"] is not None
             assert rec.samples["HG002"]["DKT"] is not None
+            assert rec.samples["HG002"]["DKA"] is not None
         vcf_out.close()
 
         # At least some variants should be flagged as likely de novo

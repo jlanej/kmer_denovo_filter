@@ -15,6 +15,7 @@ from kmer_denovo_filter.kmer_utils import (
     _is_symbolic,
     canonicalize,
     extract_variant_spanning_kmers,
+    read_supports_alt,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,7 @@ def _collect_child_kmers(
     Returns:
         total_child_kmers: approximate number of unique child k-mers written
         variant_read_kmers: dict mapping variant key to list of
-            (read_name, kmer_set) tuples
+            (read_name, kmer_set, supports_alt) tuples
     """
     bam = pysam.AlignmentFile(
         child_bam, reference_filename=ref_fasta if ref_fasta else None,
@@ -86,7 +87,8 @@ def _collect_child_kmers(
                 read, pos, kmer_size, min_baseq, ref=ref, alt=alt,
             )
             if kmers:
-                read_kmers.append((read.query_name, kmers))
+                supports = read_supports_alt(read, pos, ref, alt)
+                read_kmers.append((read.query_name, kmers, supports))
                 batch.update(kmers)
                 if len(batch) >= flush_threshold:
                     _flush_batch()
@@ -95,7 +97,7 @@ def _collect_child_kmers(
 
         if debug_kmers:
             unique = (
-                set().union(*(k for _, k in read_kmers)) if read_kmers
+                set().union(*(k for _, k, _ in read_kmers)) if read_kmers
                 else set()
             )
             logger.info(
@@ -256,6 +258,17 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
              "Total child reads with variant-spanning k-mers"),
         ],
     )
+    vcf_in.header.add_meta(
+        category,
+        items=[
+            ("ID", "DKA"),
+            ("Number", "1"),
+            ("Type", "Integer"),
+            ("Description",
+             "Number of child reads with at least one unique k-mer "
+             "that also exactly support the candidate allele"),
+        ],
+    )
 
     if not output_vcf.endswith(".gz"):
         output_vcf = output_vcf + ".gz"
@@ -269,9 +282,11 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
             if use_format:
                 rec.samples[proband_id]["DKU"] = ann["dku"]
                 rec.samples[proband_id]["DKT"] = ann["dkt"]
+                rec.samples[proband_id]["DKA"] = ann["dka"]
             else:
                 rec.info["DKU"] = ann["dku"]
                 rec.info["DKT"] = ann["dkt"]
+                rec.info["DKA"] = ann["dka"]
         vcf_out.write(rec)
 
     vcf_out.close()
@@ -342,6 +357,7 @@ def _write_summary(summary_path, variants, annotations):
 
     dku_values = [a["dku"] for a in annotations.values()]
     dkt_values = [a["dkt"] for a in annotations.values()]
+    dka_values = [a["dka"] for a in annotations.values()]
     dnm_dku = [a["dku"] for a in annotations.values() if a["dku"] > 0]
 
     lines = []
@@ -359,11 +375,13 @@ def _write_summary(summary_path, variants, annotations):
     if dku_values:
         mean_dku = sum(dku_values) / len(dku_values)
         mean_dkt = sum(dkt_values) / len(dkt_values)
+        mean_dka = sum(dka_values) / len(dka_values)
         median_dku = statistics.median(dku_values)
         lines.append("Read Support Statistics")
         lines.append("-" * 40)
         lines.append(f"  DKU  mean:   {mean_dku:>6.1f}   median: {median_dku:>4}")
         lines.append(f"  DKT  mean:   {mean_dkt:>6.1f}")
+        lines.append(f"  DKA  mean:   {mean_dka:>6.1f}")
         lines.append("")
 
     if dnm_dku:
@@ -373,18 +391,18 @@ def _write_summary(summary_path, variants, annotations):
 
     lines.append("Per-Variant Results")
     lines.append("-" * 60)
-    lines.append(f"  {'Variant':<30s} {'DKU':>5s} {'DKT':>5s}  Call")
-    lines.append(f"  {'-------':<30s} {'---':>5s} {'---':>5s}  ----")
+    lines.append(f"  {'Variant':<30s} {'DKU':>5s} {'DKT':>5s} {'DKA':>5s}  Call")
+    lines.append(f"  {'-------':<30s} {'---':>5s} {'---':>5s} {'---':>5s}  ----")
 
     for var in variants:
         var_key = f"{var['chrom']}:{var['pos']}"
-        ann = annotations.get(var_key, {"dku": 0, "dkt": 0})
+        ann = annotations.get(var_key, {"dku": 0, "dkt": 0, "dka": 0})
         ref = var["ref"]
         alts = var["alts"]
         alt = alts[0] if alts else "."
         label = f"{var['chrom']}:{var['pos'] + 1} {ref}>{alt}"
         call = "DE_NOVO" if ann["dku"] > 0 else "inherited"
-        lines.append(f"  {label:<30s} {ann['dku']:>5d} {ann['dkt']:>5d}  {call}")
+        lines.append(f"  {label:<30s} {ann['dku']:>5d} {ann['dkt']:>5d} {ann['dka']:>5d}  {call}")
 
     lines.append("")
     lines.append("=" * 60)
@@ -476,20 +494,23 @@ def run_pipeline(args):
 
         dkt = len(read_kmers_list)
         dku = 0
+        dka = 0
         informative_names = set()
-        for read_name, kmers in read_kmers_list:
+        for read_name, kmers, supports_alt in read_kmers_list:
             # A read is informative if it has at least one variant-spanning
             # k-mer that is absent from both parents.
             if kmers - parent_found_kmers:
                 dku += 1
                 informative_names.add(read_name)
+                if supports_alt:
+                    dka += 1
 
-        annotations[var_key] = {"dku": dku, "dkt": dkt}
+        annotations[var_key] = {"dku": dku, "dkt": dkt, "dka": dka}
         if informative_names:
             informative_reads_by_variant[var_key] = informative_names
 
         if args.debug_kmers:
-            logger.info("Variant %s: DKU=%d DKT=%d", var_key, dku, dkt)
+            logger.info("Variant %s: DKU=%d DKT=%d DKA=%d", var_key, dku, dkt, dka)
 
     # 5. Write annotated VCF
     logger.info("Writing annotated VCF: %s", args.output)
