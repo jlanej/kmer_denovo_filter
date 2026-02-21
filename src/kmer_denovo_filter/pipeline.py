@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -289,7 +290,7 @@ def _write_summary(summary_path, variants, annotations):
     lines.append("")
     lines.append("Variant Counts")
     lines.append("-" * 40)
-    lines.append(f"  Total candidates analysed:   {total:>6}")
+    lines.append(f"  Total candidates analyzed:   {total:>6}")
     lines.append(f"  Likely de novo (DKU > 0):    {likely_dnm:>6}")
     lines.append(f"  Inherited / unclear (DKU=0): {inherited:>6}")
     lines.append("")
@@ -297,8 +298,7 @@ def _write_summary(summary_path, variants, annotations):
     if dku_values:
         mean_dku = sum(dku_values) / len(dku_values)
         mean_dkt = sum(dkt_values) / len(dkt_values)
-        sorted_dku = sorted(dku_values)
-        median_dku = sorted_dku[len(sorted_dku) // 2]
+        median_dku = statistics.median(dku_values)
         lines.append("Read Support Statistics")
         lines.append("-" * 40)
         lines.append(f"  DKU  mean:   {mean_dku:>6.1f}   median: {median_dku:>4}")
