@@ -128,7 +128,7 @@ class TestPipelineIntegration:
         alt_base = child_seq[10]
         _create_vcf(in_vcf, chrom, [(51, ref_seq[50], alt_base)])
 
-        out_vcf = os.path.join(tmpdir, "output.vcf")
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
         metrics_json = os.path.join(tmpdir, "metrics.json")
         info_bam = os.path.join(tmpdir, "informative.bam")
 
@@ -145,6 +145,10 @@ class TestPipelineIntegration:
             "--proband-id", "HG002",
         ])
         run_pipeline(args)
+
+        # Check output VCF is bgzipped and tabix-indexed
+        assert os.path.exists(out_vcf)
+        assert os.path.exists(out_vcf + ".tbi")
 
         # Check output VCF has DKU annotation as FORMAT (proband matched)
         vcf_out = pysam.VariantFile(out_vcf)
@@ -205,7 +209,7 @@ class TestPipelineIntegration:
         alt_base = mut_seq[10]
         _create_vcf(in_vcf, chrom, [(51, ref_seq[50], alt_base)])
 
-        out_vcf = os.path.join(tmpdir, "output.vcf")
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
         info_bam = os.path.join(tmpdir, "informative.bam")
 
         args = parse_args([
@@ -246,7 +250,7 @@ class TestPipelineIntegration:
         in_vcf = os.path.join(tmpdir, "input.vcf")
         _create_vcf(in_vcf, chrom, [])
 
-        out_vcf = os.path.join(tmpdir, "output.vcf")
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
 
         args = parse_args([
             "--child", os.path.join(tmpdir, "child.bam"),
@@ -304,7 +308,7 @@ class TestPipelineIntegration:
         in_vcf = os.path.join(tmpdir, "input.vcf")
         _create_vcf(in_vcf, chrom, [(anchor_0 + 1, ref_allele, alt_allele)])
 
-        out_vcf = os.path.join(tmpdir, "output.vcf")
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
         args = parse_args([
             "--child", child_bam,
             "--mother", mother_bam,
@@ -366,7 +370,7 @@ class TestPipelineIntegration:
         in_vcf = os.path.join(tmpdir, "input.vcf")
         _create_vcf(in_vcf, chrom, [(anchor_0 + 1, ref_allele, alt_allele)])
 
-        out_vcf = os.path.join(tmpdir, "output.vcf")
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
         args = parse_args([
             "--child", child_bam,
             "--mother", mother_bam,
@@ -412,7 +416,7 @@ class TestPipelineIntegration:
         alt_base = child_seq[10]
         _create_vcf(in_vcf, chrom, [(51, ref_seq[50], alt_base)])
 
-        out_vcf = os.path.join(tmpdir, "output.vcf")
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
 
         # Use a proband ID that doesn't match any VCF sample
         args = parse_args([
@@ -461,7 +465,7 @@ class TestPipelineIntegration:
         alt_base = child_seq[10]
         _create_vcf(in_vcf, chrom, [(51, ref_seq[50], alt_base)])
 
-        out_vcf = os.path.join(tmpdir, "output.vcf")
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
 
         # No --proband-id at all
         args = parse_args([
@@ -497,7 +501,7 @@ class TestGIABIntegration:
 
     def test_giab_denovo_pipeline(self, tmpdir):
         """Run the full pipeline on GIAB child-private SNVs without a ref."""
-        out_vcf = os.path.join(tmpdir, "annotated.vcf")
+        out_vcf = os.path.join(tmpdir, "annotated.vcf.gz")
         metrics_json = os.path.join(tmpdir, "metrics.json")
         summary_txt = os.path.join(tmpdir, "summary.txt")
 
@@ -510,21 +514,25 @@ class TestGIABIntegration:
             "--metrics", metrics_json,
             "--summary", summary_txt,
             "--kmer-size", "31",
+            "--proband-id", "HG002",
         ])
         run_pipeline(args)
 
         # Annotated VCF should exist with all variants annotated
         assert os.path.exists(out_vcf)
+        assert os.path.exists(out_vcf + ".tbi")
         vcf_out = pysam.VariantFile(out_vcf)
         records = list(vcf_out)
         assert len(records) == 20
         for rec in records:
-            assert "DKU" in rec.info
-            assert "DKT" in rec.info
+            assert rec.samples["HG002"]["DKU"] is not None
+            assert rec.samples["HG002"]["DKT"] is not None
         vcf_out.close()
 
         # At least some variants should be flagged as likely de novo
-        dnm_count = sum(1 for r in records if r.info["DKU"] > 0)
+        dnm_count = sum(
+            1 for r in records if r.samples["HG002"]["DKU"] > 0
+        )
         assert dnm_count > 0, "Expected at least some likely DNMs"
 
         # Metrics file should exist

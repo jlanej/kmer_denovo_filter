@@ -52,7 +52,12 @@ class TestExtractVariantSpanningKmers:
             self._aligned_pairs = aligned_pairs
             self.query_qualities = quals
 
-        def get_aligned_pairs(self):
+        def get_aligned_pairs(self, matches_only=False):
+            if matches_only:
+                return [
+                    (q, r) for q, r in self._aligned_pairs
+                    if q is not None and r is not None
+                ]
             return self._aligned_pairs
 
     def test_simple_spanning(self):

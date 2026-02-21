@@ -43,9 +43,10 @@ jobs:
             --father  tests/data/giab/HG003_father.bam  \
             --mother  tests/data/giab/HG004_mother.bam  \
             --vcf     tests/data/giab/candidates.vcf.gz  \
-            --output  integration_output/annotated.vcf   \
+            --output  integration_output/annotated.vcf.gz \
             --metrics integration_output/metrics.json    \
-            --summary integration_output/summary.txt
+            --summary integration_output/summary.txt    \
+            --proband-id HG002
 
       - name: Display summary
         run: cat integration_output/summary.txt

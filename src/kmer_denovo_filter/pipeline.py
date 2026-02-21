@@ -27,20 +27,34 @@ def _check_tool(name):
 
 def _collect_child_kmers(
     child_bam, ref_fasta, variants, kmer_size, min_baseq, min_mapq,
-    debug_kmers,
+    debug_kmers, kmer_fasta,
+    flush_threshold=500_000,
 ):
     """Extract child k-mers spanning each variant position.
 
+    K-mers are written in batches to *kmer_fasta* (FASTA format) to
+    avoid holding millions of strings in memory at once.  Each batch is
+    partially deduplicated in-memory before being flushed.
+
     Returns:
-        all_child_kmers: set of all canonical k-mers
+        total_child_kmers: approximate number of unique child k-mers written
         variant_read_kmers: dict mapping variant key to list of
             (read_name, kmer_set) tuples
     """
     bam = pysam.AlignmentFile(
         child_bam, reference_filename=ref_fasta if ref_fasta else None,
     )
-    all_child_kmers = set()
+    batch = set()
+    total_written = 0
+    fasta_fh = open(kmer_fasta, "w")
     variant_read_kmers = {}
+
+    def _flush_batch():
+        nonlocal total_written
+        for kmer in batch:
+            fasta_fh.write(f">{total_written}\n{kmer}\n")
+            total_written += 1
+        batch.clear()
 
     for var in variants:
         chrom = var["chrom"]
@@ -65,13 +79,17 @@ def _collect_child_kmers(
                 continue
             if read.is_duplicate:
                 continue
+            if not (read.reference_start <= pos < read.reference_end):
+                continue
 
             kmers = extract_variant_spanning_kmers(
                 read, pos, kmer_size, min_baseq, ref=ref, alt=alt,
             )
             if kmers:
                 read_kmers.append((read.query_name, kmers))
-                all_child_kmers.update(kmers)
+                batch.update(kmers)
+                if len(batch) >= flush_threshold:
+                    _flush_batch()
 
         variant_read_kmers[var_key] = read_kmers
 
@@ -85,8 +103,13 @@ def _collect_child_kmers(
                 var_key, len(read_kmers), len(unique),
             )
 
+    # Flush remaining k-mers
+    if batch:
+        _flush_batch()
+
+    fasta_fh.close()
     bam.close()
-    return all_child_kmers, variant_read_kmers
+    return total_written, variant_read_kmers
 
 
 def _write_kmer_fasta(kmers, filepath):
@@ -184,9 +207,15 @@ def _parse_vcf_variants(vcf_path):
 def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
     """Write annotated VCF with de novo k-mer metrics.
 
+    The output is always bgzipped and tabix-indexed.  If *output_vcf*
+    does not already end with ``.gz``, ``.gz`` is appended.
+
     When *proband_id* matches a sample in the VCF, DKU and DKT are written
     as FORMAT fields on that sample.  Otherwise they are written as INFO
     fields.
+
+    Returns:
+        The actual output path (with ``.gz`` suffix).
     """
     vcf_in = pysam.VariantFile(input_vcf)
 
@@ -228,7 +257,10 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
         ],
     )
 
-    vcf_out = pysam.VariantFile(output_vcf, "w", header=vcf_in.header)
+    if not output_vcf.endswith(".gz"):
+        output_vcf = output_vcf + ".gz"
+
+    vcf_out = pysam.VariantFile(output_vcf, "wz", header=vcf_in.header)
 
     for rec in vcf_in:
         var_key = f"{rec.chrom}:{rec.start}"
@@ -244,6 +276,10 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
 
     vcf_out.close()
     vcf_in.close()
+
+    pysam.tabix_index(output_vcf, preset="vcf", force=True)
+
+    return output_vcf
 
 
 def _write_informative_reads(
@@ -389,18 +425,22 @@ def run_pipeline(args):
 
     # 2. Extract child k-mers
     logger.info("Extracting child k-mers (k=%d)", args.kmer_size)
-    all_child_kmers, variant_read_kmers = _collect_child_kmers(
-        args.child, args.ref_fasta, variants,
-        args.kmer_size, args.min_baseq, args.min_mapq, args.debug_kmers,
-    )
-    logger.info("Collected %d unique child k-mers", len(all_child_kmers))
 
     # 3. Scan parents using jellyfish
     parent_found_kmers = set()
 
     with tempfile.TemporaryDirectory(prefix="kmer_denovo_") as tmpdir:
         kmer_fasta = os.path.join(tmpdir, "child_kmers.fa")
-        _write_kmer_fasta(all_child_kmers, kmer_fasta)
+
+        total_child_kmers, variant_read_kmers = _collect_child_kmers(
+            args.child, args.ref_fasta, variants,
+            args.kmer_size, args.min_baseq, args.min_mapq, args.debug_kmers,
+            kmer_fasta,
+        )
+        logger.info(
+            "Wrote %d child k-mers (partially deduplicated)",
+            total_child_kmers,
+        )
 
         # Scan mother
         logger.info("Scanning mother BAM: %s", args.mother)
@@ -420,10 +460,11 @@ def run_pipeline(args):
         parent_found_kmers.update(father_kmers)
         logger.info("Found %d child k-mers in father", len(father_kmers))
 
+    child_unique_kmers = max(0, total_child_kmers - len(parent_found_kmers))
     logger.info(
-        "Child-unique k-mers: %d / %d",
-        len(all_child_kmers - parent_found_kmers),
-        len(all_child_kmers),
+        "Child-unique k-mers (approx): %d / %d (batched dedup)",
+        child_unique_kmers,
+        total_child_kmers,
     )
 
     # 4. Count proband-unique reads per variant
@@ -452,7 +493,9 @@ def run_pipeline(args):
 
     # 5. Write annotated VCF
     logger.info("Writing annotated VCF: %s", args.output)
-    _write_annotated_vcf(args.vcf, args.output, annotations, args.proband_id)
+    actual_output = _write_annotated_vcf(
+        args.vcf, args.output, annotations, args.proband_id,
+    )
 
     # 6. Write informative reads BAM
     if args.informative_reads:
@@ -476,9 +519,9 @@ def run_pipeline(args):
     if args.metrics:
         metrics = {
             "total_variants": len(variants),
-            "total_child_kmers": len(all_child_kmers),
+            "total_child_kmers": total_child_kmers,
             "parent_found_kmers": len(parent_found_kmers),
-            "child_unique_kmers": len(all_child_kmers - parent_found_kmers),
+            "child_unique_kmers": child_unique_kmers,
             "variants_with_unique_reads": sum(
                 1 for a in annotations.values() if a["dku"] > 0
             ),
