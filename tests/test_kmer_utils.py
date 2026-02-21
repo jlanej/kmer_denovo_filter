@@ -116,3 +116,67 @@ class TestExtractVariantSpanningKmers:
         read = self.MockRead(None, pairs)
         kmers = extract_variant_spanning_kmers(read, 102, 4, min_baseq=0)
         assert len(kmers) == 0
+
+    def test_deletion(self):
+        """K-mers should span the deletion junction."""
+        # Read: ACGTCGT (7 bases), deletion of base at ref pos 104
+        # Reference would be: A C G T X C G T aligned at 100-107
+        # Read has deletion at 104: aligned at 100-103, then 105-107
+        seq = "ACGTCGT"
+        pairs = [
+            (0, 100), (1, 101), (2, 102), (3, 103),
+            (None, 104),  # deleted base
+            (4, 105), (5, 106), (6, 107),
+        ]
+        read = self.MockRead(seq, pairs)
+
+        # Variant anchor at ref pos 103 (the base before deletion),
+        # REF=TX, ALT=T
+        kmers = extract_variant_spanning_kmers(
+            read, 103, 4, min_baseq=0, ref="TX", alt="T",
+        )
+        # read_pos_at_variant = 3 (qpos for rpos 103)
+        # alt_len = 1, variant_end_in_read = 3
+        # start_min = max(0, 3-4+1) = 0
+        # start_max = min(7-4, 3) = 3
+        # 4 k-mers: starts 0,1,2,3
+        assert len(kmers) == 4
+        # K-mers at starts 1,2,3 span the junction (include pos 3 and 4+)
+        # All capture the novel deletion sequence
+
+    def test_insertion(self):
+        """K-mers should span the full insertion including right junction."""
+        # Read: 12 bases with 4-base insertion in the middle
+        # Ref positions: 100,101,102,103, then insertion, 104,105,106,107
+        seq = "ACTGCATATCGA"
+        pairs = [
+            (0, 100), (1, 101), (2, 102), (3, 103),
+            (4, None), (5, None), (6, None), (7, None),  # inserted bases
+            (8, 104), (9, 105), (10, 106), (11, 107),
+        ]
+        read = self.MockRead(seq, pairs)
+
+        # Variant anchor at ref pos 103, REF=G, ALT=GCATA
+        kmers = extract_variant_spanning_kmers(
+            read, 103, 4, min_baseq=0, ref="G", alt="GCATA",
+        )
+        # read_pos_at_variant = 3
+        # alt_len = 5, variant_end_in_read = 3 + 5 - 1 = 7
+        # start_min = max(0, 3-4+1) = 0
+        # start_max = min(12-4, 7) = 7
+        # 8 k-mers: starts 0..7 (= k + alt_len - 1 = 4 + 5 - 1 = 8)
+        assert len(kmers) == 8
+
+    def test_insertion_without_ref_alt(self):
+        """Without ref/alt, only k k-mers are extracted (old behavior)."""
+        seq = "ACTGCATATCGA"
+        pairs = [
+            (0, 100), (1, 101), (2, 102), (3, 103),
+            (4, None), (5, None), (6, None), (7, None),
+            (8, 104), (9, 105), (10, 106), (11, 107),
+        ]
+        read = self.MockRead(seq, pairs)
+
+        # No ref/alt → falls back to alt_len=1 (old behaviour)
+        kmers = extract_variant_spanning_kmers(read, 103, 4, min_baseq=0)
+        assert len(kmers) == 4  # only k k-mers

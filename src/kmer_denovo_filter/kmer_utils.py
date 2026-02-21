@@ -14,7 +14,9 @@ def canonicalize(kmer):
     return min(kmer, rc)
 
 
-def extract_variant_spanning_kmers(read, variant_pos, k, min_baseq=0):
+def extract_variant_spanning_kmers(
+    read, variant_pos, k, min_baseq=0, ref=None, alt=None,
+):
     """Extract canonical k-mers from a read that span the variant position.
 
     Args:
@@ -22,6 +24,8 @@ def extract_variant_spanning_kmers(read, variant_pos, k, min_baseq=0):
         variant_pos: 0-based reference position of the variant
         k: k-mer size
         min_baseq: Minimum base quality threshold
+        ref: Reference allele string (for INDEL handling)
+        alt: Alternate allele string (for INDEL handling)
 
     Returns:
         Set of canonical k-mer strings spanning the variant position.
@@ -41,9 +45,14 @@ def extract_variant_spanning_kmers(read, variant_pos, k, min_baseq=0):
     if seq is None:
         return set()
 
+    # For insertions the variant occupies len(alt) bases in the read.
+    # Extend the window so k-mers spanning the right junction are captured.
+    alt_len = len(alt) if alt else 1
+    variant_end_in_read = read_pos_at_variant + alt_len - 1
+
     kmers = set()
     start_min = max(0, read_pos_at_variant - k + 1)
-    start_max = min(len(seq) - k, read_pos_at_variant)
+    start_max = min(len(seq) - k, variant_end_in_read)
 
     for s in range(start_min, start_max + 1):
         kmer = seq[s:s + k]
