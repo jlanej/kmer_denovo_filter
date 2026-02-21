@@ -21,8 +21,8 @@ def parse_args(argv=None):
         "--father", required=True, help="Father BAM/CRAM file (indexed)"
     )
     parser.add_argument(
-        "--ref-fasta", "-r", required=True,
-        help="Reference FASTA with .fai index",
+        "--ref-fasta", "-r", default=None,
+        help="Reference FASTA with .fai index (required for CRAM input)",
     )
     parser.add_argument(
         "--vcf", required=True, help="Input VCF with candidate variants"
@@ -32,6 +32,10 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--metrics", default=None, help="Output summary metrics JSON file"
+    )
+    parser.add_argument(
+        "--summary", default=None,
+        help="Output human-readable summary of variant stats and likely DNMs",
     )
     parser.add_argument(
         "--kmer-size", "-k", type=int, default=31,

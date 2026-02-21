@@ -44,11 +44,23 @@ kmer-denovo \
   --child   child.bam \
   --mother  mother.bam \
   --father  father.bam \
-  --ref-fasta GRCh38.fa \
   --vcf     candidates.vcf \
   --output  annotated.vcf \
   --metrics summary.json \
+  --summary summary.txt \
   --kmer-size 31
+```
+
+For CRAM files, supply the reference FASTA:
+
+```bash
+kmer-denovo \
+  --child   child.cram \
+  --mother  mother.cram \
+  --father  father.cram \
+  --ref-fasta GRCh38.fa \
+  --vcf     candidates.vcf \
+  --output  annotated.vcf
 ```
 
 ### Arguments
@@ -58,11 +70,12 @@ kmer-denovo \
 | `--child` | *required* | Child BAM/CRAM file (indexed) |
 | `--mother` | *required* | Mother BAM/CRAM file (indexed) |
 | `--father` | *required* | Father BAM/CRAM file (indexed) |
-| `--ref-fasta` / `-r` | *required* | Reference FASTA with `.fai` index |
+| `--ref-fasta` / `-r` | – | Reference FASTA with `.fai` index (required for CRAM) |
 | `--vcf` | *required* | Input VCF with candidate variants |
 | `--output` / `-o` | *required* | Output annotated VCF |
 | `--informative-reads` | – | Output BAM with reads carrying informative k-mers (for IGV) |
 | `--metrics` | – | Output summary metrics JSON file |
+| `--summary` | – | Output human-readable summary of variant stats and likely DNMs |
 | `--kmer-size` / `-k` | 31 | K-mer size |
 | `--min-baseq` | 20 | Minimum base quality for read k-mers |
 | `--min-mapq` | 20 | Minimum mapping quality for child reads |
@@ -80,6 +93,10 @@ The output VCF contains two additional INFO fields:
 The optional `--metrics` JSON file provides a summary including total
 variants, child-unique k-mer counts, and the number of variants with unique
 reads.
+
+The optional `--summary` text file provides a human-readable overview
+including variant counts, read-support statistics, and a per-variant table
+showing DKU/DKT values and de novo calls.
 
 The optional `--informative-reads` BAM file contains child reads that carry
 at least one variant-spanning k-mer absent from both parents. Each read is

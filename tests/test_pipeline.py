@@ -10,6 +10,9 @@ import pytest
 from kmer_denovo_filter.cli import parse_args
 from kmer_denovo_filter.pipeline import run_pipeline
 
+GIAB_DIR = os.path.join(os.path.dirname(__file__), "data", "giab")
+GIAB_DATA_EXISTS = os.path.isfile(os.path.join(GIAB_DIR, "HG002_child.bam"))
+
 
 def _create_ref_fasta(path, chrom="chr1", length=200):
     """Create a small reference FASTA with non-repetitive sequence.
@@ -379,3 +382,62 @@ class TestPipelineIntegration:
         assert "DKU" in records[0].info
         assert records[0].info["DKU"] > 0, "Insertion should produce DKU > 0"
         vcf_out.close()
+
+
+@pytest.mark.skipif(
+    not GIAB_DATA_EXISTS,
+    reason="GIAB test data not available",
+)
+class TestGIABIntegration:
+    """Integration tests using real GIAB HG002 trio data."""
+
+    @pytest.fixture()
+    def tmpdir(self, tmp_path):
+        return str(tmp_path)
+
+    def test_giab_denovo_pipeline(self, tmpdir):
+        """Run the full pipeline on GIAB child-private SNVs without a ref."""
+        out_vcf = os.path.join(tmpdir, "annotated.vcf")
+        metrics_json = os.path.join(tmpdir, "metrics.json")
+        summary_txt = os.path.join(tmpdir, "summary.txt")
+
+        args = parse_args([
+            "--child", os.path.join(GIAB_DIR, "HG002_child.bam"),
+            "--mother", os.path.join(GIAB_DIR, "HG004_mother.bam"),
+            "--father", os.path.join(GIAB_DIR, "HG003_father.bam"),
+            "--vcf", os.path.join(GIAB_DIR, "candidates.vcf.gz"),
+            "--output", out_vcf,
+            "--metrics", metrics_json,
+            "--summary", summary_txt,
+            "--kmer-size", "31",
+        ])
+        run_pipeline(args)
+
+        # Annotated VCF should exist with all variants annotated
+        assert os.path.exists(out_vcf)
+        vcf_out = pysam.VariantFile(out_vcf)
+        records = list(vcf_out)
+        assert len(records) == 20
+        for rec in records:
+            assert "DKU" in rec.info
+            assert "DKT" in rec.info
+        vcf_out.close()
+
+        # At least some variants should be flagged as likely de novo
+        dnm_count = sum(1 for r in records if r.info["DKU"] > 0)
+        assert dnm_count > 0, "Expected at least some likely DNMs"
+
+        # Metrics file should exist
+        assert os.path.exists(metrics_json)
+        with open(metrics_json) as fh:
+            metrics = json.load(fh)
+        assert metrics["total_variants"] == 20
+        assert metrics["variants_with_unique_reads"] > 0
+
+        # Summary file should exist and contain key sections
+        assert os.path.exists(summary_txt)
+        with open(summary_txt) as fh:
+            summary = fh.read()
+        assert "De Novo Variant Summary" in summary
+        assert "Likely de novo" in summary
+        assert "DE_NOVO" in summary

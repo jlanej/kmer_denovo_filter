@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -35,7 +36,9 @@ def _collect_child_kmers(
         variant_read_kmers: dict mapping variant key to list of
             (read_name, kmer_set) tuples
     """
-    bam = pysam.AlignmentFile(child_bam, reference_filename=ref_fasta)
+    bam = pysam.AlignmentFile(
+        child_bam, reference_filename=ref_fasta if ref_fasta else None,
+    )
     all_child_kmers = set()
     variant_read_kmers = {}
 
@@ -233,7 +236,9 @@ def _write_informative_reads(
             (chrom:pos) to a set of read names.
         output_bam: Path for the output BAM file.
     """
-    bam_in = pysam.AlignmentFile(child_bam, reference_filename=ref_fasta)
+    bam_in = pysam.AlignmentFile(
+        child_bam, reference_filename=ref_fasta if ref_fasta else None,
+    )
 
     unsorted_path = output_bam + ".unsorted.bam"
     bam_out = pysam.AlignmentFile(unsorted_path, "wb", header=bam_in.header)
@@ -266,6 +271,70 @@ def _write_informative_reads(
     pysam.sort("-o", output_bam, unsorted_path)
     pysam.index(output_bam)
     os.remove(unsorted_path)
+
+
+def _write_summary(summary_path, variants, annotations):
+    """Write a human-readable summary of variant stats and likely DNMs."""
+    total = len(variants)
+    likely_dnm = sum(1 for a in annotations.values() if a["dku"] > 0)
+    inherited = total - likely_dnm
+
+    dku_values = [a["dku"] for a in annotations.values()]
+    dkt_values = [a["dkt"] for a in annotations.values()]
+    dnm_dku = [a["dku"] for a in annotations.values() if a["dku"] > 0]
+
+    lines = []
+    lines.append("=" * 60)
+    lines.append("  kmer-denovo  —  De Novo Variant Summary")
+    lines.append("=" * 60)
+    lines.append("")
+    lines.append("Variant Counts")
+    lines.append("-" * 40)
+    lines.append(f"  Total candidates analyzed:   {total:>6}")
+    lines.append(f"  Likely de novo (DKU > 0):    {likely_dnm:>6}")
+    lines.append(f"  Inherited / unclear (DKU=0): {inherited:>6}")
+    lines.append("")
+
+    if dku_values:
+        mean_dku = sum(dku_values) / len(dku_values)
+        mean_dkt = sum(dkt_values) / len(dkt_values)
+        median_dku = statistics.median(dku_values)
+        lines.append("Read Support Statistics")
+        lines.append("-" * 40)
+        lines.append(f"  DKU  mean:   {mean_dku:>6.1f}   median: {median_dku:>4}")
+        lines.append(f"  DKT  mean:   {mean_dkt:>6.1f}")
+        lines.append("")
+
+    if dnm_dku:
+        mean_dnm_dku = sum(dnm_dku) / len(dnm_dku)
+        lines.append(f"  Avg DKU among likely DNMs:   {mean_dnm_dku:>6.1f}")
+        lines.append("")
+
+    lines.append("Per-Variant Results")
+    lines.append("-" * 60)
+    lines.append(f"  {'Variant':<30s} {'DKU':>5s} {'DKT':>5s}  Call")
+    lines.append(f"  {'-------':<30s} {'---':>5s} {'---':>5s}  ----")
+
+    for var in variants:
+        var_key = f"{var['chrom']}:{var['pos']}"
+        ann = annotations.get(var_key, {"dku": 0, "dkt": 0})
+        ref = var["ref"]
+        alts = var["alts"]
+        alt = alts[0] if alts else "."
+        label = f"{var['chrom']}:{var['pos'] + 1} {ref}>{alt}"
+        call = "DE_NOVO" if ann["dku"] > 0 else "inherited"
+        lines.append(f"  {label:<30s} {ann['dku']:>5d} {ann['dkt']:>5d}  {call}")
+
+    lines.append("")
+    lines.append("=" * 60)
+    lines.append("")
+
+    text = "\n".join(lines)
+
+    with open(summary_path, "w") as fh:
+        fh.write(text)
+
+    return text
 
 
 def run_pipeline(args):
@@ -392,5 +461,11 @@ def run_pipeline(args):
         with open(args.metrics, "w") as fh:
             json.dump(metrics, fh, indent=2)
         logger.info("Metrics written to: %s", args.metrics)
+
+    # 8. Write summary
+    if args.summary:
+        logger.info("Writing summary: %s", args.summary)
+        summary_text = _write_summary(args.summary, variants, annotations)
+        logger.info("\n%s", summary_text)
 
     logger.info("Done")

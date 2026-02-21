@@ -10,7 +10,6 @@ class TestParseArgs:
         "--child", "child.bam",
         "--mother", "mother.bam",
         "--father", "father.bam",
-        "--ref-fasta", "ref.fa",
         "--vcf", "input.vcf",
         "--output", "output.vcf",
     ]
@@ -20,7 +19,7 @@ class TestParseArgs:
         assert args.child == "child.bam"
         assert args.mother == "mother.bam"
         assert args.father == "father.bam"
-        assert args.ref_fasta == "ref.fa"
+        assert args.ref_fasta is None
         assert args.vcf == "input.vcf"
         assert args.output == "output.vcf"
 
@@ -33,6 +32,8 @@ class TestParseArgs:
         assert args.debug_kmers is False
         assert args.metrics is None
         assert args.informative_reads is None
+        assert args.summary is None
+        assert args.ref_fasta is None
 
     def test_custom_kmer_size(self):
         args = parse_args(self.REQUIRED_ARGS + ["--kmer-size", "25"])
@@ -80,6 +81,18 @@ class TestParseArgs:
             self.REQUIRED_ARGS + ["--informative-reads", "info.bam"]
         )
         assert args.informative_reads == "info.bam"
+
+    def test_summary_flag(self):
+        args = parse_args(self.REQUIRED_ARGS + ["--summary", "summary.txt"])
+        assert args.summary == "summary.txt"
+
+    def test_ref_fasta_optional(self):
+        args = parse_args(self.REQUIRED_ARGS)
+        assert args.ref_fasta is None
+
+    def test_ref_fasta_provided(self):
+        args = parse_args(self.REQUIRED_ARGS + ["--ref-fasta", "ref.fa"])
+        assert args.ref_fasta == "ref.fa"
 
     def test_missing_required(self):
         with pytest.raises(SystemExit):
