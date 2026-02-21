@@ -7,7 +7,7 @@
 #
 # Overview
 # --------
-# The Genome in a Bottle (GIAB) consortium provides extensively characterised
+# The Genome in a Bottle (GIAB) consortium provides extensively characterized
 # benchmark data for the Ashkenazi Jewish trio:
 #
 #   HG002 / NA24385  –  Son   (child / proband)
@@ -185,7 +185,7 @@ log "Step 2: High-confidence region handling ..."
 
 # The GIAB v4.2.1 benchmark VCFs only contain variants within each sample's
 # high-confidence regions, so bcftools isec (Step 3) inherently restricts the
-# comparison to well-characterised genomic positions.  A variant flagged as
+# comparison to well-characterized genomic positions.  A variant flagged as
 # HG002-unique may simply be outside a parent's HC region rather than a true
 # DNM.  For a small integration-test dataset this is acceptable; downstream
 # manual inspection can confirm candidates.
@@ -264,8 +264,8 @@ while IFS=$'\t' read -r chrom start end; do
     log "    ${chrom}:${start}-${end}"
 done < "${WORK_DIR}/regions.bed"
 
-# Build samtools region strings
-REGIONS=$(awk '{printf "%s:%d-%d ", $1, $2+1, $3}' "${WORK_DIR}/regions.bed")
+# Build samtools region strings (space-separated)
+REGIONS=$(awk 'BEGIN{OFS=""} {printf "%s%s:%d-%d", (NR>1 ? " " : ""), $1, $2+1, $3}' "${WORK_DIR}/regions.bed")
 
 # ---------------------------------------------------------------------------
 # Step 6 – Extract reference FASTA for selected regions
@@ -273,9 +273,9 @@ REGIONS=$(awk '{printf "%s:%d-%d ", $1, $2+1, $3}' "${WORK_DIR}/regions.bed")
 log "Step 6: Extracting reference FASTA for selected regions ..."
 
 REGION_LIST=$(awk '{printf "%s:%d-%d\n", $1, $2+1, $3}' "${WORK_DIR}/regions.bed")
-echo "${REGION_LIST}" | tr ' ' '\n' | while read -r reg; do
+while read -r reg; do
     samtools faidx "${REF_FASTA}" "${reg}"
-done > "${OUTPUT_DIR}/reference.fa"
+done <<< "${REGION_LIST}" > "${OUTPUT_DIR}/reference.fa"
 
 samtools faidx "${OUTPUT_DIR}/reference.fa"
 log "  Reference: ${OUTPUT_DIR}/reference.fa"
