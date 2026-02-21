@@ -2,7 +2,7 @@
 # =============================================================================
 # download_giab_dnm_testdata.sh
 #
-# Downloads small BAM regions around known de novo mutations (DNMs) from the
+# Extracts small BAM regions around known de novo mutations (DNMs) from the
 # GIAB HG002 (NA24385) Ashkenazi trio for integration testing.
 #
 # Overview
@@ -15,24 +15,27 @@
 #   HG004 / NA24143  –  Mother
 #
 # De novo mutations (DNMs) are variants present in the child but absent in
-# both parents.  This script identifies putative DNMs by comparing the GIAB
-# v4.2.1 benchmark VCFs, then extracts small BAM regions around a selected
-# subset so that realistic but lightweight test data can be committed to the
-# repository for integration testing of kmer_denovo_filter.
+# both parents.  This script uses a curated list of known DNM positions from
+# the GIAB HG002 mosaic/de novo benchmark (usnistgov/giab-HG002-mosaic-
+# benchmark), verifies them against the GIAB v4.2.1 truth VCFs over HTTPS,
+# then extracts small BAM regions via samtools random access.
+#
+# NO large file downloads are performed.  All VCF and BAM queries use
+# htslib HTTPS random access against the public GIAB FTP, transferring only
+# a few MB of data in total.
 #
 # Algorithm
 # ---------
-#   1. Download GIAB v4.2.1 benchmark VCFs + indexes for HG002, HG003, HG004.
-#   2. Identify putative DNMs via bcftools isec  (variants in HG002 absent
-#      from both parents).
-#   3. Filter to biallelic SNVs within the GIAB high-confidence regions for
-#      all three samples.
-#   4. Select a small subset (default 5) of candidates spread across
-#      different chromosomes.
-#   5. Extract ±500 bp BAM slices around each candidate from the public GIAB
-#      Illumina 2×250 bp WGS BAMs (remote HTTPS access via htslib).
-#   6. Extract corresponding reference FASTA regions.
-#   7. Write a candidate VCF containing the selected DNMs.
+#   1. Start with a curated list of published DNM positions (SNVs) sourced
+#      from the GIAB HG002 mosaic benchmark (Strelka2 somatic caller,
+#      IGV-curated, see usnistgov/giab-HG002-mosaic-benchmark).
+#   2. For each candidate, verify via bcftools over HTTPS that the variant
+#      is present in the HG002 benchmark VCF and absent from both parents.
+#   3. Select a subset of verified candidates (default 5).
+#   4. Extract ±500 bp BAM slices around each candidate from the public GIAB
+#      Illumina 2×250 bp WGS BAMs (remote HTTPS via htslib).
+#   5. Extract corresponding reference FASTA regions.
+#   6. Write a candidate VCF containing the selected DNMs.
 #
 # Prerequisites
 # -------------
@@ -61,8 +64,9 @@
 #
 # Data sources
 # ------------
+#   DNMs  :  usnistgov/giab-HG002-mosaic-benchmark (Strelka2, IGV-curated)
 #   BAMs  :  NIST Illumina 2×250 bp WGS, novoalign, GRCh38
-#   VCFs  :  GIAB v4.2.1 benchmark  (GRCh38, chr1-22)
+#   VCFs  :  GIAB v4.2.1 benchmark  (GRCh38, chr1-22)  [queried over HTTPS]
 #   Ref   :  GCA_000001405.15  GRCh38 no-alt analysis set
 # =============================================================================
 
@@ -79,7 +83,7 @@ PADDING=500
 REF_FASTA=""
 
 # ---------------------------------------------------------------------------
-# GIAB data URLs
+# GIAB data URLs (all accessed via HTTPS random access – no bulk downloads)
 # ---------------------------------------------------------------------------
 GIAB_BASE="https://ftp-trace.ncbi.nlm.nih.gov/ReferenceSamples/giab"
 
@@ -89,11 +93,43 @@ HG002_BAM="${BAM_BASE}/HG002_NA24385_son/NIST_Illumina_2x250bps/novoalign_bams/H
 HG003_BAM="${BAM_BASE}/HG003_NA24149_father/NIST_Illumina_2x250bps/novoalign_bams/HG003.GRCh38.2x250.bam"
 HG004_BAM="${BAM_BASE}/HG004_NA24143_mother/NIST_Illumina_2x250bps/novoalign_bams/HG004.GRCh38.2x250.bam"
 
-# GIAB v4.2.1 benchmark VCFs (GRCh38)
+# GIAB v4.2.1 benchmark VCFs (GRCh38) – queried over HTTPS, never downloaded
 BENCH_BASE="${GIAB_BASE}/release/AshkenazimTrio"
-HG002_VCF_URL="${BENCH_BASE}/HG002_NA24385_son/latest/GRCh38/HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz"
-HG003_VCF_URL="${BENCH_BASE}/HG003_NA24149_father/latest/GRCh38/HG003_GRCh38_1_22_v4.2.1_benchmark.vcf.gz"
-HG004_VCF_URL="${BENCH_BASE}/HG004_NA24143_mother/latest/GRCh38/HG004_GRCh38_1_22_v4.2.1_benchmark.vcf.gz"
+HG002_VCF="${BENCH_BASE}/HG002_NA24385_son/latest/GRCh38/HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz"
+HG003_VCF="${BENCH_BASE}/HG003_NA24149_father/latest/GRCh38/HG003_GRCh38_1_22_v4.2.1_benchmark.vcf.gz"
+HG004_VCF="${BENCH_BASE}/HG004_NA24143_mother/latest/GRCh38/HG004_GRCh38_1_22_v4.2.1_benchmark.vcf.gz"
+
+# ---------------------------------------------------------------------------
+# Curated DNM candidate positions (GRCh38)
+#
+# Source: usnistgov/giab-HG002-mosaic-benchmark data/igv_curated_variants_RM.tsv
+# These are SNVs identified by Strelka2 somatic calling (HG002 as tumor,
+# parents as normal), then IGV-curated.  Selected "candidate" variants with
+# high SomaticEVS scores (>17) across different chromosomes.
+#
+# Format: CHROM  POS  REF  ALT
+# ---------------------------------------------------------------------------
+CANDIDATE_POSITIONS=(
+    "chr1	79144396	T	C"
+    "chr2	4482351	G	A"
+    "chr3	21601448	G	C"
+    "chr4	58670824	G	A"
+    "chr5	41022783	A	G"
+    "chr6	27836914	A	G"
+    "chr7	550099	G	A"
+    "chr8	16522616	C	A"
+    "chr10	18475692	A	T"
+    "chr11	97685827	C	A"
+    "chr12	112675498	T	G"
+    "chr13	100629230	G	T"
+    "chr14	48779433	A	G"
+    "chr15	32467857	A	G"
+    "chr16	11815294	T	C"
+    "chr17	7131851	G	A"
+    "chr19	18888816	C	T"
+    "chr20	12956555	T	C"
+    "chr22	38620848	C	T"
+)
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -108,18 +144,6 @@ usage() {
 
 check_tool() {
     command -v "$1" >/dev/null 2>&1 || die "$1 is required but not found on PATH"
-}
-
-download() {
-    local url="$1" dest="$2"
-    if [[ -f "${dest}" ]]; then
-        log "  Already exists: ${dest}"
-        return
-    fi
-    log "  Downloading $(basename "${dest}") ..."
-    curl -fsSL -o "${dest}" "${url}" \
-        || wget -q -O "${dest}" "${url}" \
-        || die "Failed to download ${url}"
 }
 
 # ---------------------------------------------------------------------------
@@ -146,10 +170,8 @@ done
 # ---------------------------------------------------------------------------
 check_tool samtools
 check_tool bcftools
-command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 \
-    || die "Either curl or wget is required but neither was found on PATH"
 
-log "=== GIAB HG002 trio DNM test-data downloader ==="
+log "=== GIAB HG002 trio DNM test-data extractor ==="
 log "Reference FASTA : ${REF_FASTA}"
 log "Output directory: ${OUTPUT_DIR}"
 log "Num variants    : ${NUM_VARIANTS}"
@@ -165,90 +187,55 @@ log "Working directory: ${WORK_DIR}"
 mkdir -p "${OUTPUT_DIR}"
 
 # ---------------------------------------------------------------------------
-# Step 1 – Download GIAB benchmark VCFs
+# Step 1 – Verify DNM candidates against GIAB truth VCFs over HTTPS
 # ---------------------------------------------------------------------------
-log "Step 1: Downloading GIAB v4.2.1 benchmark VCFs ..."
+log "Step 1: Verifying DNM candidates against GIAB v4.2.1 benchmark VCFs ..."
+log "  (querying remote VCFs via HTTPS – no bulk downloads)"
 
-download "${HG002_VCF_URL}"          "${WORK_DIR}/HG002.vcf.gz"
-download "${HG002_VCF_URL}.tbi"      "${WORK_DIR}/HG002.vcf.gz.tbi"
+VERIFIED=0
 
-download "${HG003_VCF_URL}"          "${WORK_DIR}/HG003.vcf.gz"
-download "${HG003_VCF_URL}.tbi"      "${WORK_DIR}/HG003.vcf.gz.tbi"
+for entry in "${CANDIDATE_POSITIONS[@]}"; do
+    [[ "${VERIFIED}" -ge "${NUM_VARIANTS}" ]] && break
 
-download "${HG004_VCF_URL}"          "${WORK_DIR}/HG004.vcf.gz"
-download "${HG004_VCF_URL}.tbi"      "${WORK_DIR}/HG004.vcf.gz.tbi"
+    chrom=$(echo "${entry}" | cut -f1)
+    pos=$(echo "${entry}" | cut -f2)
+    ref=$(echo "${entry}" | cut -f3)
+    alt=$(echo "${entry}" | cut -f4)
+    region="${chrom}:${pos}-${pos}"
 
-# ---------------------------------------------------------------------------
-# Step 2 – Note on high-confidence region handling
-# ---------------------------------------------------------------------------
-log "Step 2: High-confidence region handling ..."
+    log "  Checking ${chrom}:${pos} ${ref}>${alt} ..."
 
-# The GIAB v4.2.1 benchmark VCFs only contain variants within each sample's
-# high-confidence regions, so bcftools isec (Step 3) inherently restricts the
-# comparison to well-characterized genomic positions.  A variant flagged as
-# HG002-unique may simply be outside a parent's HC region rather than a true
-# DNM.  For a small integration-test dataset this is acceptable; downstream
-# manual inspection can confirm candidates.
-log "  Using implicit HC filtering from GIAB benchmark VCFs"
+    # Verify variant is in HG002 benchmark VCF
+    in_child=$(bcftools view -H -r "${region}" "${HG002_VCF}" 2>/dev/null | wc -l)
+    if [[ "${in_child}" -eq 0 ]]; then
+        log "    SKIP – not in HG002 benchmark VCF"
+        continue
+    fi
 
-# ---------------------------------------------------------------------------
-# Step 3 – Identify putative de novo mutations
-# ---------------------------------------------------------------------------
-log "Step 3: Identifying putative de novo mutations (bcftools isec) ..."
+    # Verify variant is absent from both parents
+    in_father=$(bcftools view -H -r "${region}" "${HG003_VCF}" 2>/dev/null | wc -l)
+    in_mother=$(bcftools view -H -r "${region}" "${HG004_VCF}" 2>/dev/null | wc -l)
+    if [[ "${in_father}" -gt 0 || "${in_mother}" -gt 0 ]]; then
+        log "    SKIP – present in parent(s) (father=${in_father}, mother=${in_mother})"
+        continue
+    fi
 
-# bcftools isec -C: output records from first file not present in any others
-bcftools isec -C \
-    "${WORK_DIR}/HG002.vcf.gz" \
-    "${WORK_DIR}/HG003.vcf.gz" \
-    "${WORK_DIR}/HG004.vcf.gz" \
-    -Oz -o "${WORK_DIR}/dnm_raw.vcf.gz"
+    log "    VERIFIED – child-only variant"
+    printf "%s\t%s\t%s\t%s\n" "${chrom}" "${pos}" "${ref}" "${alt}" \
+        >> "${WORK_DIR}/dnm_verified.tsv"
+    VERIFIED=$((VERIFIED + 1))
+done
 
-bcftools index -t "${WORK_DIR}/dnm_raw.vcf.gz"
-
-TOTAL_RAW=$(bcftools view -H "${WORK_DIR}/dnm_raw.vcf.gz" | wc -l)
-log "  Found ${TOTAL_RAW} HG002-unique variants (putative DNMs + private)"
-
-# ---------------------------------------------------------------------------
-# Step 4 – Filter to biallelic SNVs and select candidates
-# ---------------------------------------------------------------------------
-log "Step 4: Filtering to biallelic SNVs and selecting ${NUM_VARIANTS} candidates ..."
-
-# Keep only biallelic SNVs (simplest, most reliable variant type for testing)
-bcftools view -v snps -m2 -M2 "${WORK_DIR}/dnm_raw.vcf.gz" \
-    -Oz -o "${WORK_DIR}/dnm_snvs.vcf.gz"
-bcftools index -t "${WORK_DIR}/dnm_snvs.vcf.gz"
-
-TOTAL_SNVS=$(bcftools view -H "${WORK_DIR}/dnm_snvs.vcf.gz" | wc -l)
-log "  Biallelic SNVs: ${TOTAL_SNVS}"
-
-# Select candidates spread across different chromosomes.
-# Strategy: pick up to one variant per chromosome, cycling through
-# autosomes until we have enough candidates.
-bcftools view -H "${WORK_DIR}/dnm_snvs.vcf.gz" \
-    | awk -v n="${NUM_VARIANTS}" '
-        BEGIN { count = 0 }
-        {
-            chrom = $1
-            if (!(chrom in seen)) {
-                seen[chrom] = 1
-                print
-                count++
-                if (count >= n) exit
-            }
-        }
-    ' > "${WORK_DIR}/dnm_selected.txt"
-
-SELECTED=$(wc -l < "${WORK_DIR}/dnm_selected.txt")
-log "  Selected ${SELECTED} DNM candidates across different chromosomes"
-
-if [[ "${SELECTED}" -eq 0 ]]; then
-    die "No DNM candidates found.  Check that truth VCFs downloaded correctly."
+if [[ "${VERIFIED}" -eq 0 ]]; then
+    die "No DNM candidates could be verified. Check network connectivity."
 fi
 
+log "  Verified ${VERIFIED} DNM candidates"
+
 # ---------------------------------------------------------------------------
-# Step 5 – Create extraction BED (±PADDING around each candidate)
+# Step 2 – Create extraction regions (±PADDING around each candidate)
 # ---------------------------------------------------------------------------
-log "Step 5: Creating extraction regions (±${PADDING} bp) ..."
+log "Step 2: Creating extraction regions (±${PADDING} bp) ..."
 
 awk -v pad="${PADDING}" 'BEGIN{OFS="\t"} {
     chrom = $1
@@ -257,7 +244,7 @@ awk -v pad="${PADDING}" 'BEGIN{OFS="\t"} {
     if (start < 0) start = 0
     end   = pos + pad  # BED end (exclusive)
     print chrom, start, end
-}' "${WORK_DIR}/dnm_selected.txt" > "${WORK_DIR}/regions.bed"
+}' "${WORK_DIR}/dnm_verified.tsv" > "${WORK_DIR}/regions.bed"
 
 log "  Regions:"
 while IFS=$'\t' read -r chrom start end; do
@@ -268,9 +255,9 @@ done < "${WORK_DIR}/regions.bed"
 REGIONS=$(awk 'BEGIN{OFS=""} {printf "%s%s:%d-%d", (NR>1 ? " " : ""), $1, $2+1, $3}' "${WORK_DIR}/regions.bed")
 
 # ---------------------------------------------------------------------------
-# Step 6 – Extract reference FASTA for selected regions
+# Step 3 – Extract reference FASTA for selected regions
 # ---------------------------------------------------------------------------
-log "Step 6: Extracting reference FASTA for selected regions ..."
+log "Step 3: Extracting reference FASTA for selected regions ..."
 
 REGION_LIST=$(awk '{printf "%s:%d-%d\n", $1, $2+1, $3}' "${WORK_DIR}/regions.bed")
 while read -r reg; do
@@ -281,11 +268,11 @@ samtools faidx "${OUTPUT_DIR}/reference.fa"
 log "  Reference: ${OUTPUT_DIR}/reference.fa"
 
 # ---------------------------------------------------------------------------
-# Step 7 – Extract BAM regions for each trio member
+# Step 4 – Extract BAM regions for each trio member (via HTTPS)
 # ---------------------------------------------------------------------------
 extract_bam_regions() {
     local url="$1" label="$2" outbam="$3"
-    log "  Extracting ${label} reads ..."
+    log "  Extracting ${label} reads (HTTPS random access) ..."
     # shellcheck disable=SC2086
     samtools view -b -h -o "${WORK_DIR}/${label}_unsorted.bam" \
         "${url}" ${REGIONS} \
@@ -298,30 +285,26 @@ extract_bam_regions() {
     log "    ${count} reads -> ${outbam}"
 }
 
-log "Step 7: Extracting BAM regions from GIAB Illumina 2x250bp WGS ..."
+log "Step 4: Extracting BAM regions from GIAB Illumina 2x250bp WGS (HTTPS) ..."
 extract_bam_regions "${HG002_BAM}" "HG002_child"  "${OUTPUT_DIR}/HG002_child.bam"
 extract_bam_regions "${HG003_BAM}" "HG003_father" "${OUTPUT_DIR}/HG003_father.bam"
 extract_bam_regions "${HG004_BAM}" "HG004_mother" "${OUTPUT_DIR}/HG004_mother.bam"
 
 # ---------------------------------------------------------------------------
-# Step 8 – Create candidate VCF with selected DNMs
+# Step 5 – Create candidate VCF with verified DNMs
 # ---------------------------------------------------------------------------
-log "Step 8: Creating candidate VCF ..."
+log "Step 5: Creating candidate VCF ..."
 
 {
-    # VCF header
     echo "##fileformat=VCFv4.2"
     echo "##source=download_giab_dnm_testdata.sh"
     echo "##reference=GRCh38"
-    echo "##INFO=<ID=ORIGIN,Number=1,Type=String,Description=\"Variant origin (GIAB benchmark)\">"
-    # Contig lines from the selected regions
-    awk '{printf "##contig=<ID=%s>\n", $1}' "${WORK_DIR}/dnm_selected.txt" | sort -u
+    echo "##INFO=<ID=ORIGIN,Number=1,Type=String,Description=\"Variant origin\">"
+    awk '{printf "##contig=<ID=%s>\n", $1}' "${WORK_DIR}/dnm_verified.tsv" | sort -u
     echo -e "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO"
-
-    # Variant lines from the selected records
     awk 'BEGIN{OFS="\t"} {
-        print $1, $2, ".", $4, $5, ".", "PASS", "ORIGIN=GIAB_v4.2.1_denovo"
-    }' "${WORK_DIR}/dnm_selected.txt"
+        print $1, $2, ".", $3, $4, ".", "PASS", "ORIGIN=GIAB_mosaic_benchmark_denovo"
+    }' "${WORK_DIR}/dnm_verified.tsv"
 } > "${WORK_DIR}/candidates.vcf"
 
 bgzip -c "${WORK_DIR}/candidates.vcf" > "${OUTPUT_DIR}/candidates.vcf.gz"
@@ -329,14 +312,14 @@ bcftools index -t "${OUTPUT_DIR}/candidates.vcf.gz"
 log "  Candidates VCF: ${OUTPUT_DIR}/candidates.vcf.gz"
 
 # ---------------------------------------------------------------------------
-# Step 9 – Write manifest
+# Step 6 – Write manifest
 # ---------------------------------------------------------------------------
-log "Step 9: Writing manifest ..."
+log "Step 6: Writing manifest ..."
 
 cat > "${OUTPUT_DIR}/README.md" << 'MANIFEST_EOF'
 # GIAB HG002 Trio – De Novo Mutation Test Data
 
-Small BAM slices around putative de novo mutations (DNMs) from the GIAB
+Small BAM slices around known de novo mutations (DNMs) from the GIAB
 Ashkenazi trio, for integration testing of `kmer_denovo_filter`.
 
 ## Samples
@@ -350,14 +333,12 @@ Ashkenazi trio, for integration testing of `kmer_denovo_filter`.
 ## Data sources
 
 - **BAMs**: NIST Illumina 2×250 bp WGS, aligned with novoalign to GRCh38
-- **Truth VCFs**: GIAB v4.2.1 benchmark (GRCh38, chr1-22)
+  (queried via HTTPS random access – never downloaded in full)
+- **DNM positions**: Curated from usnistgov/giab-HG002-mosaic-benchmark
+  (Strelka2 somatic caller, IGV-curated candidate SNVs)
+- **Verification**: Each position verified against GIAB v4.2.1 benchmark VCFs
+  over HTTPS (present in HG002, absent from HG003 and HG004)
 - **Reference**: GCA_000001405.15 GRCh38 no-alt analysis set
-
-## DNM identification
-
-Putative DNMs were identified using `bcftools isec -C` to find variants
-present in the HG002 benchmark VCF but absent from both HG003 and HG004
-benchmark VCFs.  Only biallelic SNVs were retained.
 
 ## Files
 
@@ -365,7 +346,7 @@ benchmark VCFs.  Only biallelic SNVs were retained.
 - `HG003_father.bam` / `.bai` – Father reads around DNM sites
 - `HG004_mother.bam` / `.bai` – Mother reads around DNM sites
 - `reference.fa` / `.fai` – Reference FASTA (selected regions only)
-- `candidates.vcf.gz` / `.tbi` – VCF with selected DNM variants
+- `candidates.vcf.gz` / `.tbi` – VCF with verified DNM variants
 
 ## Usage with kmer-denovo
 
@@ -393,5 +374,5 @@ ls -lh "${OUTPUT_DIR}/" | tail -n +2 | while read -r line; do
     log "  ${line}"
 done
 log ""
-log "Selected DNM candidates:"
-awk '{printf "  %s:%s  %s>%s\n", $1, $2, $4, $5}' "${WORK_DIR}/dnm_selected.txt" >&2
+log "Verified DNM candidates:"
+awk '{printf "  %s:%s  %s>%s\n", $1, $2, $3, $4}' "${WORK_DIR}/dnm_verified.tsv" >&2
