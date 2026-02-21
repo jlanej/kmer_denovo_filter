@@ -392,7 +392,6 @@ class TestPipelineIntegration:
         ref_fa = os.path.join(tmpdir, "ref.fa")
         ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
 
-        var_pos_0 = 50
         child_seq = list(ref_seq[40:80])
         child_seq[10] = "G" if ref_seq[50] != "G" else "T"
         child_seq = "".join(child_seq)
@@ -442,7 +441,6 @@ class TestPipelineIntegration:
         ref_fa = os.path.join(tmpdir, "ref.fa")
         ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
 
-        var_pos_0 = 50
         child_seq = list(ref_seq[40:80])
         child_seq[10] = "G" if ref_seq[50] != "G" else "T"
         child_seq = "".join(child_seq)
