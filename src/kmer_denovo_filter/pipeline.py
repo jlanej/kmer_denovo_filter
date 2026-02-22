@@ -83,11 +83,16 @@ def _collect_child_kmers(
             if not (read.reference_start <= pos < read.reference_end):
                 continue
 
+            aligned_pairs = read.get_aligned_pairs(matches_only=False)
+            seq = read.query_sequence
+            quals = read.query_qualities
             kmers = extract_variant_spanning_kmers(
                 read, pos, kmer_size, min_baseq, ref=ref, alt=alt,
+                aligned_pairs=aligned_pairs, seq=seq, quals=quals,
             )
             if kmers:
-                supports = read_supports_alt(read, pos, ref, alt)
+                supports = read_supports_alt(read, pos, ref, alt,
+                                             aligned_pairs=aligned_pairs, seq=seq)
                 read_kmers.append((read.query_name, kmers, supports))
                 batch.update(kmers)
                 if len(batch) >= flush_threshold:
