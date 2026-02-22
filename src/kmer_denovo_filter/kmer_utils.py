@@ -29,9 +29,9 @@ def canonicalize(kmer):
 def read_supports_alt(read, variant_pos, ref, alt):
     """Return True if *read* carries the alternate allele at *variant_pos*.
 
-    For SNPs the read base must match *alt*.  For deletions the reference
-    bases beyond the anchor must be absent from the read.  For insertions
-    the inserted sequence must be present following the anchor.
+    Extracts the exact read sequence aligned to the reference span of the
+    variant and compares it strictly to the candidate alternate allele.
+    Handles SNPs, MNPs, insertions, deletions, and complex indels natively.
 
     Returns ``False`` for symbolic alleles or when *alt* is ``None``.
     """
@@ -44,42 +44,28 @@ def read_supports_alt(read, variant_pos, ref, alt):
 
     aligned_pairs = read.get_aligned_pairs(matches_only=False)
 
-    # Build ref-pos → read-pos map (only for aligned positions)
-    ref_to_qpos = {}
-    for qpos, rpos in aligned_pairs:
-        if rpos is not None and qpos is not None:
-            ref_to_qpos[rpos] = qpos
+    extracted_seq = []
+    in_variant_region = False
 
-    anchor_qpos = ref_to_qpos.get(variant_pos)
-    if anchor_qpos is None:
+    for qpos, rpos in aligned_pairs:
+        # Stop collecting once we reach or pass the end of the reference allele span
+        if rpos is not None and rpos >= variant_pos + len(ref):
+            break
+
+        # Start collecting when we hit the exact start of the variant
+        if rpos == variant_pos:
+            in_variant_region = True
+
+        if in_variant_region:
+            # qpos is None for deleted bases (skip), otherwise append the read base
+            if qpos is not None:
+                extracted_seq.append(seq[qpos])
+
+    # If the variant region was skipped entirely due to read boundaries
+    if not in_variant_region:
         return False
 
-    if len(ref) == 1 and len(alt) == 1:
-        # SNP
-        return seq[anchor_qpos].upper() == alt.upper()
-
-    if len(alt) < len(ref):
-        # Deletion – anchor base must match and deleted ref positions must
-        # be absent from the read alignment.
-        if seq[anchor_qpos].upper() != alt[0].upper():
-            return False
-        for i in range(len(alt), len(ref)):
-            if ref_to_qpos.get(variant_pos + i) is not None:
-                return False
-        return True
-
-    if len(alt) > len(ref):
-        # Insertion – the inserted bases must follow the anchor in the read.
-        ins_bases = alt[len(ref):]
-        for i, base in enumerate(ins_bases):
-            rp = anchor_qpos + len(ref) + i
-            if rp >= len(seq):
-                return False
-            if seq[rp].upper() != base.upper():
-                return False
-        return True
-
-    return False
+    return "".join(extracted_seq).upper() == alt.upper()
 
 
 def extract_variant_spanning_kmers(

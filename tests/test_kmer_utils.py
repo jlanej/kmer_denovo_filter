@@ -366,3 +366,69 @@ class TestReadSupportsAlt:
         pairs = [(i, 100 + i) for i in range(4)]
         read = self.MockRead(seq, pairs)
         assert read_supports_alt(read, 200, "A", "T") is False
+
+    def test_mnp_supports_alt(self):
+        # Read has CG at ref pos 100-101, variant REF=AT ALT=CG
+        seq = "CGAAA"
+        pairs = [(i, 100 + i) for i in range(5)]
+        read = self.MockRead(seq, pairs)
+        assert read_supports_alt(read, 100, "AT", "CG") is True
+
+    def test_mnp_does_not_support_alt(self):
+        # Read has AT (reference) at ref pos 100-101
+        seq = "ATAAA"
+        pairs = [(i, 100 + i) for i in range(5)]
+        read = self.MockRead(seq, pairs)
+        assert read_supports_alt(read, 100, "AT", "CG") is False
+
+    def test_mnp_partial_match_returns_false(self):
+        # Read has CA at ref pos 100-101 (only first base matches alt)
+        seq = "CAAAA"
+        pairs = [(i, 100 + i) for i in range(5)]
+        read = self.MockRead(seq, pairs)
+        assert read_supports_alt(read, 100, "AT", "CG") is False
+
+    def test_complex_deletion_supports_alt(self):
+        # REF=ACGT ALT=AT — anchor + T remain, CG are deleted
+        # Read: ATXXX with deletion of ref positions 102 and 103
+        seq = "ATXXX"
+        pairs = [
+            (0, 100), (1, 101),
+            (None, 102), (None, 103),  # deleted CG
+            (2, 104), (3, 105), (4, 106),
+        ]
+        read = self.MockRead(seq, pairs)
+        assert read_supports_alt(read, 100, "ACGT", "AT") is True
+
+    def test_complex_deletion_wrong_tail_returns_false(self):
+        # Same deletion but read has AC instead of AT after anchor
+        seq = "ACXXX"
+        pairs = [
+            (0, 100), (1, 101),
+            (None, 102), (None, 103),
+            (2, 104), (3, 105), (4, 106),
+        ]
+        read = self.MockRead(seq, pairs)
+        assert read_supports_alt(read, 100, "ACGT", "AT") is False
+
+    def test_insertion_anchor_mismatch_returns_false(self):
+        # Anchor base in read does not match alt[0]; should return False
+        # seq[3] = 'X', which maps to ref pos 103 (the anchor) — 'X' != alt[0]='G'
+        seq = "ACTXCATATCGA"
+        pairs = [
+            (0, 100), (1, 101), (2, 102), (3, 103),
+            (4, None), (5, None), (6, None), (7, None),  # inserted
+            (8, 104), (9, 105), (10, 106), (11, 107),
+        ]
+        read = self.MockRead(seq, pairs)
+        # anchor at pos 103 maps to seq[3]='X', which does not match alt[0]='G'
+        assert read_supports_alt(read, 103, "G", "GCATA") is False
+
+    def test_insertion_tandem_repeat_no_false_positive(self):
+        # Read perfectly matches reference (no insertion),
+        # downstream ref resembles inserted bases — must NOT be a false positive.
+        seq = "ACGTCATA"
+        pairs = [(i, 100 + i) for i in range(8)]
+        read = self.MockRead(seq, pairs)
+        # REF=T, ALT=TCATA — but read has no insertion
+        assert read_supports_alt(read, 103, "T", "TCATA") is False
