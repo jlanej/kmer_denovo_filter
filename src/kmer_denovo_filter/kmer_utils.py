@@ -26,7 +26,7 @@ def canonicalize(kmer):
     return min(kmer, rc)
 
 
-def read_supports_alt(read, variant_pos, ref, alt):
+def read_supports_alt(read, variant_pos, ref, alt, *, aligned_pairs=None, seq=None):
     """Return True if *read* carries the alternate allele at *variant_pos*.
 
     Extracts the exact read sequence aligned to the reference span of the
@@ -34,15 +34,24 @@ def read_supports_alt(read, variant_pos, ref, alt):
     Handles SNPs, MNPs, insertions, deletions, and complex indels natively.
 
     Returns ``False`` for symbolic alleles or when *alt* is ``None``.
+
+    Args:
+        aligned_pairs: Optional pre-computed result of
+            ``read.get_aligned_pairs(matches_only=False)``.  Computed from
+            *read* when not provided.
+        seq: Optional pre-decoded ``read.query_sequence``.  Decoded from
+            *read* when not provided.
     """
     if alt is None or _is_symbolic(alt):
         return False
 
-    seq = read.query_sequence
+    if seq is None:
+        seq = read.query_sequence
     if seq is None:
         return False
 
-    aligned_pairs = read.get_aligned_pairs(matches_only=False)
+    if aligned_pairs is None:
+        aligned_pairs = read.get_aligned_pairs(matches_only=False)
 
     extracted_seq = []
     in_variant_region = False
@@ -70,6 +79,7 @@ def read_supports_alt(read, variant_pos, ref, alt):
 
 def extract_variant_spanning_kmers(
     read, variant_pos, k, min_baseq=0, ref=None, alt=None,
+    *, aligned_pairs=None, seq=None, quals=None,
 ):
     """Extract canonical k-mers from a read that span the variant position.
 
@@ -80,11 +90,19 @@ def extract_variant_spanning_kmers(
         min_baseq: Minimum base quality threshold
         ref: Reference allele string (for INDEL handling)
         alt: Alternate allele string (for INDEL handling)
+        aligned_pairs: Optional pre-computed result of
+            ``read.get_aligned_pairs(matches_only=False)``.  Computed from
+            *read* when not provided.
+        seq: Optional pre-decoded ``read.query_sequence``.  Decoded from
+            *read* when not provided.
+        quals: Optional pre-decoded ``read.query_qualities``.  Decoded from
+            *read* when not provided.
 
     Returns:
         Set of canonical k-mer strings spanning the variant position.
     """
-    aligned_pairs = read.get_aligned_pairs(matches_only=True)
+    if aligned_pairs is None:
+        aligned_pairs = read.get_aligned_pairs(matches_only=False)
     read_pos_at_variant = None
     for qpos, rpos in aligned_pairs:
         if rpos == variant_pos:
@@ -94,10 +112,12 @@ def extract_variant_spanning_kmers(
     if read_pos_at_variant is None:
         return set()
 
-    seq = read.query_sequence
-    quals = read.query_qualities
+    if seq is None:
+        seq = read.query_sequence
     if seq is None:
         return set()
+    if quals is None:
+        quals = read.query_qualities
 
     # For insertions the variant occupies len(alt) bases in the read.
     # Extend the window so k-mers spanning the right junction are captured.
@@ -113,7 +133,7 @@ def extract_variant_spanning_kmers(
         if "N" in kmer or "n" in kmer:
             continue
         if quals is not None and min_baseq > 0:
-            if any(q < min_baseq for q in quals[s:s + k]):
+            if min(quals[s:s + k]) < min_baseq:
                 continue
         kmers.add(canonicalize(kmer))
 
