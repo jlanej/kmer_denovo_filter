@@ -87,7 +87,8 @@ kmer-denovo \
 
 ### Output
 
-The output VCF is annotated with three fields, **DKU**, **DKT**, and **DKA**:
+The output VCF is annotated with five fields, **DKU**, **DKT**, **DKA**,
+**MAX_PKC**, and **AVG_PKC**:
 
 * **DKU** – Number of child reads with at least one variant-spanning k-mer
   unique to the child (absent from both parents).
@@ -95,19 +96,25 @@ The output VCF is annotated with three fields, **DKU**, **DKT**, and **DKA**:
 * **DKA** – Number of child reads with at least one unique k-mer that also
   exactly support the candidate allele. This helps distinguish real de novo
   signal from spurious noise.
+* **MAX_PKC** – Maximum k-mer count among variant-spanning k-mers found in
+  the parents. A value of 0 means none of the variant k-mers were observed
+  in either parent.
+* **AVG_PKC** – Average k-mer count (rounded to 2 decimal places) across
+  variant-spanning k-mers found in the parents.
 
 When `--proband-id` is provided and the given ID matches a sample in the
-input VCF, DKU, DKT, and DKA are written as **FORMAT** (per-sample) fields
-on that sample. If `--proband-id` is omitted or does not match any VCF
-sample, they are written as **INFO** fields instead.
+input VCF, DKU, DKT, DKA, MAX_PKC, and AVG_PKC are written as **FORMAT**
+(per-sample) fields on that sample. If `--proband-id` is omitted or does
+not match any VCF sample, they are written as **INFO** fields instead.
 
 The optional `--metrics` JSON file provides a summary including total
 variants, child-unique k-mer counts, and the number of variants with unique
 reads.
 
 The optional `--summary` text file provides a human-readable overview
-including variant counts, read-support statistics, and a per-variant table
-showing DKU/DKT/DKA values and de novo calls.
+including variant counts, read-support statistics (DKU, DKT, DKA, MAX_PKC,
+AVG_PKC), and a per-variant table showing all annotation values and de novo
+calls.
 
 The optional `--informative-reads` BAM file contains child reads that carry
 at least one variant-spanning k-mer absent from both parents. Each read is

@@ -388,6 +388,8 @@ def _write_summary(summary_path, variants, annotations):
     dku_values = [a["dku"] for a in annotations.values()]
     dkt_values = [a["dkt"] for a in annotations.values()]
     dka_values = [a["dka"] for a in annotations.values()]
+    max_pkc_values = [a["max_pkc"] for a in annotations.values()]
+    avg_pkc_values = [a["avg_pkc"] for a in annotations.values()]
     dnm_dku = [a["dku"] for a in annotations.values() if a["dku"] > 0]
 
     lines = []
@@ -407,11 +409,15 @@ def _write_summary(summary_path, variants, annotations):
         mean_dkt = sum(dkt_values) / len(dkt_values)
         mean_dka = sum(dka_values) / len(dka_values)
         median_dku = statistics.median(dku_values)
+        mean_max_pkc = sum(max_pkc_values) / len(max_pkc_values)
+        mean_avg_pkc = sum(avg_pkc_values) / len(avg_pkc_values)
         lines.append("Read Support Statistics")
         lines.append("-" * 40)
         lines.append(f"  DKU  mean:   {mean_dku:>6.1f}   median: {median_dku:>4}")
         lines.append(f"  DKT  mean:   {mean_dkt:>6.1f}")
         lines.append(f"  DKA  mean:   {mean_dka:>6.1f}")
+        lines.append(f"  MAX_PKC  mean: {mean_max_pkc:>6.1f}")
+        lines.append(f"  AVG_PKC  mean: {mean_avg_pkc:>6.1f}")
         lines.append("")
 
     if dnm_dku:
@@ -420,19 +426,19 @@ def _write_summary(summary_path, variants, annotations):
         lines.append("")
 
     lines.append("Per-Variant Results")
-    lines.append("-" * 60)
-    lines.append(f"  {'Variant':<30s} {'DKU':>5s} {'DKT':>5s} {'DKA':>5s}  Call")
-    lines.append(f"  {'-------':<30s} {'---':>5s} {'---':>5s} {'---':>5s}  ----")
+    lines.append("-" * 80)
+    lines.append(f"  {'Variant':<30s} {'DKU':>5s} {'DKT':>5s} {'DKA':>5s} {'MAX_PKC':>8s} {'AVG_PKC':>8s}  Call")
+    lines.append(f"  {'-------':<30s} {'---':>5s} {'---':>5s} {'---':>5s} {'-------':>8s} {'-------':>8s}  ----")
 
     for var in variants:
         var_key = f"{var['chrom']}:{var['pos']}"
-        ann = annotations.get(var_key, {"dku": 0, "dkt": 0, "dka": 0})
+        ann = annotations.get(var_key, {"dku": 0, "dkt": 0, "dka": 0, "max_pkc": 0, "avg_pkc": 0.0})
         ref = var["ref"]
         alts = var["alts"]
         alt = alts[0] if alts else "."
         label = f"{var['chrom']}:{var['pos'] + 1} {ref}>{alt}"
         call = "DE_NOVO" if ann["dku"] > 0 else "inherited"
-        lines.append(f"  {label:<30s} {ann['dku']:>5d} {ann['dkt']:>5d} {ann['dka']:>5d}  {call}")
+        lines.append(f"  {label:<30s} {ann['dku']:>5d} {ann['dkt']:>5d} {ann['dka']:>5d} {ann['max_pkc']:>8} {ann['avg_pkc']:>8}  {call}")
 
     lines.append("")
     lines.append("=" * 60)
