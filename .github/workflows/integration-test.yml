@@ -65,4 +65,4 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add tests/example_output/
-          git diff --staged --quiet || (git commit -m "Update example output [skip ci]" && git push)
+          git diff --staged --quiet || (git commit -m "Update example output [skip ci]" && git push || echo "Push failed; example output will be updated on next successful run.")
