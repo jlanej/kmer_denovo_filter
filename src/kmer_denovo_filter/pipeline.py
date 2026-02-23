@@ -1,5 +1,6 @@
 """Main pipeline for de novo variant k-mer analysis."""
 
+import collections
 import json
 import logging
 import os
@@ -178,7 +179,7 @@ def _scan_parent_jellyfish(
             f"jellyfish count failed: {jf_stderr.decode()}"
         )
 
-    found_kmers = set()
+    found_kmers = {}
     if os.path.exists(jf_output):
         dump_cmd = ["jellyfish", "dump", "-c", "-L", "1", jf_output]
         result = subprocess.run(
@@ -186,8 +187,8 @@ def _scan_parent_jellyfish(
         )
         for line in result.stdout.strip().split("\n"):
             if line:
-                kmer = line.split()[0]
-                found_kmers.add(kmer)
+                parts = line.split()
+                found_kmers[parts[0]] = int(parts[1])
 
     return found_kmers
 
@@ -274,6 +275,26 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
              "that also exactly support the candidate allele"),
         ],
     )
+    vcf_in.header.add_meta(
+        category,
+        items=[
+            ("ID", "MAX_PKC"),
+            ("Number", "1"),
+            ("Type", "Integer"),
+            ("Description",
+             "Maximum k-mer count in parents for variant-spanning k-mers"),
+        ],
+    )
+    vcf_in.header.add_meta(
+        category,
+        items=[
+            ("ID", "AVG_PKC"),
+            ("Number", "1"),
+            ("Type", "Float"),
+            ("Description",
+             "Average k-mer count in parents for variant-spanning k-mers found in parents"),
+        ],
+    )
 
     if not output_vcf.endswith(".gz"):
         output_vcf = output_vcf + ".gz"
@@ -288,10 +309,14 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                 rec.samples[proband_id]["DKU"] = ann["dku"]
                 rec.samples[proband_id]["DKT"] = ann["dkt"]
                 rec.samples[proband_id]["DKA"] = ann["dka"]
+                rec.samples[proband_id]["MAX_PKC"] = ann["max_pkc"]
+                rec.samples[proband_id]["AVG_PKC"] = ann["avg_pkc"]
             else:
                 rec.info["DKU"] = ann["dku"]
                 rec.info["DKT"] = ann["dkt"]
                 rec.info["DKA"] = ann["dka"]
+                rec.info["MAX_PKC"] = ann["max_pkc"]
+                rec.info["AVG_PKC"] = ann["avg_pkc"]
         vcf_out.write(rec)
 
     vcf_out.close()
@@ -450,7 +475,7 @@ def run_pipeline(args):
     logger.info("Extracting child k-mers (k=%d)", args.kmer_size)
 
     # 3. Scan parents using jellyfish
-    parent_found_kmers = set()
+    parent_found_kmers = collections.Counter()
 
     with tempfile.TemporaryDirectory(prefix="kmer_denovo_") as tmpdir:
         kmer_fasta = os.path.join(tmpdir, "child_kmers.fa")
@@ -501,16 +526,27 @@ def run_pipeline(args):
         dku = 0
         dka = 0
         informative_names = set()
+        all_variant_kmers = set()
         for read_name, kmers, supports_alt in read_kmers_list:
+            all_variant_kmers.update(kmers)
             # A read is informative if it has at least one variant-spanning
             # k-mer that is absent from both parents.
-            if kmers - parent_found_kmers:
+            if kmers - parent_found_kmers.keys():
                 dku += 1
                 informative_names.add(read_name)
                 if supports_alt:
                     dka += 1
 
-        annotations[var_key] = {"dku": dku, "dkt": dkt, "dka": dka}
+        # Compute parent k-mer count metrics for this variant
+        parent_counts = [
+            parent_found_kmers[k]
+            for k in all_variant_kmers
+            if k in parent_found_kmers
+        ]
+        max_pkc = max(parent_counts) if parent_counts else 0
+        avg_pkc = round(statistics.mean(parent_counts), 2) if parent_counts else 0.0
+
+        annotations[var_key] = {"dku": dku, "dkt": dkt, "dka": dka, "max_pkc": max_pkc, "avg_pkc": avg_pkc}
         if informative_names:
             informative_reads_by_variant[var_key] = informative_names
 

@@ -157,6 +157,9 @@ class TestPipelineIntegration:
         assert records[0].samples["HG002"]["DKU"] > 0
         assert records[0].samples["HG002"]["DKT"] is not None
         assert records[0].samples["HG002"]["DKA"] > 0
+        # De novo variant: child-unique k-mers are not in parents
+        assert records[0].samples["HG002"]["MAX_PKC"] is not None
+        assert records[0].samples["HG002"]["AVG_PKC"] is not None
         vcf_out.close()
 
         # Check metrics file
@@ -231,6 +234,8 @@ class TestPipelineIntegration:
         assert len(records) == 1
         assert records[0].samples["HG002"]["DKU"] == 0
         assert records[0].samples["HG002"]["DKA"] == 0
+        # Inherited variant: child k-mers are shared with parent, so max_pkc >= 1
+        assert records[0].samples["HG002"]["MAX_PKC"] >= 1
         vcf_out.close()
 
         # No informative reads for inherited variant
@@ -441,6 +446,8 @@ class TestPipelineIntegration:
         assert "DKT" in records[0].info
         assert "DKA" in records[0].info
         assert records[0].info["DKA"] > 0
+        assert "MAX_PKC" in records[0].info
+        assert "AVG_PKC" in records[0].info
         vcf_out.close()
 
     def test_info_annotation_when_no_proband_id(self, tmpdir):
@@ -491,6 +498,8 @@ class TestPipelineIntegration:
         assert "DKT" in records[0].info
         assert "DKA" in records[0].info
         assert records[0].info["DKA"] > 0
+        assert "MAX_PKC" in records[0].info
+        assert "AVG_PKC" in records[0].info
         vcf_out.close()
 
 
