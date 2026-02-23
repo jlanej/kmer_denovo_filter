@@ -397,6 +397,56 @@ class TestPipelineIntegration:
             "Insertion should produce DKU > 0"
         vcf_out.close()
 
+    def test_summary_includes_pkc_fields(self, tmpdir):
+        """Summary output should include MAX_PKC and AVG_PKC columns."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        child_seq = list(ref_seq[40:80])
+        child_seq[10] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [("read1", 40, child_seq, None)],
+        )
+
+        parent_seq = ref_seq[40:80]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom, [("mread1", 40, parent_seq, None)])
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(father_bam, ref_fa, chrom, [("fread1", 40, parent_seq, None)])
+
+        in_vcf = os.path.join(tmpdir, "input.vcf")
+        alt_base = child_seq[10]
+        _create_vcf(in_vcf, chrom, [(51, ref_seq[50], alt_base)])
+
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
+        summary_txt = os.path.join(tmpdir, "summary.txt")
+
+        args = parse_args([
+            "--child", child_bam,
+            "--mother", mother_bam,
+            "--father", father_bam,
+            "--ref-fasta", ref_fa,
+            "--vcf", in_vcf,
+            "--output", out_vcf,
+            "--summary", summary_txt,
+            "--kmer-size", "5",
+            "--proband-id", "HG002",
+        ])
+        run_pipeline(args)
+
+        assert os.path.exists(summary_txt)
+        with open(summary_txt) as fh:
+            summary = fh.read()
+
+        # Summary should contain MAX_PKC and AVG_PKC in the header and stats
+        assert "MAX_PKC" in summary
+        assert "AVG_PKC" in summary
+
     def test_info_annotation_when_proband_unmatched(self, tmpdir):
         """When --proband-id does not match a VCF sample, use INFO fields."""
         chrom = "chr1"
