@@ -160,6 +160,10 @@ class TestPipelineIntegration:
         # De novo variant: child-unique k-mers are not in parents
         assert records[0].samples["HG002"]["MAX_PKC"] is not None
         assert records[0].samples["HG002"]["AVG_PKC"] is not None
+        assert records[0].samples["HG002"]["MIN_PKC"] is not None
+        assert records[0].samples["HG002"]["MAX_PKC_ALT"] is not None
+        assert records[0].samples["HG002"]["AVG_PKC_ALT"] is not None
+        assert records[0].samples["HG002"]["MIN_PKC_ALT"] is not None
         vcf_out.close()
 
         # Check metrics file
@@ -236,6 +240,7 @@ class TestPipelineIntegration:
         assert records[0].samples["HG002"]["DKA"] == 0
         # Inherited variant: child k-mers are shared with parent, so max_pkc >= 1
         assert records[0].samples["HG002"]["MAX_PKC"] >= 1
+        assert records[0].samples["HG002"]["MIN_PKC"] >= 1
         vcf_out.close()
 
         # No informative reads for inherited variant
@@ -446,6 +451,10 @@ class TestPipelineIntegration:
         # Summary should contain MAX_PKC and AVG_PKC in the header and stats
         assert "MAX_PKC" in summary
         assert "AVG_PKC" in summary
+        assert "MIN_PKC" in summary
+        assert "MAX_PKC_ALT" in summary
+        assert "AVG_PKC_ALT" in summary
+        assert "MIN_PKC_ALT" in summary
 
     def test_info_annotation_when_proband_unmatched(self, tmpdir):
         """When --proband-id does not match a VCF sample, use INFO fields."""
@@ -498,6 +507,10 @@ class TestPipelineIntegration:
         assert records[0].info["DKA"] > 0
         assert "MAX_PKC" in records[0].info
         assert "AVG_PKC" in records[0].info
+        assert "MIN_PKC" in records[0].info
+        assert "MAX_PKC_ALT" in records[0].info
+        assert "AVG_PKC_ALT" in records[0].info
+        assert "MIN_PKC_ALT" in records[0].info
         vcf_out.close()
 
     def test_info_annotation_when_no_proband_id(self, tmpdir):
@@ -550,6 +563,10 @@ class TestPipelineIntegration:
         assert records[0].info["DKA"] > 0
         assert "MAX_PKC" in records[0].info
         assert "AVG_PKC" in records[0].info
+        assert "MIN_PKC" in records[0].info
+        assert "MAX_PKC_ALT" in records[0].info
+        assert "AVG_PKC_ALT" in records[0].info
+        assert "MIN_PKC_ALT" in records[0].info
         vcf_out.close()
 
 

@@ -295,6 +295,46 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
              "Average k-mer count in parents for variant-spanning k-mers found in parents"),
         ],
     )
+    vcf_in.header.add_meta(
+        category,
+        items=[
+            ("ID", "MIN_PKC"),
+            ("Number", "1"),
+            ("Type", "Integer"),
+            ("Description",
+             "Minimum k-mer count in parents for variant-spanning k-mers"),
+        ],
+    )
+    vcf_in.header.add_meta(
+        category,
+        items=[
+            ("ID", "MAX_PKC_ALT"),
+            ("Number", "1"),
+            ("Type", "Integer"),
+            ("Description",
+             "Maximum k-mer count in parents for alt-allele-supporting k-mers"),
+        ],
+    )
+    vcf_in.header.add_meta(
+        category,
+        items=[
+            ("ID", "AVG_PKC_ALT"),
+            ("Number", "1"),
+            ("Type", "Float"),
+            ("Description",
+             "Average k-mer count in parents for alt-allele-supporting k-mers found in parents"),
+        ],
+    )
+    vcf_in.header.add_meta(
+        category,
+        items=[
+            ("ID", "MIN_PKC_ALT"),
+            ("Number", "1"),
+            ("Type", "Integer"),
+            ("Description",
+             "Minimum k-mer count in parents for alt-allele-supporting k-mers"),
+        ],
+    )
 
     if not output_vcf.endswith(".gz"):
         output_vcf = output_vcf + ".gz"
@@ -311,12 +351,20 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                 rec.samples[proband_id]["DKA"] = ann["dka"]
                 rec.samples[proband_id]["MAX_PKC"] = ann["max_pkc"]
                 rec.samples[proband_id]["AVG_PKC"] = ann["avg_pkc"]
+                rec.samples[proband_id]["MIN_PKC"] = ann["min_pkc"]
+                rec.samples[proband_id]["MAX_PKC_ALT"] = ann["max_pkc_alt"]
+                rec.samples[proband_id]["AVG_PKC_ALT"] = ann["avg_pkc_alt"]
+                rec.samples[proband_id]["MIN_PKC_ALT"] = ann["min_pkc_alt"]
             else:
                 rec.info["DKU"] = ann["dku"]
                 rec.info["DKT"] = ann["dkt"]
                 rec.info["DKA"] = ann["dka"]
                 rec.info["MAX_PKC"] = ann["max_pkc"]
                 rec.info["AVG_PKC"] = ann["avg_pkc"]
+                rec.info["MIN_PKC"] = ann["min_pkc"]
+                rec.info["MAX_PKC_ALT"] = ann["max_pkc_alt"]
+                rec.info["AVG_PKC_ALT"] = ann["avg_pkc_alt"]
+                rec.info["MIN_PKC_ALT"] = ann["min_pkc_alt"]
         vcf_out.write(rec)
 
     vcf_out.close()
@@ -390,6 +438,10 @@ def _write_summary(summary_path, variants, annotations):
     dka_values = [a["dka"] for a in annotations.values()]
     max_pkc_values = [a["max_pkc"] for a in annotations.values()]
     avg_pkc_values = [a["avg_pkc"] for a in annotations.values()]
+    min_pkc_values = [a["min_pkc"] for a in annotations.values()]
+    max_pkc_alt_values = [a["max_pkc_alt"] for a in annotations.values()]
+    avg_pkc_alt_values = [a["avg_pkc_alt"] for a in annotations.values()]
+    min_pkc_alt_values = [a["min_pkc_alt"] for a in annotations.values()]
     dnm_dku = [a["dku"] for a in annotations.values() if a["dku"] > 0]
 
     lines = []
@@ -411,6 +463,10 @@ def _write_summary(summary_path, variants, annotations):
         median_dku = statistics.median(dku_values)
         mean_max_pkc = sum(max_pkc_values) / len(max_pkc_values)
         mean_avg_pkc = sum(avg_pkc_values) / len(avg_pkc_values)
+        mean_min_pkc = sum(min_pkc_values) / len(min_pkc_values)
+        mean_max_pkc_alt = sum(max_pkc_alt_values) / len(max_pkc_alt_values)
+        mean_avg_pkc_alt = sum(avg_pkc_alt_values) / len(avg_pkc_alt_values)
+        mean_min_pkc_alt = sum(min_pkc_alt_values) / len(min_pkc_alt_values)
         lines.append("Read Support Statistics")
         lines.append("-" * 40)
         lines.append(f"  DKU  mean:   {mean_dku:>6.1f}   median: {median_dku:>4}")
@@ -418,6 +474,10 @@ def _write_summary(summary_path, variants, annotations):
         lines.append(f"  DKA  mean:   {mean_dka:>6.1f}")
         lines.append(f"  MAX_PKC  mean: {mean_max_pkc:>6.1f}")
         lines.append(f"  AVG_PKC  mean: {mean_avg_pkc:>6.1f}")
+        lines.append(f"  MIN_PKC  mean: {mean_min_pkc:>6.1f}")
+        lines.append(f"  MAX_PKC_ALT  mean: {mean_max_pkc_alt:>6.1f}")
+        lines.append(f"  AVG_PKC_ALT  mean: {mean_avg_pkc_alt:>6.1f}")
+        lines.append(f"  MIN_PKC_ALT  mean: {mean_min_pkc_alt:>6.1f}")
         lines.append("")
 
     if dnm_dku:
@@ -426,19 +486,19 @@ def _write_summary(summary_path, variants, annotations):
         lines.append("")
 
     lines.append("Per-Variant Results")
-    lines.append("-" * 80)
-    lines.append(f"  {'Variant':<30s} {'DKU':>5s} {'DKT':>5s} {'DKA':>5s} {'MAX_PKC':>8s} {'AVG_PKC':>8s}  Call")
-    lines.append(f"  {'-------':<30s} {'---':>5s} {'---':>5s} {'---':>5s} {'-------':>8s} {'-------':>8s}  ----")
+    lines.append("-" * 120)
+    lines.append(f"  {'Variant':<30s} {'DKU':>5s} {'DKT':>5s} {'DKA':>5s} {'MAX_PKC':>8s} {'AVG_PKC':>8s} {'MIN_PKC':>8s} {'MAX_PKC_ALT':>12s} {'AVG_PKC_ALT':>12s} {'MIN_PKC_ALT':>12s}  Call")
+    lines.append(f"  {'-------':<30s} {'---':>5s} {'---':>5s} {'---':>5s} {'-------':>8s} {'-------':>8s} {'-------':>8s} {'-----------':>12s} {'-----------':>12s} {'-----------':>12s}  ----")
 
     for var in variants:
         var_key = f"{var['chrom']}:{var['pos']}"
-        ann = annotations.get(var_key, {"dku": 0, "dkt": 0, "dka": 0, "max_pkc": 0, "avg_pkc": 0.0})
+        ann = annotations.get(var_key, {"dku": 0, "dkt": 0, "dka": 0, "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0, "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0})
         ref = var["ref"]
         alts = var["alts"]
         alt = alts[0] if alts else "."
         label = f"{var['chrom']}:{var['pos'] + 1} {ref}>{alt}"
         call = "DE_NOVO" if ann["dku"] > 0 else "inherited"
-        lines.append(f"  {label:<30s} {ann['dku']:>5d} {ann['dkt']:>5d} {ann['dka']:>5d} {ann['max_pkc']:>8d} {ann['avg_pkc']:>8.2f}  {call}")
+        lines.append(f"  {label:<30s} {ann['dku']:>5d} {ann['dkt']:>5d} {ann['dka']:>5d} {ann['max_pkc']:>8d} {ann['avg_pkc']:>8.2f} {ann['min_pkc']:>8d} {ann['max_pkc_alt']:>12d} {ann['avg_pkc_alt']:>12.2f} {ann['min_pkc_alt']:>12d}  {call}")
 
     lines.append("")
     lines.append("=" * 60)
@@ -533,8 +593,11 @@ def run_pipeline(args):
         dka = 0
         informative_names = set()
         all_variant_kmers = set()
+        alt_variant_kmers = set()
         for read_name, kmers, supports_alt in read_kmers_list:
             all_variant_kmers.update(kmers)
+            if supports_alt:
+                alt_variant_kmers.update(kmers)
             # A read is informative if it has at least one variant-spanning
             # k-mer that is absent from both parents.
             if kmers - parent_found_kmers.keys():
@@ -551,8 +614,23 @@ def run_pipeline(args):
         ]
         max_pkc = max(parent_counts) if parent_counts else 0
         avg_pkc = round(statistics.mean(parent_counts), 2) if parent_counts else 0.0
+        min_pkc = min(parent_counts) if parent_counts else 0
 
-        annotations[var_key] = {"dku": dku, "dkt": dkt, "dka": dka, "max_pkc": max_pkc, "avg_pkc": avg_pkc}
+        # Compute parent k-mer count metrics for alt-allele-supporting k-mers
+        alt_parent_counts = [
+            parent_found_kmers[k]
+            for k in alt_variant_kmers
+            if k in parent_found_kmers
+        ]
+        max_pkc_alt = max(alt_parent_counts) if alt_parent_counts else 0
+        avg_pkc_alt = round(statistics.mean(alt_parent_counts), 2) if alt_parent_counts else 0.0
+        min_pkc_alt = min(alt_parent_counts) if alt_parent_counts else 0
+
+        annotations[var_key] = {
+            "dku": dku, "dkt": dkt, "dka": dka,
+            "max_pkc": max_pkc, "avg_pkc": avg_pkc, "min_pkc": min_pkc,
+            "max_pkc_alt": max_pkc_alt, "avg_pkc_alt": avg_pkc_alt, "min_pkc_alt": min_pkc_alt,
+        }
         if informative_names:
             informative_reads_by_variant[var_key] = informative_names
 
