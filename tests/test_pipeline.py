@@ -1,6 +1,7 @@
 """Integration test for the full pipeline using synthetic data."""
 
 import json
+import logging
 import os
 import tempfile
 
@@ -8,7 +9,12 @@ import pysam
 import pytest
 
 from kmer_denovo_filter.cli import parse_args
-from kmer_denovo_filter.pipeline import run_pipeline
+from kmer_denovo_filter.pipeline import (
+    _format_elapsed,
+    _format_file_size,
+    _validate_inputs,
+    run_pipeline,
+)
 
 GIAB_DIR = os.path.join(os.path.dirname(__file__), "data", "giab")
 GIAB_DATA_EXISTS = os.path.isfile(os.path.join(GIAB_DIR, "HG002_child.bam"))
@@ -585,6 +591,220 @@ class TestPipelineIntegration:
         assert "AVG_PKC_ALT" in records[0].info
         assert "MIN_PKC_ALT" in records[0].info
         vcf_out.close()
+
+
+class TestFormatElapsed:
+    """Unit tests for the _format_elapsed helper."""
+
+    def test_seconds_only(self):
+        assert _format_elapsed(5.123) == "5.1s"
+
+    def test_minutes_and_seconds(self):
+        result = _format_elapsed(125.5)
+        assert result == "2m 5.5s"
+
+    def test_hours(self):
+        result = _format_elapsed(3725)
+        assert result == "1h 2m 5s"
+
+    def test_zero(self):
+        assert _format_elapsed(0) == "0.0s"
+
+
+class TestFormatFileSize:
+    """Unit tests for the _format_file_size helper."""
+
+    def test_bytes(self, tmp_path):
+        f = tmp_path / "small.txt"
+        f.write_text("hello")
+        assert "B" in _format_file_size(str(f))
+
+    def test_missing_file(self):
+        assert _format_file_size("/no/such/file") == "?"
+
+    def test_empty_file(self, tmp_path):
+        f = tmp_path / "empty.txt"
+        f.write_bytes(b"")
+        assert _format_file_size(str(f)) == "0.0 B"
+
+
+class TestValidateInputs:
+    """Tests for input validation in _validate_inputs."""
+
+    @pytest.fixture()
+    def tmpdir(self, tmp_path):
+        return str(tmp_path)
+
+    def _make_args(self, tmpdir, **overrides):
+        """Build a minimal args namespace with valid dummy files."""
+        # Create dummy files so validation passes by default
+        for name in (
+            "child.bam", "child.bam.bai",
+            "mother.bam", "mother.bam.bai",
+            "father.bam", "father.bam.bai",
+            "input.vcf",
+        ):
+            path = os.path.join(tmpdir, name)
+            if not os.path.exists(path):
+                open(path, "w").close()
+
+        defaults = {
+            "child": os.path.join(tmpdir, "child.bam"),
+            "mother": os.path.join(tmpdir, "mother.bam"),
+            "father": os.path.join(tmpdir, "father.bam"),
+            "vcf": os.path.join(tmpdir, "input.vcf"),
+            "output": os.path.join(tmpdir, "output.vcf.gz"),
+            "ref_fasta": None,
+            "kmer_size": 31,
+            "min_baseq": 20,
+            "min_mapq": 20,
+            "threads": 4,
+            "debug_kmers": False,
+        }
+        defaults.update(overrides)
+        import argparse
+        return argparse.Namespace(**defaults)
+
+    def test_valid_inputs_pass(self, tmpdir):
+        args = self._make_args(tmpdir)
+        # Should not raise
+        _validate_inputs(args)
+
+    def test_missing_child_bam(self, tmpdir):
+        args = self._make_args(tmpdir, child="/no/such/file.bam")
+        with pytest.raises(SystemExit):
+            _validate_inputs(args)
+
+    def test_missing_vcf(self, tmpdir):
+        args = self._make_args(tmpdir, vcf="/no/such/input.vcf")
+        with pytest.raises(SystemExit):
+            _validate_inputs(args)
+
+    def test_missing_ref_fasta(self, tmpdir):
+        args = self._make_args(tmpdir, ref_fasta="/no/such/ref.fa")
+        with pytest.raises(SystemExit):
+            _validate_inputs(args)
+
+    def test_cram_without_ref_fasta(self, tmpdir):
+        cram = os.path.join(tmpdir, "child.cram")
+        open(cram, "w").close()
+        open(cram + ".crai", "w").close()
+        args = self._make_args(tmpdir, child=cram, ref_fasta=None)
+        with pytest.raises(SystemExit):
+            _validate_inputs(args)
+
+    def test_missing_bam_index(self, tmpdir):
+        bam = os.path.join(tmpdir, "noindex.bam")
+        open(bam, "w").close()
+        args = self._make_args(tmpdir, child=bam)
+        with pytest.raises(SystemExit):
+            _validate_inputs(args)
+
+    def test_even_kmer_size(self, tmpdir):
+        args = self._make_args(tmpdir, kmer_size=30)
+        with pytest.raises(SystemExit):
+            _validate_inputs(args)
+
+    def test_kmer_size_too_small(self, tmpdir):
+        args = self._make_args(tmpdir, kmer_size=1)
+        with pytest.raises(SystemExit):
+            _validate_inputs(args)
+
+    def test_kmer_size_too_large(self, tmpdir):
+        args = self._make_args(tmpdir, kmer_size=300)
+        with pytest.raises(SystemExit):
+            _validate_inputs(args)
+
+    def test_negative_min_baseq(self, tmpdir):
+        args = self._make_args(tmpdir, min_baseq=-1)
+        with pytest.raises(SystemExit):
+            _validate_inputs(args)
+
+    def test_negative_min_mapq(self, tmpdir):
+        args = self._make_args(tmpdir, min_mapq=-5)
+        with pytest.raises(SystemExit):
+            _validate_inputs(args)
+
+    def test_zero_threads(self, tmpdir):
+        args = self._make_args(tmpdir, threads=0)
+        with pytest.raises(SystemExit):
+            _validate_inputs(args)
+
+
+class TestProgressLogging:
+    """Tests verifying structured progress messages are logged."""
+
+    @pytest.fixture()
+    def tmpdir(self, tmp_path):
+        return str(tmp_path)
+
+    def test_pipeline_logs_step_markers(self, tmpdir, caplog):
+        """The pipeline should log step markers and elapsed times."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        child_seq = list(ref_seq[40:80])
+        child_seq[10] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(child_bam, ref_fa, chrom,
+                     [("read1", 40, child_seq, None)])
+
+        parent_seq = ref_seq[40:80]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom,
+                     [("mread1", 40, parent_seq, None)])
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(father_bam, ref_fa, chrom,
+                     [("fread1", 40, parent_seq, None)])
+
+        in_vcf = os.path.join(tmpdir, "input.vcf")
+        alt_base = child_seq[10]
+        _create_vcf(in_vcf, chrom, [(51, ref_seq[50], alt_base)])
+
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
+
+        args = parse_args([
+            "--child", child_bam,
+            "--mother", mother_bam,
+            "--father", father_bam,
+            "--ref-fasta", ref_fa,
+            "--vcf", in_vcf,
+            "--output", out_vcf,
+            "--kmer-size", "5",
+        ])
+
+        with caplog.at_level(logging.INFO):
+            run_pipeline(args)
+
+        log_text = caplog.text
+        # Check step markers appear
+        assert "[Step 1/5]" in log_text
+        assert "[Step 2/5]" in log_text
+        assert "[Step 3/5]" in log_text
+        assert "[Step 4/5]" in log_text
+        assert "[Step 5/5]" in log_text
+        # Check configuration summary
+        assert "pipeline starting" in log_text
+        assert "k-mer size:" in log_text
+        # Check file size appears in config summary
+        assert "B)" in log_text  # file size like "(123.0 B)"
+        # Check child k-mer extraction progress
+        assert "reads scanned" in log_text
+        assert "k-mers collected" in log_text
+        # Check parent scan progress
+        assert "Mother done" in log_text or "Mother scan" in log_text
+        assert "Father done" in log_text or "Father scan" in log_text
+        assert "child k-mers found" in log_text
+        # Check annotation progress with running tallies
+        assert "de novo so far" in log_text
+        assert "total reads" in log_text
+        # Check unique k-mer percentage
+        assert "% unique" in log_text
+        # Check completion message
+        assert "Pipeline finished successfully" in log_text
 
 
 @pytest.mark.skipif(
