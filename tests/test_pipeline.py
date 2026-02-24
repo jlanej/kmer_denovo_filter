@@ -616,10 +616,12 @@ class TestValidateInputs:
     def _make_args(self, tmpdir, **overrides):
         """Build a minimal args namespace with valid dummy files."""
         # Create dummy files so validation passes by default
-        for name in ("child.bam", "child.bam.bai",
-                      "mother.bam", "mother.bam.bai",
-                      "father.bam", "father.bam.bai",
-                      "input.vcf"):
+        for name in (
+            "child.bam", "child.bam.bai",
+            "mother.bam", "mother.bam.bai",
+            "father.bam", "father.bam.bai",
+            "input.vcf",
+        ):
             path = os.path.join(tmpdir, name)
             if not os.path.exists(path):
                 open(path, "w").close()
