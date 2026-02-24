@@ -157,6 +157,9 @@ class TestPipelineIntegration:
         assert records[0].samples["HG002"]["DKU"] > 0
         assert records[0].samples["HG002"]["DKT"] is not None
         assert records[0].samples["HG002"]["DKA"] > 0
+        # Proportion fields
+        assert records[0].samples["HG002"]["DKU_DKT"] > 0
+        assert records[0].samples["HG002"]["DKA_DKT"] > 0
         # De novo variant: child-unique k-mers are not in parents
         assert records[0].samples["HG002"]["MAX_PKC"] is not None
         assert records[0].samples["HG002"]["AVG_PKC"] is not None
@@ -238,6 +241,9 @@ class TestPipelineIntegration:
         assert len(records) == 1
         assert records[0].samples["HG002"]["DKU"] == 0
         assert records[0].samples["HG002"]["DKA"] == 0
+        # Proportion fields should be 0.0 for inherited variants
+        assert records[0].samples["HG002"]["DKU_DKT"] == pytest.approx(0.0)
+        assert records[0].samples["HG002"]["DKA_DKT"] == pytest.approx(0.0)
         # Inherited variant: child k-mers are shared with parent, so max_pkc >= 1
         assert records[0].samples["HG002"]["MAX_PKC"] >= 1
         assert records[0].samples["HG002"]["MIN_PKC"] >= 1
@@ -455,6 +461,9 @@ class TestPipelineIntegration:
         assert "MAX_PKC_ALT" in summary
         assert "AVG_PKC_ALT" in summary
         assert "MIN_PKC_ALT" in summary
+        # Summary should contain proportion fields
+        assert "DKU_DKT" in summary
+        assert "DKA_DKT" in summary
 
     def test_info_annotation_when_proband_unmatched(self, tmpdir):
         """When --proband-id does not match a VCF sample, use INFO fields."""
@@ -505,6 +514,10 @@ class TestPipelineIntegration:
         assert "DKT" in records[0].info
         assert "DKA" in records[0].info
         assert records[0].info["DKA"] > 0
+        assert "DKU_DKT" in records[0].info
+        assert records[0].info["DKU_DKT"] > 0
+        assert "DKA_DKT" in records[0].info
+        assert records[0].info["DKA_DKT"] > 0
         assert "MAX_PKC" in records[0].info
         assert "AVG_PKC" in records[0].info
         assert "MIN_PKC" in records[0].info
@@ -561,6 +574,10 @@ class TestPipelineIntegration:
         assert "DKT" in records[0].info
         assert "DKA" in records[0].info
         assert records[0].info["DKA"] > 0
+        assert "DKU_DKT" in records[0].info
+        assert records[0].info["DKU_DKT"] > 0
+        assert "DKA_DKT" in records[0].info
+        assert records[0].info["DKA_DKT"] > 0
         assert "MAX_PKC" in records[0].info
         assert "AVG_PKC" in records[0].info
         assert "MIN_PKC" in records[0].info

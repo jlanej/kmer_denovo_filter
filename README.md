@@ -87,7 +87,8 @@ kmer-denovo \
 
 ### Output
 
-The output VCF is annotated with five fields, **DKU**, **DKT**, **DKA**,
+The output VCF is annotated with the following fields — **DKU**, **DKT**, **DKA**,
+**DKU_DKT**, **DKA_DKT**,
 **MAX_PKC**, **AVG_PKC**, **MIN_PKC**, **MAX_PKC_ALT**, **AVG_PKC_ALT**,
 and **MIN_PKC_ALT**:
 
@@ -97,6 +98,13 @@ and **MIN_PKC_ALT**:
 * **DKA** – Number of child reads with at least one unique k-mer that also
   exactly support the candidate allele. This helps distinguish real de novo
   signal from spurious noise.
+* **DKU_DKT** – Proportion of child reads with unique k-mers (DKU / DKT).
+  A value of 1.0 means all reads spanning the variant carry child-unique
+  k-mers. When DKT is 0 the value is 0.0.
+* **DKA_DKT** – Proportion of child reads with unique allele-supporting
+  k-mers (DKA / DKT). A value of 1.0 means all reads spanning the variant
+  carry child-unique k-mers that directly support the alternate allele.
+  When DKT is 0 the value is 0.0.
 * **MAX_PKC** – Maximum k-mer count among variant-spanning k-mers found in
   the parents. A value of 0 means none of the variant k-mers were observed
   in either parent.
@@ -114,19 +122,19 @@ and **MIN_PKC_ALT**:
   found in the parents.
 
 When `--proband-id` is provided and the given ID matches a sample in the
-input VCF, DKU, DKT, DKA, MAX_PKC, AVG_PKC, MIN_PKC, MAX_PKC_ALT,
-AVG_PKC_ALT, and MIN_PKC_ALT are written as **FORMAT** (per-sample) fields
-on that sample. If `--proband-id` is omitted or does not match any VCF
-sample, they are written as **INFO** fields instead.
+input VCF, DKU, DKT, DKA, DKU_DKT, DKA_DKT, MAX_PKC, AVG_PKC, MIN_PKC,
+MAX_PKC_ALT, AVG_PKC_ALT, and MIN_PKC_ALT are written as **FORMAT**
+(per-sample) fields on that sample. If `--proband-id` is omitted or does
+not match any VCF sample, they are written as **INFO** fields instead.
 
 The optional `--metrics` JSON file provides a summary including total
 variants, child-unique k-mer counts, and the number of variants with unique
 reads.
 
 The optional `--summary` text file provides a human-readable overview
-including variant counts, read-support statistics (DKU, DKT, DKA, MAX_PKC,
-AVG_PKC, MIN_PKC, MAX_PKC_ALT, AVG_PKC_ALT, MIN_PKC_ALT), and a
-per-variant table showing all annotation values and de novo calls.
+including variant counts, read-support statistics (DKU, DKT, DKA, DKU_DKT,
+DKA_DKT, MAX_PKC, AVG_PKC, MIN_PKC, MAX_PKC_ALT, AVG_PKC_ALT, MIN_PKC_ALT),
+and a per-variant table showing all annotation values and de novo calls.
 
 The optional `--informative-reads` BAM file contains child reads that carry
 at least one variant-spanning k-mer absent from both parents. Each read is
