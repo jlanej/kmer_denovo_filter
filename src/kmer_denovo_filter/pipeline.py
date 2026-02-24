@@ -9,6 +9,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import time
 
 import pysam
 
@@ -25,6 +26,105 @@ logger = logging.getLogger(__name__)
 def _check_tool(name):
     """Check if an external tool is available on PATH."""
     return shutil.which(name) is not None
+
+
+def _format_elapsed(seconds):
+    """Format elapsed seconds as a human-readable string."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes = int(seconds // 60)
+    secs = seconds % 60
+    return f"{minutes}m {secs:.1f}s"
+
+
+def _validate_inputs(args):
+    """Validate pipeline inputs before starting computation.
+
+    Raises SystemExit with a clear error message for any invalid input.
+    """
+    errors = []
+
+    # Check required input files exist
+    for label, path in [
+        ("Child BAM/CRAM (--child)", args.child),
+        ("Mother BAM/CRAM (--mother)", args.mother),
+        ("Father BAM/CRAM (--father)", args.father),
+        ("Input VCF (--vcf)", args.vcf),
+    ]:
+        if not os.path.isfile(path):
+            errors.append(f"{label}: file not found: {path}")
+
+    # Check ref-fasta exists when provided
+    if args.ref_fasta is not None:
+        if not os.path.isfile(args.ref_fasta):
+            errors.append(
+                f"Reference FASTA (--ref-fasta): file not found: "
+                f"{args.ref_fasta}"
+            )
+
+    # CRAM files require a reference FASTA
+    for label, path in [
+        ("--child", args.child),
+        ("--mother", args.mother),
+        ("--father", args.father),
+    ]:
+        if path.endswith(".cram") and args.ref_fasta is None:
+            errors.append(
+                f"{label} is a CRAM file but --ref-fasta was not provided"
+            )
+
+    # Check BAM/CRAM indexes exist
+    for label, path in [
+        ("--child", args.child),
+        ("--mother", args.mother),
+        ("--father", args.father),
+    ]:
+        if os.path.isfile(path):
+            bai = path + ".bai"
+            csi = path + ".csi"
+            crai = path + ".crai"
+            # .bam.bai or .bai (some tools drop the .bam prefix)
+            alt_bai = path.rsplit(".", 1)[0] + ".bai" if "." in path else None
+            if not any(
+                os.path.isfile(p) for p in [bai, csi, crai]
+                if p is not None
+            ) and not (alt_bai and os.path.isfile(alt_bai)):
+                errors.append(
+                    f"{label}: no index found for {path} "
+                    f"(expected .bai, .csi, or .crai)"
+                )
+
+    # Validate parameter ranges
+    if args.kmer_size < 3:
+        errors.append(
+            f"--kmer-size must be >= 3, got {args.kmer_size}"
+        )
+    if args.kmer_size > 201:
+        errors.append(
+            f"--kmer-size must be <= 201, got {args.kmer_size}"
+        )
+    if args.kmer_size % 2 == 0:
+        errors.append(
+            f"--kmer-size should be odd for canonical k-mer symmetry, "
+            f"got {args.kmer_size}"
+        )
+    if args.min_baseq < 0:
+        errors.append(
+            f"--min-baseq must be >= 0, got {args.min_baseq}"
+        )
+    if args.min_mapq < 0:
+        errors.append(
+            f"--min-mapq must be >= 0, got {args.min_mapq}"
+        )
+    if args.threads < 1:
+        errors.append(
+            f"--threads must be >= 1, got {args.threads}"
+        )
+
+    if errors:
+        for err in errors:
+            logger.error("Validation error: %s", err)
+        sys.exit(1)
 
 
 def _collect_child_kmers(
@@ -545,33 +645,66 @@ def _write_summary(summary_path, variants, annotations):
 
 def run_pipeline(args):
     """Run the de novo k-mer analysis pipeline."""
+    pipeline_start = time.monotonic()
+
     logging.basicConfig(
         level=logging.DEBUG if args.debug_kmers else logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
+    # ── Pre-flight checks ──────────────────────────────────────────
     for tool in ("samtools", "jellyfish"):
         if not _check_tool(tool):
             logger.error("%s not found in PATH", tool)
             sys.exit(1)
 
-    # 1. Parse VCF
-    logger.info("Parsing VCF: %s", args.vcf)
+    _validate_inputs(args)
+
+    # ── Configuration summary ──────────────────────────────────────
+    logger.info("=" * 60)
+    logger.info("  kmer-denovo  —  pipeline starting")
+    logger.info("=" * 60)
+    logger.info("  Child BAM/CRAM:    %s", args.child)
+    logger.info("  Mother BAM/CRAM:   %s", args.mother)
+    logger.info("  Father BAM/CRAM:   %s", args.father)
+    logger.info("  Input VCF:         %s", args.vcf)
+    logger.info("  Output VCF:        %s", args.output)
+    logger.info("  Reference FASTA:   %s", args.ref_fasta or "(not set)")
+    logger.info("  k-mer size:        %d", args.kmer_size)
+    logger.info("  Min base quality:  %d", args.min_baseq)
+    logger.info("  Min mapping qual:  %d", args.min_mapq)
+    logger.info("  Threads:           %d", args.threads)
+    logger.info("  Proband ID:        %s", args.proband_id or "(not set)")
+    logger.info("=" * 60)
+
+    # ── Step 1: Parse VCF ──────────────────────────────────────────
+    step_start = time.monotonic()
+    logger.info("[Step 1/5] Parsing VCF: %s", args.vcf)
     variants = _parse_vcf_variants(args.vcf)
-    logger.info("Found %d candidate variants", len(variants))
+    logger.info(
+        "[Step 1/5] Found %d candidate variants (%s)",
+        len(variants), _format_elapsed(time.monotonic() - step_start),
+    )
 
     if not variants:
-        logger.warning("No variants found in VCF")
+        logger.warning("No variants found in VCF; writing empty output")
         _write_annotated_vcf(args.vcf, args.output, {}, args.proband_id)
         if args.metrics:
             with open(args.metrics, "w") as fh:
                 json.dump({"total_variants": 0}, fh, indent=2)
+        logger.info(
+            "Pipeline finished in %s",
+            _format_elapsed(time.monotonic() - pipeline_start),
+        )
         return
 
-    # 2. Extract child k-mers
-    logger.info("Extracting child k-mers (k=%d)", args.kmer_size)
+    # ── Step 2: Extract child k-mers ───────────────────────────────
+    step_start = time.monotonic()
+    logger.info(
+        "[Step 2/5] Extracting child k-mers from %d variants (k=%d)",
+        len(variants), args.kmer_size,
+    )
 
-    # 3. Scan parents using jellyfish
     parent_found_kmers = collections.Counter()
 
     with tempfile.TemporaryDirectory(prefix="kmer_denovo_") as tmpdir:
@@ -583,30 +716,54 @@ def run_pipeline(args):
             kmer_fasta,
         )
         logger.info(
-            "Wrote %d child k-mers (partially deduplicated)",
+            "[Step 2/5] Wrote %d child k-mers — partially deduplicated (%s)",
             total_child_kmers,
+            _format_elapsed(time.monotonic() - step_start),
         )
 
+        # ── Step 3: Scan parents ───────────────────────────────────
+        step_start = time.monotonic()
         if total_child_kmers == 0:
-            logger.info("No child k-mers found; skipping parent scans")
+            logger.info(
+                "[Step 3/5] No child k-mers found; skipping parent scans"
+            )
         else:
-            # Scan mother
-            logger.info("Scanning mother BAM: %s", args.mother)
+            logger.info("[Step 3/5] Scanning parent BAMs with jellyfish")
+
+            parent_start = time.monotonic()
+            logger.info(
+                "[Step 3/5] Scanning mother BAM: %s", args.mother,
+            )
             mother_kmers = _scan_parent_jellyfish(
                 args.mother, args.ref_fasta, kmer_fasta, args.kmer_size,
                 os.path.join(tmpdir, "mother"), args.threads,
             )
             parent_found_kmers.update(mother_kmers)
-            logger.info("Found %d child k-mers in mother", len(mother_kmers))
+            logger.info(
+                "[Step 3/5] Mother scan complete — %d child k-mers found (%s)",
+                len(mother_kmers),
+                _format_elapsed(time.monotonic() - parent_start),
+            )
 
-            # Scan father
-            logger.info("Scanning father BAM: %s", args.father)
+            parent_start = time.monotonic()
+            logger.info(
+                "[Step 3/5] Scanning father BAM: %s", args.father,
+            )
             father_kmers = _scan_parent_jellyfish(
                 args.father, args.ref_fasta, kmer_fasta, args.kmer_size,
                 os.path.join(tmpdir, "father"), args.threads,
             )
             parent_found_kmers.update(father_kmers)
-            logger.info("Found %d child k-mers in father", len(father_kmers))
+            logger.info(
+                "[Step 3/5] Father scan complete — %d child k-mers found (%s)",
+                len(father_kmers),
+                _format_elapsed(time.monotonic() - parent_start),
+            )
+
+            logger.info(
+                "[Step 3/5] Parent scanning complete (%s)",
+                _format_elapsed(time.monotonic() - step_start),
+            )
 
     child_unique_kmers = max(0, total_child_kmers - len(parent_found_kmers))
     logger.info(
@@ -615,10 +772,18 @@ def run_pipeline(args):
         total_child_kmers,
     )
 
-    # 4. Count proband-unique reads per variant
+    # ── Step 4: Annotate variants ──────────────────────────────────
+    step_start = time.monotonic()
+    logger.info(
+        "[Step 4/5] Annotating %d variants with k-mer evidence",
+        len(variants),
+    )
     annotations = {}
     informative_reads_by_variant = {}
-    for var in variants:
+    n_variants = len(variants)
+    log_interval = max(1, n_variants // 10)  # report ~10 times
+
+    for idx, var in enumerate(variants, 1):
         var_key = f"{var['chrom']}:{var['pos']}"
         read_kmers_list = variant_read_kmers.get(var_key, [])
 
@@ -673,16 +838,33 @@ def run_pipeline(args):
         if args.debug_kmers:
             logger.info("Variant %s: DKU=%d DKT=%d DKA=%d", var_key, dku, dkt, dka)
 
-    # 5. Write annotated VCF
-    logger.info("Writing annotated VCF: %s", args.output)
+        if idx % log_interval == 0 or idx == n_variants:
+            logger.info(
+                "[Step 4/5] Annotated %d / %d variants (%.0f%%)",
+                idx, n_variants, 100 * idx / n_variants,
+            )
+
+    likely_dnm = sum(1 for a in annotations.values() if a["dku"] > 0)
+    logger.info(
+        "[Step 4/5] Annotation complete — %d likely de novo, %d inherited (%s)",
+        likely_dnm,
+        n_variants - likely_dnm,
+        _format_elapsed(time.monotonic() - step_start),
+    )
+
+    # ── Step 5: Write outputs ──────────────────────────────────────
+    step_start = time.monotonic()
+    logger.info("[Step 5/5] Writing output files")
+
+    logger.info("[Step 5/5] Writing annotated VCF: %s", args.output)
     actual_output = _write_annotated_vcf(
         args.vcf, args.output, annotations, args.proband_id,
     )
 
-    # 6. Write informative reads BAM
     if args.informative_reads:
         logger.info(
-            "Writing informative reads BAM: %s", args.informative_reads,
+            "[Step 5/5] Writing informative reads BAM: %s",
+            args.informative_reads,
         )
         _write_informative_reads(
             args.child, args.ref_fasta,
@@ -693,29 +875,34 @@ def run_pipeline(args):
             for names in informative_reads_by_variant.values()
         )
         logger.info(
-            "Wrote %d informative reads across %d variants",
+            "[Step 5/5] Wrote %d informative reads across %d variants",
             total_reads, len(informative_reads_by_variant),
         )
 
-    # 7. Write metrics
     if args.metrics:
         metrics = {
             "total_variants": len(variants),
             "total_child_kmers": total_child_kmers,
             "parent_found_kmers": len(parent_found_kmers),
             "child_unique_kmers": child_unique_kmers,
-            "variants_with_unique_reads": sum(
-                1 for a in annotations.values() if a["dku"] > 0
-            ),
+            "variants_with_unique_reads": likely_dnm,
         }
         with open(args.metrics, "w") as fh:
             json.dump(metrics, fh, indent=2)
-        logger.info("Metrics written to: %s", args.metrics)
+        logger.info("[Step 5/5] Metrics written to: %s", args.metrics)
 
-    # 8. Write summary
     if args.summary:
-        logger.info("Writing summary: %s", args.summary)
+        logger.info("[Step 5/5] Writing summary: %s", args.summary)
         summary_text = _write_summary(args.summary, variants, annotations)
         logger.info("\n%s", summary_text)
 
-    logger.info("Done")
+    logger.info(
+        "[Step 5/5] Output complete (%s)",
+        _format_elapsed(time.monotonic() - step_start),
+    )
+
+    # ── Done ───────────────────────────────────────────────────────
+    logger.info(
+        "Pipeline finished successfully in %s",
+        _format_elapsed(time.monotonic() - pipeline_start),
+    )
