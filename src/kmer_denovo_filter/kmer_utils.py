@@ -135,7 +135,7 @@ def extract_variant_spanning_kmers(
                 bad[i] = 1
 
     # Initialise sliding-window bad-base count for the first k-mer
-    bad_count = sum(bad[i] for i in range(min(k, len(bad))))
+    bad_count = sum(bad[:min(k, len(bad))])
 
     for s in range(start_min, start_max + 1):
         offset = s - start_min
