@@ -61,6 +61,12 @@ class TestExtractVariantSpanningKmers:
                 ]
             return self._aligned_pairs
 
+        def get_reference_positions(self, full_length=False):
+            if full_length:
+                return [r for q, r in self._aligned_pairs if q is not None]
+            return [r for q, r in self._aligned_pairs
+                    if q is not None and r is not None]
+
     def test_simple_spanning(self):
         # Read: ACGTACGT aligned at ref pos 100-107
         seq = "ACGTACGT"

@@ -22,8 +22,8 @@ def reverse_complement(seq):
 
 def canonicalize(kmer):
     """Return the canonical (lexicographically smaller) form of a k-mer."""
-    rc = reverse_complement(kmer)
-    return min(kmer, rc)
+    rc = kmer.translate(_COMP)[::-1]
+    return kmer if kmer < rc else rc
 
 
 def read_supports_alt(read, variant_pos, ref, alt, *, aligned_pairs=None, seq=None):
@@ -90,9 +90,7 @@ def extract_variant_spanning_kmers(
         min_baseq: Minimum base quality threshold
         ref: Reference allele string (for INDEL handling)
         alt: Alternate allele string (for INDEL handling)
-        aligned_pairs: Optional pre-computed result of
-            ``read.get_aligned_pairs(matches_only=False)``.  Computed from
-            *read* when not provided.
+        aligned_pairs: Ignored; kept for API compatibility.
         seq: Optional pre-decoded ``read.query_sequence``.  Decoded from
             *read* when not provided.
         quals: Optional pre-decoded ``read.query_qualities``.  Decoded from
@@ -101,15 +99,9 @@ def extract_variant_spanning_kmers(
     Returns:
         Set of canonical k-mer strings spanning the variant position.
     """
-    if aligned_pairs is None:
-        aligned_pairs = read.get_aligned_pairs(matches_only=False)
-    read_pos_at_variant = None
-    for qpos, rpos in aligned_pairs:
-        if rpos == variant_pos:
-            read_pos_at_variant = qpos
-            break
-
-    if read_pos_at_variant is None:
+    try:
+        read_pos_at_variant = read.get_reference_positions(full_length=True).index(variant_pos)
+    except ValueError:
         return set()
 
     if seq is None:
@@ -128,13 +120,31 @@ def extract_variant_spanning_kmers(
     start_min = max(0, read_pos_at_variant - k + 1)
     start_max = min(len(seq) - k, variant_end_in_read)
 
+    # Pre-compute a boolean array marking bad positions (N or low quality)
+    # so that the inner loop can use a sliding-window counter instead of
+    # re-scanning every k-mer from scratch: O(window) instead of O(k × window).
+    window_end = start_max + k  # exclusive upper bound of bases touched
+    seq_upper = seq[start_min:window_end].upper()
+    bad = bytearray(window_end - start_min)
+    for i, ch in enumerate(seq_upper):
+        if ch == 'N':
+            bad[i] = 1
+    if quals is not None and min_baseq > 0:
+        for i in range(window_end - start_min):
+            if quals[start_min + i] < min_baseq:
+                bad[i] = 1
+
+    # Initialise sliding-window bad-base count for the first k-mer
+    bad_count = sum(bad[:min(k, len(bad))])
+
     for s in range(start_min, start_max + 1):
-        kmer = seq[s:s + k]
-        if "N" in kmer or "n" in kmer:
+        offset = s - start_min
+        if offset > 0:
+            # Slide: remove leftmost base of previous window, add new rightmost
+            bad_count -= bad[offset - 1]
+            bad_count += bad[offset + k - 1]
+        if bad_count:
             continue
-        if quals is not None and min_baseq > 0:
-            if min(quals[s:s + k]) < min_baseq:
-                continue
-        kmers.add(canonicalize(kmer))
+        kmers.add(canonicalize(seq[s:s + k]))
 
     return kmers

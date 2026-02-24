@@ -141,7 +141,7 @@ def _scan_parent_jellyfish(
     os.makedirs(parent_dir, exist_ok=True)
     jf_output = os.path.join(parent_dir, "parent.jf")
 
-    samtools_cmd = ["samtools", "fasta", "-F", "0x400", "-@", "2", parent_bam]
+    samtools_cmd = ["samtools", "fasta", "-F", "0x500", "-@", "2", parent_bam]
     if ref_fasta:
         samtools_cmd.extend(["--reference", ref_fasta])
 
@@ -587,23 +587,26 @@ def run_pipeline(args):
             total_child_kmers,
         )
 
-        # Scan mother
-        logger.info("Scanning mother BAM: %s", args.mother)
-        mother_kmers = _scan_parent_jellyfish(
-            args.mother, args.ref_fasta, kmer_fasta, args.kmer_size,
-            os.path.join(tmpdir, "mother"), args.threads,
-        )
-        parent_found_kmers.update(mother_kmers)
-        logger.info("Found %d child k-mers in mother", len(mother_kmers))
+        if total_child_kmers == 0:
+            logger.info("No child k-mers found; skipping parent scans")
+        else:
+            # Scan mother
+            logger.info("Scanning mother BAM: %s", args.mother)
+            mother_kmers = _scan_parent_jellyfish(
+                args.mother, args.ref_fasta, kmer_fasta, args.kmer_size,
+                os.path.join(tmpdir, "mother"), args.threads,
+            )
+            parent_found_kmers.update(mother_kmers)
+            logger.info("Found %d child k-mers in mother", len(mother_kmers))
 
-        # Scan father
-        logger.info("Scanning father BAM: %s", args.father)
-        father_kmers = _scan_parent_jellyfish(
-            args.father, args.ref_fasta, kmer_fasta, args.kmer_size,
-            os.path.join(tmpdir, "father"), args.threads,
-        )
-        parent_found_kmers.update(father_kmers)
-        logger.info("Found %d child k-mers in father", len(father_kmers))
+            # Scan father
+            logger.info("Scanning father BAM: %s", args.father)
+            father_kmers = _scan_parent_jellyfish(
+                args.father, args.ref_fasta, kmer_fasta, args.kmer_size,
+                os.path.join(tmpdir, "father"), args.threads,
+            )
+            parent_found_kmers.update(father_kmers)
+            logger.info("Found %d child k-mers in father", len(father_kmers))
 
     child_unique_kmers = max(0, total_child_kmers - len(parent_found_kmers))
     logger.info(
