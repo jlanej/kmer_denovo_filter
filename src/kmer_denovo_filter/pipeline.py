@@ -278,6 +278,27 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
     vcf_in.header.add_meta(
         category,
         items=[
+            ("ID", "DKU_DKT"),
+            ("Number", "1"),
+            ("Type", "Float"),
+            ("Description",
+             "Proportion of child reads with unique k-mers (DKU/DKT)"),
+        ],
+    )
+    vcf_in.header.add_meta(
+        category,
+        items=[
+            ("ID", "DKA_DKT"),
+            ("Number", "1"),
+            ("Type", "Float"),
+            ("Description",
+             "Proportion of child reads with unique allele-supporting "
+             "k-mers (DKA/DKT)"),
+        ],
+    )
+    vcf_in.header.add_meta(
+        category,
+        items=[
             ("ID", "MAX_PKC"),
             ("Number", "1"),
             ("Type", "Integer"),
@@ -349,6 +370,8 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                 rec.samples[proband_id]["DKU"] = ann["dku"]
                 rec.samples[proband_id]["DKT"] = ann["dkt"]
                 rec.samples[proband_id]["DKA"] = ann["dka"]
+                rec.samples[proband_id]["DKU_DKT"] = ann["dku_dkt"]
+                rec.samples[proband_id]["DKA_DKT"] = ann["dka_dkt"]
                 rec.samples[proband_id]["MAX_PKC"] = ann["max_pkc"]
                 rec.samples[proband_id]["AVG_PKC"] = ann["avg_pkc"]
                 rec.samples[proband_id]["MIN_PKC"] = ann["min_pkc"]
@@ -359,6 +382,8 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                 rec.info["DKU"] = ann["dku"]
                 rec.info["DKT"] = ann["dkt"]
                 rec.info["DKA"] = ann["dka"]
+                rec.info["DKU_DKT"] = ann["dku_dkt"]
+                rec.info["DKA_DKT"] = ann["dka_dkt"]
                 rec.info["MAX_PKC"] = ann["max_pkc"]
                 rec.info["AVG_PKC"] = ann["avg_pkc"]
                 rec.info["MIN_PKC"] = ann["min_pkc"]
@@ -436,6 +461,8 @@ def _write_summary(summary_path, variants, annotations):
     dku_values = [a["dku"] for a in annotations.values()]
     dkt_values = [a["dkt"] for a in annotations.values()]
     dka_values = [a["dka"] for a in annotations.values()]
+    dku_dkt_values = [a["dku_dkt"] for a in annotations.values()]
+    dka_dkt_values = [a["dka_dkt"] for a in annotations.values()]
     max_pkc_values = [a["max_pkc"] for a in annotations.values()]
     avg_pkc_values = [a["avg_pkc"] for a in annotations.values()]
     min_pkc_values = [a["min_pkc"] for a in annotations.values()]
@@ -460,6 +487,8 @@ def _write_summary(summary_path, variants, annotations):
         mean_dku = sum(dku_values) / len(dku_values)
         mean_dkt = sum(dkt_values) / len(dkt_values)
         mean_dka = sum(dka_values) / len(dka_values)
+        mean_dku_dkt = sum(dku_dkt_values) / len(dku_dkt_values)
+        mean_dka_dkt = sum(dka_dkt_values) / len(dka_dkt_values)
         median_dku = statistics.median(dku_values)
         mean_max_pkc = sum(max_pkc_values) / len(max_pkc_values)
         mean_avg_pkc = sum(avg_pkc_values) / len(avg_pkc_values)
@@ -472,6 +501,8 @@ def _write_summary(summary_path, variants, annotations):
         lines.append(f"  DKU  mean:   {mean_dku:>6.1f}   median: {median_dku:>4}")
         lines.append(f"  DKT  mean:   {mean_dkt:>6.1f}")
         lines.append(f"  DKA  mean:   {mean_dka:>6.1f}")
+        lines.append(f"  DKU_DKT  mean: {mean_dku_dkt:>6.4f}")
+        lines.append(f"  DKA_DKT  mean: {mean_dka_dkt:>6.4f}")
         lines.append(f"  MAX_PKC  mean: {mean_max_pkc:>6.1f}")
         lines.append(f"  AVG_PKC  mean: {mean_avg_pkc:>6.1f}")
         lines.append(f"  MIN_PKC  mean: {mean_min_pkc:>6.1f}")
@@ -487,18 +518,18 @@ def _write_summary(summary_path, variants, annotations):
 
     lines.append("Per-Variant Results")
     lines.append("-" * 120)
-    lines.append(f"  {'Variant':<30s} {'DKU':>5s} {'DKT':>5s} {'DKA':>5s} {'MAX_PKC':>8s} {'AVG_PKC':>8s} {'MIN_PKC':>8s} {'MAX_PKC_ALT':>12s} {'AVG_PKC_ALT':>12s} {'MIN_PKC_ALT':>12s}  Call")
-    lines.append(f"  {'-------':<30s} {'---':>5s} {'---':>5s} {'---':>5s} {'-------':>8s} {'-------':>8s} {'-------':>8s} {'-----------':>12s} {'-----------':>12s} {'-----------':>12s}  ----")
+    lines.append(f"  {'Variant':<30s} {'DKU':>5s} {'DKT':>5s} {'DKA':>5s} {'DKU_DKT':>8s} {'DKA_DKT':>8s} {'MAX_PKC':>8s} {'AVG_PKC':>8s} {'MIN_PKC':>8s} {'MAX_PKC_ALT':>12s} {'AVG_PKC_ALT':>12s} {'MIN_PKC_ALT':>12s}  Call")
+    lines.append(f"  {'-------':<30s} {'---':>5s} {'---':>5s} {'---':>5s} {'-------':>8s} {'-------':>8s} {'-------':>8s} {'-------':>8s} {'-------':>8s} {'-----------':>12s} {'-----------':>12s} {'-----------':>12s}  ----")
 
     for var in variants:
         var_key = f"{var['chrom']}:{var['pos']}"
-        ann = annotations.get(var_key, {"dku": 0, "dkt": 0, "dka": 0, "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0, "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0})
+        ann = annotations.get(var_key, {"dku": 0, "dkt": 0, "dka": 0, "dku_dkt": 0.0, "dka_dkt": 0.0, "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0, "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0})
         ref = var["ref"]
         alts = var["alts"]
         alt = alts[0] if alts else "."
         label = f"{var['chrom']}:{var['pos'] + 1} {ref}>{alt}"
         call = "DE_NOVO" if ann["dku"] > 0 else "inherited"
-        lines.append(f"  {label:<30s} {ann['dku']:>5d} {ann['dkt']:>5d} {ann['dka']:>5d} {ann['max_pkc']:>8d} {ann['avg_pkc']:>8.2f} {ann['min_pkc']:>8d} {ann['max_pkc_alt']:>12d} {ann['avg_pkc_alt']:>12.2f} {ann['min_pkc_alt']:>12d}  {call}")
+        lines.append(f"  {label:<30s} {ann['dku']:>5d} {ann['dkt']:>5d} {ann['dka']:>5d} {ann['dku_dkt']:>8.4f} {ann['dka_dkt']:>8.4f} {ann['max_pkc']:>8d} {ann['avg_pkc']:>8.2f} {ann['min_pkc']:>8d} {ann['max_pkc_alt']:>12d} {ann['avg_pkc_alt']:>12.2f} {ann['min_pkc_alt']:>12d}  {call}")
 
     lines.append("")
     lines.append("=" * 60)
@@ -628,6 +659,8 @@ def run_pipeline(args):
 
         annotations[var_key] = {
             "dku": dku, "dkt": dkt, "dka": dka,
+            "dku_dkt": round(dku / dkt, 4) if dkt > 0 else 0.0,
+            "dka_dkt": round(dka / dkt, 4) if dkt > 0 else 0.0,
             "max_pkc": max_pkc, "avg_pkc": avg_pkc, "min_pkc": min_pkc,
             "max_pkc_alt": max_pkc_alt, "avg_pkc_alt": avg_pkc_alt, "min_pkc_alt": min_pkc_alt,
         }
