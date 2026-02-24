@@ -11,6 +11,7 @@ import pytest
 from kmer_denovo_filter.cli import parse_args
 from kmer_denovo_filter.pipeline import (
     _format_elapsed,
+    _format_file_size,
     _validate_inputs,
     run_pipeline,
 )
@@ -602,8 +603,29 @@ class TestFormatElapsed:
         result = _format_elapsed(125.5)
         assert result == "2m 5.5s"
 
+    def test_hours(self):
+        result = _format_elapsed(3725)
+        assert result == "1h 2m 5s"
+
     def test_zero(self):
         assert _format_elapsed(0) == "0.0s"
+
+
+class TestFormatFileSize:
+    """Unit tests for the _format_file_size helper."""
+
+    def test_bytes(self, tmp_path):
+        f = tmp_path / "small.txt"
+        f.write_text("hello")
+        assert "B" in _format_file_size(str(f))
+
+    def test_missing_file(self):
+        assert _format_file_size("/no/such/file") == "?"
+
+    def test_empty_file(self, tmp_path):
+        f = tmp_path / "empty.txt"
+        f.write_bytes(b"")
+        assert _format_file_size(str(f)) == "0.0 B"
 
 
 class TestValidateInputs:
@@ -767,6 +789,20 @@ class TestProgressLogging:
         # Check configuration summary
         assert "pipeline starting" in log_text
         assert "k-mer size:" in log_text
+        # Check file size appears in config summary
+        assert "B)" in log_text  # file size like "(123.0 B)"
+        # Check child k-mer extraction progress
+        assert "reads scanned" in log_text
+        assert "k-mers collected" in log_text
+        # Check parent scan progress
+        assert "Mother done" in log_text or "Mother scan" in log_text
+        assert "Father done" in log_text or "Father scan" in log_text
+        assert "child k-mers found" in log_text
+        # Check annotation progress with running tallies
+        assert "de novo so far" in log_text
+        assert "total reads" in log_text
+        # Check unique k-mer percentage
+        assert "% unique" in log_text
         # Check completion message
         assert "Pipeline finished successfully" in log_text
 

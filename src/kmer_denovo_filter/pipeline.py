@@ -32,9 +32,27 @@ def _format_elapsed(seconds):
     """Format elapsed seconds as a human-readable string."""
     if seconds < 60:
         return f"{seconds:.1f}s"
-    minutes = int(seconds // 60)
+    if seconds < 3600:
+        minutes = int(seconds // 60)
+        secs = seconds % 60
+        return f"{minutes}m {secs:.1f}s"
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
     secs = seconds % 60
-    return f"{minutes}m {secs:.1f}s"
+    return f"{hours}h {minutes}m {secs:.0f}s"
+
+
+def _format_file_size(path):
+    """Return human-readable file size, or '?' if unavailable."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return "?"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} PB"
 
 
 def _validate_inputs(args):
@@ -148,8 +166,12 @@ def _collect_child_kmers(
     )
     batch = set()
     total_written = 0
+    total_reads_scanned = 0
     fasta_fh = open(kmer_fasta, "w")
     variant_read_kmers = {}
+    n_variants = len(variants)
+    log_interval = max(1, n_variants // 10)
+    extract_start = time.monotonic()
 
     def _flush_batch():
         nonlocal total_written
@@ -158,7 +180,7 @@ def _collect_child_kmers(
             total_written += 1
         batch.clear()
 
-    for var in variants:
+    for var_idx, var in enumerate(variants, 1):
         chrom = var["chrom"]
         pos = var["pos"]  # 0-based
         ref = var["ref"]
@@ -184,6 +206,7 @@ def _collect_child_kmers(
             if not (read.reference_start <= pos < read.reference_end):
                 continue
 
+            total_reads_scanned += 1
             aligned_pairs = read.get_aligned_pairs(matches_only=False)
             seq = read.query_sequence
             quals = read.query_qualities
@@ -209,6 +232,16 @@ def _collect_child_kmers(
             logger.info(
                 "Variant %s: %d reads, %d unique k-mers",
                 var_key, len(read_kmers), len(unique),
+            )
+
+        if var_idx % log_interval == 0 or var_idx == n_variants:
+            elapsed = time.monotonic() - extract_start
+            logger.info(
+                "[Step 2/5]   Processed %d / %d variants (%.0f%%) — "
+                "%d reads scanned, %d k-mers collected (%s)",
+                var_idx, n_variants, 100 * var_idx / n_variants,
+                total_reads_scanned, total_written + len(batch),
+                _format_elapsed(elapsed),
             )
 
     # Flush remaining k-mers
@@ -256,7 +289,16 @@ def _scan_parent_jellyfish(
         "/dev/fd/0",
     ]
 
-    logger.info("Scanning parent: %s", parent_bam)
+    bam_size = _format_file_size(parent_bam)
+    logger.info(
+        "Scanning parent BAM (%s): %s", bam_size, parent_bam,
+    )
+    logger.info(
+        "  samtools fasta → jellyfish count (k=%d, threads=%d)",
+        kmer_size, threads,
+    )
+
+    scan_start = time.monotonic()
 
     p_samtools = subprocess.Popen(
         samtools_cmd,
@@ -271,16 +313,41 @@ def _scan_parent_jellyfish(
     )
     p_samtools.stdout.close()
 
-    _, jf_stderr = p_jellyfish.communicate()
+    # Poll for completion, logging periodic progress
+    poll_interval = 30  # seconds between progress updates
+    last_log = scan_start
+    while True:
+        try:
+            p_jellyfish.wait(timeout=poll_interval)
+            break  # process finished
+        except subprocess.TimeoutExpired:
+            now = time.monotonic()
+            elapsed = now - scan_start
+            # Report jellyfish output file size as a proxy for progress
+            jf_size = _format_file_size(jf_output) if os.path.exists(jf_output) else "pending"
+            logger.info(
+                "  … still scanning (%s elapsed, jf index: %s)",
+                _format_elapsed(elapsed), jf_size,
+            )
+            last_log = now
+
     p_samtools.communicate()
+    jf_stderr = p_jellyfish.stderr.read()
 
     if p_jellyfish.returncode != 0:
         raise RuntimeError(
             f"jellyfish count failed: {jf_stderr.decode()}"
         )
 
+    scan_elapsed = time.monotonic() - scan_start
+    logger.info(
+        "  Jellyfish counting complete (%s)", _format_elapsed(scan_elapsed),
+    )
+
     found_kmers = {}
     if os.path.exists(jf_output):
+        jf_size = _format_file_size(jf_output)
+        logger.info("  Dumping jellyfish results (%s index)…", jf_size)
         dump_cmd = ["jellyfish", "dump", "-c", "-L", "1", jf_output]
         result = subprocess.run(
             dump_cmd, capture_output=True, text=True, check=True,
@@ -664,9 +731,18 @@ def run_pipeline(args):
     logger.info("=" * 60)
     logger.info("  kmer-denovo  —  pipeline starting")
     logger.info("=" * 60)
-    logger.info("  Child BAM/CRAM:    %s", args.child)
-    logger.info("  Mother BAM/CRAM:   %s", args.mother)
-    logger.info("  Father BAM/CRAM:   %s", args.father)
+    logger.info(
+        "  Child BAM/CRAM:    %s (%s)", args.child,
+        _format_file_size(args.child),
+    )
+    logger.info(
+        "  Mother BAM/CRAM:   %s (%s)", args.mother,
+        _format_file_size(args.mother),
+    )
+    logger.info(
+        "  Father BAM/CRAM:   %s (%s)", args.father,
+        _format_file_size(args.father),
+    )
     logger.info("  Input VCF:         %s", args.vcf)
     logger.info("  Output VCF:        %s", args.output)
     logger.info("  Reference FASTA:   %s", args.ref_fasta or "(not set)")
@@ -728,11 +804,14 @@ def run_pipeline(args):
                 "[Step 3/5] No child k-mers found; skipping parent scans"
             )
         else:
-            logger.info("[Step 3/5] Scanning parent BAMs with jellyfish")
+            logger.info(
+                "[Step 3/5] Scanning parent BAMs for %d child k-mers",
+                total_child_kmers,
+            )
 
             parent_start = time.monotonic()
             logger.info(
-                "[Step 3/5] Scanning mother BAM: %s", args.mother,
+                "[Step 3/5] ── Mother scan (1/2) ──",
             )
             mother_kmers = _scan_parent_jellyfish(
                 args.mother, args.ref_fasta, kmer_fasta, args.kmer_size,
@@ -740,14 +819,15 @@ def run_pipeline(args):
             )
             parent_found_kmers.update(mother_kmers)
             logger.info(
-                "[Step 3/5] Mother scan complete — %d child k-mers found (%s)",
-                len(mother_kmers),
+                "[Step 3/5] Mother done — %d / %d child k-mers found in "
+                "mother (%s)",
+                len(mother_kmers), total_child_kmers,
                 _format_elapsed(time.monotonic() - parent_start),
             )
 
             parent_start = time.monotonic()
             logger.info(
-                "[Step 3/5] Scanning father BAM: %s", args.father,
+                "[Step 3/5] ── Father scan (2/2) ──",
             )
             father_kmers = _scan_parent_jellyfish(
                 args.father, args.ref_fasta, kmer_fasta, args.kmer_size,
@@ -755,21 +835,25 @@ def run_pipeline(args):
             )
             parent_found_kmers.update(father_kmers)
             logger.info(
-                "[Step 3/5] Father scan complete — %d child k-mers found (%s)",
-                len(father_kmers),
+                "[Step 3/5] Father done — %d / %d child k-mers found in "
+                "father (%s)",
+                len(father_kmers), total_child_kmers,
                 _format_elapsed(time.monotonic() - parent_start),
             )
 
             logger.info(
-                "[Step 3/5] Parent scanning complete (%s)",
+                "[Step 3/5] Parent scanning complete — %d distinct "
+                "child k-mers found across parents (%s)",
+                len(parent_found_kmers),
                 _format_elapsed(time.monotonic() - step_start),
             )
 
     child_unique_kmers = max(0, total_child_kmers - len(parent_found_kmers))
     logger.info(
-        "Child-unique k-mers (approx): %d / %d (batched dedup)",
+        "Child-unique k-mers (approx): %d / %d (%.1f%% unique)",
         child_unique_kmers,
         total_child_kmers,
+        100 * child_unique_kmers / total_child_kmers if total_child_kmers else 0,
     )
 
     # ── Step 4: Annotate variants ──────────────────────────────────
@@ -782,12 +866,15 @@ def run_pipeline(args):
     informative_reads_by_variant = {}
     n_variants = len(variants)
     log_interval = max(1, n_variants // 10)  # report ~10 times
+    running_dnm = 0
+    running_reads = 0
 
     for idx, var in enumerate(variants, 1):
         var_key = f"{var['chrom']}:{var['pos']}"
         read_kmers_list = variant_read_kmers.get(var_key, [])
 
         dkt = len(read_kmers_list)
+        running_reads += dkt
         dku = 0
         dka = 0
         informative_names = set()
@@ -804,6 +891,9 @@ def run_pipeline(args):
                 informative_names.add(read_name)
                 if supports_alt:
                     dka += 1
+
+        if dku > 0:
+            running_dnm += 1
 
         # Compute parent k-mer count metrics for this variant
         parent_counts = [
@@ -839,12 +929,16 @@ def run_pipeline(args):
             logger.info("Variant %s: DKU=%d DKT=%d DKA=%d", var_key, dku, dkt, dka)
 
         if idx % log_interval == 0 or idx == n_variants:
+            elapsed = time.monotonic() - step_start
             logger.info(
-                "[Step 4/5] Annotated %d / %d variants (%.0f%%)",
+                "[Step 4/5]   %d / %d variants (%.0f%%) — "
+                "%d de novo so far, %d total reads (%s)",
                 idx, n_variants, 100 * idx / n_variants,
+                running_dnm, running_reads,
+                _format_elapsed(elapsed),
             )
 
-    likely_dnm = sum(1 for a in annotations.values() if a["dku"] > 0)
+    likely_dnm = running_dnm
     logger.info(
         "[Step 4/5] Annotation complete — %d likely de novo, %d inherited (%s)",
         likely_dnm,
