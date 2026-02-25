@@ -869,6 +869,14 @@ def run_pipeline(args):
     running_dnm = 0
     running_reads = 0
 
+    # Materialise parent k-mer keys as a plain set once so that
+    # per-read set operations (issubset / membership tests) are O(k)
+    # instead of rebuilding a set from the Counter on every call.
+    parent_kmer_set = set(parent_found_kmers)
+    logger.info(
+        "[Step 4/5] Parent k-mer lookup set: %d entries", len(parent_kmer_set),
+    )
+
     for idx, var in enumerate(variants, 1):
         var_key = f"{var['chrom']}:{var['pos']}"
         read_kmers_list = variant_read_kmers.get(var_key, [])
@@ -886,7 +894,7 @@ def run_pipeline(args):
                 alt_variant_kmers.update(kmers)
             # A read is informative if it has at least one variant-spanning
             # k-mer that is absent from both parents.
-            if kmers - parent_found_kmers.keys():
+            if not kmers.issubset(parent_kmer_set):
                 dku += 1
                 informative_names.add(read_name)
                 if supports_alt:
@@ -899,7 +907,7 @@ def run_pipeline(args):
         parent_counts = [
             parent_found_kmers[k]
             for k in all_variant_kmers
-            if k in parent_found_kmers
+            if k in parent_kmer_set
         ]
         max_pkc = max(parent_counts) if parent_counts else 0
         avg_pkc = round(statistics.mean(parent_counts), 2) if parent_counts else 0.0
@@ -909,7 +917,7 @@ def run_pipeline(args):
         alt_parent_counts = [
             parent_found_kmers[k]
             for k in alt_variant_kmers
-            if k in parent_found_kmers
+            if k in parent_kmer_set
         ]
         max_pkc_alt = max(alt_parent_counts) if alt_parent_counts else 0
         avg_pkc_alt = round(statistics.mean(alt_parent_counts), 2) if alt_parent_counts else 0.0
@@ -930,12 +938,15 @@ def run_pipeline(args):
 
         if idx % log_interval == 0 or idx == n_variants:
             elapsed = time.monotonic() - step_start
+            rate = idx / elapsed if elapsed > 0 else 0
+            eta = (n_variants - idx) / rate if rate > 0 else 0
             logger.info(
                 "[Step 4/5]   %d / %d variants (%.0f%%) — "
-                "%d de novo so far, %d total reads (%s)",
+                "%d de novo so far, %d total reads "
+                "(%.0f var/s, %s elapsed, ~%s remaining)",
                 idx, n_variants, 100 * idx / n_variants,
                 running_dnm, running_reads,
-                _format_elapsed(elapsed),
+                rate, _format_elapsed(elapsed), _format_elapsed(eta),
             )
 
     likely_dnm = running_dnm
