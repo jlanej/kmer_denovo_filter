@@ -801,6 +801,8 @@ class TestProgressLogging:
         # Check annotation progress with running tallies
         assert "de novo so far" in log_text
         assert "total reads" in log_text
+        assert "var/s" in log_text
+        assert "remaining" in log_text
         # Check unique k-mer percentage
         assert "% unique" in log_text
         # Check completion message

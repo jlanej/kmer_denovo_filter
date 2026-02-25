@@ -873,6 +873,9 @@ def run_pipeline(args):
     # per-read set operations (issubset / membership tests) are O(k)
     # instead of rebuilding a set from the Counter on every call.
     parent_kmer_set = set(parent_found_kmers)
+    logger.info(
+        "[Step 4/5] Parent k-mer lookup set: %d entries", len(parent_kmer_set),
+    )
 
     for idx, var in enumerate(variants, 1):
         var_key = f"{var['chrom']}:{var['pos']}"
@@ -935,12 +938,15 @@ def run_pipeline(args):
 
         if idx % log_interval == 0 or idx == n_variants:
             elapsed = time.monotonic() - step_start
+            rate = idx / elapsed if elapsed > 0 else 0
+            eta = (n_variants - idx) / rate if rate > 0 else 0
             logger.info(
                 "[Step 4/5]   %d / %d variants (%.0f%%) — "
-                "%d de novo so far, %d total reads (%s)",
+                "%d de novo so far, %d total reads "
+                "(%.0f var/s, %s elapsed, ~%s remaining)",
                 idx, n_variants, 100 * idx / n_variants,
                 running_dnm, running_reads,
-                _format_elapsed(elapsed),
+                rate, _format_elapsed(elapsed), _format_elapsed(eta),
             )
 
     likely_dnm = running_dnm
