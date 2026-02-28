@@ -25,10 +25,26 @@ def parse_args(argv=None):
         help="Reference FASTA with .fai index (required for CRAM input)",
     )
     parser.add_argument(
-        "--vcf", required=True, help="Input VCF with candidate variants"
+        "--vcf", default=None,
+        help="Input VCF with candidate variants. When omitted, the tool "
+             "runs in VCF-free discovery mode (requires --out-prefix)",
     )
     parser.add_argument(
-        "--output", "-o", required=True, help="Output annotated VCF"
+        "--output", "-o", default=None, help="Output annotated VCF"
+    )
+    parser.add_argument(
+        "--ref-jf", default=None,
+        help="Path to a precomputed Jellyfish reference index. "
+             "Defaults to [ref-fasta].k[kmer-size].jf",
+    )
+    parser.add_argument(
+        "--min-child-count", type=int, default=3,
+        help="Minimum child k-mer occurrences in discovery mode (default: 3)",
+    )
+    parser.add_argument(
+        "--out-prefix", default=None,
+        help="Output prefix for discovery mode files "
+             "([prefix].bed, [prefix].informative.bam, [prefix].metrics.json)",
     )
     parser.add_argument(
         "--metrics", default=None, help="Output summary metrics JSON file"
@@ -74,4 +90,21 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
-    run_pipeline(args)
+
+    # Validate mode: either VCF mode or discovery mode
+    if args.vcf is not None:
+        # VCF mode requires --output
+        if args.output is None:
+            print("error: --output is required when --vcf is provided",
+                  file=sys.stderr)
+            sys.exit(2)
+        run_pipeline(args)
+    else:
+        # Discovery mode requires --out-prefix
+        if args.out_prefix is None:
+            print("error: either --vcf (with --output) or --out-prefix "
+                  "(for discovery mode) must be provided",
+                  file=sys.stderr)
+            sys.exit(2)
+        from kmer_denovo_filter.pipeline import run_discovery_pipeline
+        run_discovery_pipeline(args)
