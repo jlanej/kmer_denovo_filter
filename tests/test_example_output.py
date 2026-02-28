@@ -19,6 +19,13 @@ GIAB_DIR = os.path.join(os.path.dirname(__file__), "data", "giab")
 GIAB_DATA_EXISTS = os.path.isfile(os.path.join(GIAB_DIR, "HG002_child.bam"))
 
 
+ANNOTATION_IDS = {
+    "DKU", "DKT", "DKA", "DKU_DKT", "DKA_DKT",
+    "MAX_PKC", "AVG_PKC", "MIN_PKC",
+    "MAX_PKC_ALT", "AVG_PKC_ALT", "MIN_PKC_ALT",
+}
+
+
 def _unified_diff(expected_lines, actual_lines, label):
     """Return a unified diff string between two line lists."""
     return "\n".join(difflib.unified_diff(
@@ -44,16 +51,11 @@ def _vcf_header_definitions(path):
     Returns only the lines added by our tool (DKU, DKT, DKA, etc.),
     sorted for stable comparison.
     """
-    our_ids = {
-        "DKU", "DKT", "DKA", "DKU_DKT", "DKA_DKT",
-        "MAX_PKC", "AVG_PKC", "MIN_PKC",
-        "MAX_PKC_ALT", "AVG_PKC_ALT", "MIN_PKC_ALT",
-    }
     defs = []
     with pysam.VariantFile(path) as vcf:
         for rec in vcf.header.records:
             if rec.type == "FORMAT" or rec.type == "INFO":
-                if rec.get("ID", "") in our_ids:
+                if rec.get("ID", "") in ANNOTATION_IDS:
                     defs.append(str(rec))
     return sorted(defs)
 
@@ -63,18 +65,13 @@ def _vcf_sample_fields(path):
 
     Returns a list of dicts, one per variant, keyed by annotation field.
     """
-    fields = [
-        "DKU", "DKT", "DKA", "DKU_DKT", "DKA_DKT",
-        "MAX_PKC", "AVG_PKC", "MIN_PKC",
-        "MAX_PKC_ALT", "AVG_PKC_ALT", "MIN_PKC_ALT",
-    ]
     results = []
     with pysam.VariantFile(path) as vcf:
         for rec in vcf:
             variant_id = f"{rec.chrom}:{rec.pos} {rec.ref}>{','.join(str(a) for a in rec.alts)}"
             row = {"variant": variant_id}
             sample = rec.samples["HG002"]
-            for f in fields:
+            for f in sorted(ANNOTATION_IDS):
                 val = sample.get(f)
                 row[f] = val
             results.append(row)
@@ -147,7 +144,7 @@ class TestExampleOutput:
         generated = _vcf_sample_fields(generated_path)
 
         mismatches = []
-        for i, (exp, gen) in enumerate(zip(expected, generated)):
+        for exp, gen in zip(expected, generated):
             for key in exp:
                 if exp[key] != gen.get(key):
                     mismatches.append(
