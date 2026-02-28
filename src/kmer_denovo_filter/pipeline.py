@@ -1015,6 +1015,8 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         if unique_in_read and read.query_name not in reads_seen:
             reads_seen.add(read.query_name)
             if read.is_unmapped:
+                # Unmapped reads lack reference coordinates; count them
+                # separately since they cannot be placed into regions.
                 unmapped_informative += 1
             else:
                 read_hits.append((
