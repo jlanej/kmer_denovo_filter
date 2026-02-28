@@ -1077,6 +1077,14 @@ def _write_discovery_summary(summary_path, regions, region_reads,
 
     Analogous to ``_write_summary()`` in VCF mode, but reports
     per-region statistics instead of per-variant annotations.
+
+    Args:
+        summary_path: Output file path for the summary text.
+        regions: List of (chrom, start, end) tuples (0-based, half-open).
+        region_reads: Dict mapping region tuple to set of read names.
+        region_kmers: Dict mapping region tuple to set of proband-unique
+            k-mer strings observed in that region's reads.
+        metrics: Dict with overall discovery pipeline statistics.
     """
     n_regions = metrics["candidate_regions"]
     n_reads_total = metrics["informative_reads"]
@@ -1145,6 +1153,7 @@ def _write_discovery_summary(summary_path, regions, region_reads,
             region_key = (chrom, start, end)
             n_reads = len(region_reads.get(region_key, set()))
             n_kmers = len(region_kmers.get(region_key, set()))
+            # Display as 1-based coordinates for human readability
             label = f"{chrom}:{start + 1}-{end}"
             size = end - start
             lines.append(
