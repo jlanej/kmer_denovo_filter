@@ -951,15 +951,17 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
 
     Returns:
         regions: List of (chrom, start, end) tuples (0-based, half-open BED).
-        informative_reads: Dict mapping (chrom, start, end) region tuple
-            to set of read names.
+        region_reads: Dict mapping region tuple to set of read names.
         total_informative: Total number of informative reads found.
+        region_kmers: Dict mapping region tuple to set of proband-unique
+            k-mer strings observed in that region's reads.
     """
     bam = pysam.AlignmentFile(
         child_bam, reference_filename=ref_fasta if ref_fasta else None,
     )
 
-    read_hits = []  # (chrom, start, end, read_name)
+    # (chrom, start, end, read_name, unique_kmers_in_read)
+    read_hits = []
     reads_seen = set()
 
     anchor_start = time.monotonic()
@@ -978,23 +980,23 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         if seq is None:
             continue
 
-        # Check if any k-mer in this read is proband-unique
-        has_unique = False
+        # Collect all proband-unique k-mers in this read
+        unique_in_read = set()
         seq_len = len(seq)
         if seq_len >= kmer_size:
             for i in range(seq_len - kmer_size + 1):
                 kmer = canonicalize(seq[i:i + kmer_size])
                 if kmer in proband_unique_kmers:
-                    has_unique = True
-                    break
+                    unique_in_read.add(kmer)
 
-        if has_unique and read.query_name not in reads_seen:
+        if unique_in_read and read.query_name not in reads_seen:
             reads_seen.add(read.query_name)
             read_hits.append((
                 read.reference_name,
                 read.reference_start,
                 read.reference_end,
                 read.query_name,
+                unique_in_read,
             ))
 
         if total_reads_scanned % 1_000_000 == 0:
@@ -1013,7 +1015,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     )
 
     if not read_hits:
-        return [], {}, 0
+        return [], {}, 0, {}
 
     # Sort by chrom, start
     read_hits.sort(key=lambda x: (x[0], x[1]))
@@ -1021,43 +1023,145 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     # Cluster into regions
     regions = []
     region_reads = {}
+    region_kmers = {}
     current_chrom = read_hits[0][0]
     current_start = read_hits[0][1]
     current_end = read_hits[0][2]
     current_names = {read_hits[0][3]}
+    current_kmers = set(read_hits[0][4])
 
-    for chrom, start, end, name in read_hits[1:]:
+    for chrom, start, end, name, unique_in_read in read_hits[1:]:
         if chrom == current_chrom and start <= current_end + merge_distance:
             current_end = max(current_end, end)
             current_names.add(name)
+            current_kmers.update(unique_in_read)
         else:
             region_key = (current_chrom, current_start, current_end)
             regions.append(region_key)
             region_reads[region_key] = current_names
+            region_kmers[region_key] = current_kmers
             current_chrom = chrom
             current_start = start
             current_end = end
             current_names = {name}
+            current_kmers = set(unique_in_read)
 
     # Don't forget the last region
     region_key = (current_chrom, current_start, current_end)
     regions.append(region_key)
     region_reads[region_key] = current_names
+    region_kmers[region_key] = current_kmers
 
     logger.info(
         "Clustered %d informative reads into %d regions",
         len(read_hits), len(regions),
     )
 
-    return regions, region_reads, len(read_hits)
+    return regions, region_reads, len(read_hits), region_kmers
 
 
-def _write_bed(regions, bed_path):
-    """Write clustered regions to a BED file."""
+def _write_bed(regions, region_reads, region_kmers, bed_path):
+    """Write clustered regions to a BED file with read/k-mer counts."""
     with open(bed_path, "w") as fh:
         for chrom, start, end in regions:
-            fh.write(f"{chrom}\t{start}\t{end}\n")
+            region_key = (chrom, start, end)
+            n_reads = len(region_reads.get(region_key, set()))
+            n_kmers = len(region_kmers.get(region_key, set()))
+            fh.write(f"{chrom}\t{start}\t{end}\t{n_reads}\t{n_kmers}\n")
     logger.info("BED file written: %s (%d regions)", bed_path, len(regions))
+
+
+def _write_discovery_summary(summary_path, regions, region_reads,
+                             region_kmers, metrics):
+    """Write a human-readable summary for the discovery pipeline.
+
+    Analogous to ``_write_summary()`` in VCF mode, but reports
+    per-region statistics instead of per-variant annotations.
+    """
+    n_regions = metrics["candidate_regions"]
+    n_reads_total = metrics["informative_reads"]
+    n_unique_kmers = metrics["proband_unique_kmers"]
+    n_candidates = metrics["child_candidate_kmers"]
+    n_non_ref = metrics["non_ref_kmers"]
+
+    lines = []
+    lines.append("=" * 60)
+    lines.append("  kmer-denovo  —  Discovery Mode Summary")
+    lines.append("=" * 60)
+    lines.append("")
+    lines.append("K-mer Filtering")
+    lines.append("-" * 40)
+    lines.append(f"  Child candidate k-mers:      {n_candidates:>8}")
+    lines.append(f"  Non-reference k-mers:        {n_non_ref:>8}")
+    lines.append(f"  Proband-unique k-mers:       {n_unique_kmers:>8}")
+    lines.append("")
+    lines.append("Region Counts")
+    lines.append("-" * 40)
+    lines.append(f"  Candidate regions:           {n_regions:>8}")
+    lines.append(f"  Total informative reads:     {n_reads_total:>8}")
+    lines.append("")
+
+    if regions:
+        reads_per_region = [
+            len(region_reads.get(r, set())) for r in regions
+        ]
+        kmers_per_region = [
+            len(region_kmers.get(r, set())) for r in regions
+        ]
+        sizes = [end - start for _, start, end in regions]
+
+        lines.append("Region Statistics")
+        lines.append("-" * 40)
+        lines.append(
+            f"  Reads/region   mean: {sum(reads_per_region) / len(reads_per_region):>6.1f}"
+            f"   median: {statistics.median(reads_per_region):>4}"
+            f"   max: {max(reads_per_region):>4}"
+        )
+        lines.append(
+            f"  K-mers/region  mean: {sum(kmers_per_region) / len(kmers_per_region):>6.1f}"
+            f"   median: {statistics.median(kmers_per_region):>4}"
+            f"   max: {max(kmers_per_region):>4}"
+        )
+        lines.append(
+            f"  Region size    mean: {sum(sizes) / len(sizes):>6.0f} bp"
+            f"   median: {statistics.median(sizes):>4} bp"
+            f"   max: {max(sizes):>4} bp"
+        )
+        lines.append("")
+
+    if regions:
+        lines.append("Per-Region Results")
+        lines.append("-" * 80)
+        lines.append(
+            f"  {'Region':<35s} {'Size':>8s} {'Reads':>6s}"
+            f" {'Unique K-mers':>14s}"
+        )
+        lines.append(
+            f"  {'------':<35s} {'----':>8s} {'-----':>6s}"
+            f" {'-------------':>14s}"
+        )
+
+        for chrom, start, end in regions:
+            region_key = (chrom, start, end)
+            n_reads = len(region_reads.get(region_key, set()))
+            n_kmers = len(region_kmers.get(region_key, set()))
+            label = f"{chrom}:{start + 1}-{end}"
+            size = end - start
+            lines.append(
+                f"  {label:<35s} {size:>7d}bp {n_reads:>6d}"
+                f" {n_kmers:>14d}"
+            )
+
+    lines.append("")
+    lines.append("=" * 60)
+    lines.append("")
+
+    text = "\n".join(lines)
+
+    with open(summary_path, "w") as fh:
+        fh.write(text)
+
+    return text
 
 
 def _write_informative_reads_discovery(
@@ -1124,6 +1228,15 @@ def _write_informative_reads_discovery(
     )
 
 
+def _write_empty_discovery_outputs(bed_path, metrics_path, summary_path,
+                                   metrics):
+    """Write empty discovery outputs for early-exit cases."""
+    _write_bed([], {}, {}, bed_path)
+    with open(metrics_path, "w") as fh:
+        json.dump(metrics, fh, indent=2)
+    _write_discovery_summary(summary_path, [], {}, {}, metrics)
+
+
 def run_discovery_pipeline(args):
     """Run the VCF-free de novo k-mer discovery pipeline."""
     pipeline_start = time.monotonic()
@@ -1145,6 +1258,7 @@ def run_discovery_pipeline(args):
     bed_path = f"{out_prefix}.bed"
     info_bam_path = f"{out_prefix}.informative.bam"
     metrics_path = f"{out_prefix}.metrics.json"
+    summary_path = f"{out_prefix}.summary.txt"
 
     # ── Configuration summary ──────────────────────────────────────
     logger.info("=" * 60)
@@ -1196,16 +1310,17 @@ def run_discovery_pipeline(args):
 
         if n_candidates == 0:
             logger.warning("No child candidate k-mers found; writing empty outputs")
-            _write_bed([], bed_path)
-            with open(metrics_path, "w") as fh:
-                json.dump({
-                    "mode": "discovery",
-                    "child_candidate_kmers": 0,
-                    "non_ref_kmers": 0,
-                    "proband_unique_kmers": 0,
-                    "informative_reads": 0,
-                    "candidate_regions": 0,
-                }, fh, indent=2)
+            empty_metrics = {
+                "mode": "discovery",
+                "child_candidate_kmers": 0,
+                "non_ref_kmers": 0,
+                "proband_unique_kmers": 0,
+                "informative_reads": 0,
+                "candidate_regions": 0,
+            }
+            _write_empty_discovery_outputs(
+                bed_path, metrics_path, summary_path, empty_metrics,
+            )
             logger.info(
                 "Pipeline finished in %s",
                 _format_elapsed(time.monotonic() - pipeline_start),
@@ -1224,16 +1339,17 @@ def run_discovery_pipeline(args):
             logger.warning(
                 "All child k-mers are in the reference; writing empty outputs"
             )
-            _write_bed([], bed_path)
-            with open(metrics_path, "w") as fh:
-                json.dump({
-                    "mode": "discovery",
-                    "child_candidate_kmers": n_candidates,
-                    "non_ref_kmers": 0,
-                    "proband_unique_kmers": 0,
-                    "informative_reads": 0,
-                    "candidate_regions": 0,
-                }, fh, indent=2)
+            empty_metrics = {
+                "mode": "discovery",
+                "child_candidate_kmers": n_candidates,
+                "non_ref_kmers": 0,
+                "proband_unique_kmers": 0,
+                "informative_reads": 0,
+                "candidate_regions": 0,
+            }
+            _write_empty_discovery_outputs(
+                bed_path, metrics_path, summary_path, empty_metrics,
+            )
             logger.info(
                 "Pipeline finished in %s",
                 _format_elapsed(time.monotonic() - pipeline_start),
@@ -1257,16 +1373,17 @@ def run_discovery_pipeline(args):
                 "No proband-unique k-mers after parent filtering; "
                 "writing empty outputs"
             )
-            _write_bed([], bed_path)
-            with open(metrics_path, "w") as fh:
-                json.dump({
-                    "mode": "discovery",
-                    "child_candidate_kmers": n_candidates,
-                    "non_ref_kmers": n_non_ref,
-                    "proband_unique_kmers": 0,
-                    "informative_reads": 0,
-                    "candidate_regions": 0,
-                }, fh, indent=2)
+            empty_metrics = {
+                "mode": "discovery",
+                "child_candidate_kmers": n_candidates,
+                "non_ref_kmers": n_non_ref,
+                "proband_unique_kmers": 0,
+                "informative_reads": 0,
+                "candidate_regions": 0,
+            }
+            _write_empty_discovery_outputs(
+                bed_path, metrics_path, summary_path, empty_metrics,
+            )
             logger.info(
                 "Pipeline finished in %s",
                 _format_elapsed(time.monotonic() - pipeline_start),
@@ -1279,9 +1396,11 @@ def run_discovery_pipeline(args):
         "[Module 3] Anchoring %d proband-unique k-mers to child reads",
         len(proband_unique_kmers),
     )
-    regions, region_reads, total_informative = _anchor_and_cluster(
-        args.child, args.ref_fasta, proband_unique_kmers,
-        args.kmer_size, args.min_mapq,
+    regions, region_reads, total_informative, region_kmers = (
+        _anchor_and_cluster(
+            args.child, args.ref_fasta, proband_unique_kmers,
+            args.kmer_size, args.min_mapq,
+        )
     )
     logger.info(
         "[Module 3] Complete (%s)",
@@ -1292,7 +1411,7 @@ def run_discovery_pipeline(args):
     step_start = time.monotonic()
     logger.info("[Module 4] Writing output files")
 
-    _write_bed(regions, bed_path)
+    _write_bed(regions, region_reads, region_kmers, bed_path)
 
     logger.info("[Module 4] Writing informative reads BAM: %s", info_bam_path)
     _write_informative_reads_discovery(
@@ -1307,10 +1426,29 @@ def run_discovery_pipeline(args):
         "proband_unique_kmers": len(proband_unique_kmers),
         "informative_reads": total_informative,
         "candidate_regions": len(regions),
+        "regions": [
+            {
+                "chrom": chrom,
+                "start": start,
+                "end": end,
+                "size": end - start,
+                "reads": len(region_reads.get((chrom, start, end), set())),
+                "unique_kmers": len(
+                    region_kmers.get((chrom, start, end), set())
+                ),
+            }
+            for chrom, start, end in regions
+        ],
     }
     with open(metrics_path, "w") as fh:
         json.dump(metrics, fh, indent=2)
     logger.info("[Module 4] Metrics written to: %s", metrics_path)
+
+    logger.info("[Module 4] Writing summary: %s", summary_path)
+    summary_text = _write_discovery_summary(
+        summary_path, regions, region_reads, region_kmers, metrics,
+    )
+    logger.info("\n%s", summary_text)
 
     logger.info(
         "[Module 4] Output complete (%s)",
@@ -1325,6 +1463,7 @@ def run_discovery_pipeline(args):
     logger.info("  Candidate regions: %s", bed_path)
     logger.info("  Informative BAM:   %s", info_bam_path)
     logger.info("  Metrics:           %s", metrics_path)
+    logger.info("  Summary:           %s", summary_path)
     logger.info("")
     logger.info(
         "  Next step: pass %s to a genotyper such as", bed_path,

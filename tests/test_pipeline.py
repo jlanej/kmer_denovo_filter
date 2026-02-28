@@ -938,12 +938,17 @@ class TestDiscoveryPipeline:
         ])
         run_discovery_pipeline(args)
 
-        # Check BED file
+        # Check BED file with per-region read/k-mer counts
         bed_path = f"{out_prefix}.bed"
         assert os.path.exists(bed_path)
         with open(bed_path) as fh:
             bed_lines = [l.strip() for l in fh if l.strip()]
         assert len(bed_lines) >= 1, "Expected at least one candidate region"
+        # BED lines should have 5 columns: chrom, start, end, reads, kmers
+        parts = bed_lines[0].split("\t")
+        assert len(parts) == 5
+        assert int(parts[3]) >= 1  # at least 1 read
+        assert int(parts[4]) >= 1  # at least 1 k-mer
 
         # Check informative reads BAM
         info_bam = f"{out_prefix}.informative.bam"
@@ -957,7 +962,7 @@ class TestDiscoveryPipeline:
             assert read.get_tag("dk") == 1
         bam_info.close()
 
-        # Check metrics JSON
+        # Check metrics JSON with per-region detail
         metrics_path = f"{out_prefix}.metrics.json"
         assert os.path.exists(metrics_path)
         with open(metrics_path) as fh:
@@ -966,6 +971,27 @@ class TestDiscoveryPipeline:
         assert metrics["proband_unique_kmers"] > 0
         assert metrics["informative_reads"] > 0
         assert metrics["candidate_regions"] >= 1
+        # Per-region detail should be present
+        assert "regions" in metrics
+        assert len(metrics["regions"]) >= 1
+        for region in metrics["regions"]:
+            assert "chrom" in region
+            assert "start" in region
+            assert "end" in region
+            assert "size" in region
+            assert region["reads"] >= 1
+            assert region["unique_kmers"] >= 1
+
+        # Check summary text file
+        summary_path = f"{out_prefix}.summary.txt"
+        assert os.path.exists(summary_path)
+        with open(summary_path) as fh:
+            summary = fh.read()
+        assert "Discovery Mode Summary" in summary
+        assert "K-mer Filtering" in summary
+        assert "Proband-unique k-mers" in summary
+        assert "Candidate regions" in summary
+        assert "Per-Region Results" in summary
 
     def test_discovery_inherited_no_regions(self, tmpdir):
         """When child shares k-mers with a parent, no regions should appear."""
@@ -1033,6 +1059,13 @@ class TestDiscoveryPipeline:
         with open(metrics_path) as fh:
             metrics = json.load(fh)
         assert metrics["proband_unique_kmers"] == 0
+
+        # Summary should still be written for inherited/empty case
+        summary_path = f"{out_prefix}.summary.txt"
+        assert os.path.exists(summary_path)
+        with open(summary_path) as fh:
+            summary = fh.read()
+        assert "Discovery Mode Summary" in summary
 
     def test_discovery_with_prebuilt_ref_jf(self, tmpdir):
         """Discovery mode should accept a prebuilt --ref-jf."""
@@ -1102,6 +1135,8 @@ class TestDiscoveryPipeline:
         assert os.path.exists(bed_path)
         metrics_path = f"{out_prefix}.metrics.json"
         assert os.path.exists(metrics_path)
+        summary_path = f"{out_prefix}.summary.txt"
+        assert os.path.exists(summary_path)
 
     def test_discovery_empty_child(self, tmpdir):
         """Discovery should handle an empty child BAM without error."""
@@ -1135,6 +1170,14 @@ class TestDiscoveryPipeline:
         with open(metrics_path) as fh:
             metrics = json.load(fh)
         assert metrics["child_candidate_kmers"] == 0
+
+        # Summary should be written even for empty case
+        summary_path = f"{out_prefix}.summary.txt"
+        assert os.path.exists(summary_path)
+        with open(summary_path) as fh:
+            summary = fh.read()
+        assert "Discovery Mode Summary" in summary
+        assert "Candidate regions:" in summary
 
 
 class TestDiscoveryValidation:
