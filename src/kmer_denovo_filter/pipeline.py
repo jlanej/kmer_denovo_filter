@@ -951,7 +951,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     """Module 3: Find reads containing proband-unique k-mers and cluster regions.
 
     Scans the child BAM for primary, non-duplicate reads passing *min_mapq*,
-    canonicalises each read k-mer (matching the ``-C`` convention used by all
+    canonicalizes each read k-mer (matching the ``-C`` convention used by all
     Jellyfish steps), and checks membership in *proband_unique_kmers* via O(1)
     ``set`` lookup.  Unmapped, secondary, supplementary, and duplicate reads
     are skipped before any k-mer work is done, so the effective scan covers
@@ -997,7 +997,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         if seq is None:
             continue
 
-        # Canonicalise each k-mer (same convention as jellyfish -C) and
+        # Canonicalize each k-mer (same convention as jellyfish -C) and
         # check membership in the proband-unique set via O(1) hash lookup.
         unique_in_read = set()
         seq_len = len(seq)
