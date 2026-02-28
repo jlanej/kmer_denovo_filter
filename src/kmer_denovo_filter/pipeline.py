@@ -785,6 +785,11 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
                                    min_child_count, threads, tmpdir):
     """Module 1: Extract all child k-mers and filter by minimum count.
 
+    Child k-mers are counted with ``jellyfish count -C`` (canonical mode)
+    to match the reference index built by :func:`_ensure_ref_jf`.  This
+    ensures that ``jellyfish query`` during reference subtraction compares
+    k-mers in the same canonical orientation.
+
     Returns:
         child_candidates_fa: path to FASTA of candidate child k-mers
             (count >= min_child_count).
@@ -857,6 +862,10 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
 
 def _subtract_reference_kmers(ref_jf, child_candidates_fa, tmpdir):
     """Subtract reference genome k-mers from child candidates.
+
+    Both the reference index (*ref_jf*) and the child candidates FASTA are
+    produced with ``jellyfish -C`` (canonical mode), so ``jellyfish query``
+    correctly matches k-mers regardless of strand orientation.
 
     Returns:
         child_non_ref_fa: path to FASTA of non-reference child k-mers.
@@ -941,6 +950,13 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                         kmer_size, min_mapq, merge_distance=500):
     """Module 3: Find reads containing proband-unique k-mers and cluster regions.
 
+    Scans the child BAM for primary, non-duplicate reads passing *min_mapq*,
+    canonicalises each read k-mer (matching the ``-C`` convention used by all
+    Jellyfish steps), and checks membership in *proband_unique_kmers* via O(1)
+    ``set`` lookup.  Unmapped, secondary, supplementary, and duplicate reads
+    are skipped before any k-mer work is done, so the effective scan covers
+    only primary alignments.  Progress is logged every 1 M reads.
+
     Args:
         child_bam: Path to child BAM file.
         ref_fasta: Path to reference FASTA (or None).
@@ -968,6 +984,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     total_reads_scanned = 0
 
     for read in bam.fetch():
+        # Skip non-primary, duplicate, and low-quality reads upfront
         if read.is_unmapped or read.is_secondary or read.is_supplementary:
             continue
         if read.is_duplicate:
@@ -980,7 +997,8 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         if seq is None:
             continue
 
-        # Collect all proband-unique k-mers in this read
+        # Canonicalise each k-mer (same convention as jellyfish -C) and
+        # check membership in the proband-unique set via O(1) hash lookup.
         unique_in_read = set()
         seq_len = len(seq)
         if seq_len >= kmer_size:
