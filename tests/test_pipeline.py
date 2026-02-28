@@ -1059,16 +1059,20 @@ class TestDiscoveryPipeline:
         mother_bam = os.path.join(tmpdir, "mother.bam")
         _create_bam(
             mother_bam, ref_fa, chrom,
-            [("mread1", 30, parent_seq, None),
-             ("mread2", 30, parent_seq, None),
-             ("mread3", 30, parent_seq, None)],
+            [
+                ("mread1", 30, parent_seq, None),
+                ("mread2", 30, parent_seq, None),
+                ("mread3", 30, parent_seq, None),
+            ],
         )
         father_bam = os.path.join(tmpdir, "father.bam")
         _create_bam(
             father_bam, ref_fa, chrom,
-            [("fread1", 30, parent_seq, None),
-             ("fread2", 30, parent_seq, None),
-             ("fread3", 30, parent_seq, None)],
+            [
+                ("fread1", 30, parent_seq, None),
+                ("fread2", 30, parent_seq, None),
+                ("fread3", 30, parent_seq, None),
+            ],
         )
 
         # Pre-build the reference jellyfish index

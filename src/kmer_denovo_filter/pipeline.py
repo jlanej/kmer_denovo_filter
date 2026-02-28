@@ -817,13 +817,13 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     p_samtools.stdout.close()
-    p_jellyfish.communicate()
+    jf_stdout, jf_stderr = p_jellyfish.communicate()
     p_samtools.communicate()
 
     if p_jellyfish.returncode != 0:
         raise RuntimeError(
             f"jellyfish count (child) failed: "
-            f"{p_jellyfish.stderr.read().decode() if p_jellyfish.stderr else ''}"
+            f"{jf_stderr.decode() if jf_stderr else ''}"
         )
     logger.info(
         "Child k-mer counting complete (%s, index: %s)",
