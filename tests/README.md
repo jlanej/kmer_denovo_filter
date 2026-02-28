@@ -5,6 +5,12 @@
 - **test_cli.py** – CLI argument parsing and validation.
 - **test_kmer_utils.py** – K-mer utility functions (canonicalization, extraction).
 - **test_pipeline.py** – Pipeline integration tests using synthetic BAM/VCF data.
+- **test_example_output.py** – Regression tests that fail when committed example
+  output changes (metrics, summary, VCF annotations). Shows a unified diff on
+  failure.
+- **conftest.py** – Shared fixtures, including a session-scoped
+  `generated_example_output` fixture that runs the GIAB pipeline once and
+  returns paths to all output files for reuse by multiple tests.
 
 ```bash
 pytest tests/test_cli.py tests/test_kmer_utils.py tests/test_pipeline.py -v
