@@ -11,7 +11,8 @@ K-mer Filtering
 Region Counts
 ----------------------------------------
   Candidate regions:                 17
-  Total informative reads:          142
+  Total informative reads:          152
+    (unmapped informative):           10
 
 Region Statistics
 ----------------------------------------

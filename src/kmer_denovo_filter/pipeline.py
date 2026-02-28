@@ -947,30 +947,36 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
 
 
 def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
-                        kmer_size, min_mapq, merge_distance=500):
+                        kmer_size, merge_distance=500):
     """Module 3: Find reads containing proband-unique k-mers and cluster regions.
 
-    Scans the child BAM for primary, non-duplicate reads passing *min_mapq*,
-    canonicalizes each read k-mer (matching the ``-C`` convention used by all
-    Jellyfish steps), and checks membership in *proband_unique_kmers* via O(1)
-    ``set`` lookup.  Unmapped, secondary, supplementary, and duplicate reads
-    are skipped before any k-mer work is done, so the effective scan covers
-    only primary alignments.  Progress is logged every 1 M reads.
+    Scans **all** primary, non-duplicate child reads — including unmapped and
+    low-MAPQ reads — so that no proband-unique k-mers are missed at this
+    stage.  Downstream re-alignment may rescue unmapped reads, and the
+    aligner's confidence should not gate discovery.  Mapped reads with
+    proband-unique k-mers are clustered into genomic windows; unmapped
+    informative reads are tracked separately.
+
+    Each read k-mer is canonicalized (matching the ``-C`` convention used by
+    all Jellyfish steps) and checked against *proband_unique_kmers* via O(1)
+    ``set`` lookup.  Progress is logged every 1 M reads.
 
     Args:
         child_bam: Path to child BAM file.
         ref_fasta: Path to reference FASTA (or None).
         proband_unique_kmers: Set of canonical k-mer strings.
         kmer_size: K-mer size.
-        min_mapq: Minimum mapping quality.
         merge_distance: Maximum gap for merging adjacent regions.
 
     Returns:
         regions: List of (chrom, start, end) tuples (0-based, half-open BED).
         region_reads: Dict mapping region tuple to set of read names.
-        total_informative: Total number of informative reads found.
+        total_informative: Total number of informative reads found
+            (mapped + unmapped).
         region_kmers: Dict mapping region tuple to set of proband-unique
             k-mer strings observed in that region's reads.
+        unmapped_informative: Number of unmapped reads carrying
+            proband-unique k-mers.
     """
     bam = pysam.AlignmentFile(
         child_bam, reference_filename=ref_fasta if ref_fasta else None,
@@ -979,17 +985,16 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     # (chrom, start, end, read_name, unique_kmers_in_read)
     read_hits = []
     reads_seen = set()
+    unmapped_informative = 0
 
     anchor_start = time.monotonic()
     total_reads_scanned = 0
 
     for read in bam.fetch():
-        # Skip non-primary, duplicate, and low-quality reads upfront
-        if read.is_unmapped or read.is_secondary or read.is_supplementary:
+        # Skip secondary, supplementary, and duplicate reads
+        if read.is_secondary or read.is_supplementary:
             continue
         if read.is_duplicate:
-            continue
-        if read.mapping_quality < min_mapq:
             continue
 
         total_reads_scanned += 1
@@ -1009,31 +1014,38 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
 
         if unique_in_read and read.query_name not in reads_seen:
             reads_seen.add(read.query_name)
-            read_hits.append((
-                read.reference_name,
-                read.reference_start,
-                read.reference_end,
-                read.query_name,
-                unique_in_read,
-            ))
+            if read.is_unmapped:
+                unmapped_informative += 1
+            else:
+                read_hits.append((
+                    read.reference_name,
+                    read.reference_start,
+                    read.reference_end,
+                    read.query_name,
+                    unique_in_read,
+                ))
 
         if total_reads_scanned % 1_000_000 == 0:
             logger.info(
                 "  Anchoring: %d reads scanned, %d informative (%s)",
-                total_reads_scanned, len(read_hits),
+                total_reads_scanned,
+                len(read_hits) + unmapped_informative,
                 _format_elapsed(time.monotonic() - anchor_start),
             )
 
     bam.close()
 
+    total_informative = len(read_hits) + unmapped_informative
     logger.info(
-        "Anchoring complete: %d informative reads from %d scanned (%s)",
-        len(read_hits), total_reads_scanned,
+        "Anchoring complete: %d informative reads (%d mapped, %d unmapped) "
+        "from %d scanned (%s)",
+        total_informative, len(read_hits), unmapped_informative,
+        total_reads_scanned,
         _format_elapsed(time.monotonic() - anchor_start),
     )
 
     if not read_hits:
-        return [], {}, 0, {}
+        return [], {}, total_informative, {}, unmapped_informative
 
     # Sort by chrom, start
     read_hits.sort(key=lambda x: (x[0], x[1]))
@@ -1071,11 +1083,11 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     region_kmers[region_key] = current_kmers
 
     logger.info(
-        "Clustered %d informative reads into %d regions",
+        "Clustered %d mapped informative reads into %d regions",
         len(read_hits), len(regions),
     )
 
-    return regions, region_reads, len(read_hits), region_kmers
+    return regions, region_reads, total_informative, region_kmers, unmapped_informative
 
 
 def _write_bed(regions, region_reads, region_kmers, bed_path):
@@ -1106,6 +1118,7 @@ def _write_discovery_summary(summary_path, regions, region_reads,
     """
     n_regions = metrics["candidate_regions"]
     n_reads_total = metrics["informative_reads"]
+    n_unmapped = metrics.get("unmapped_informative_reads", 0)
     n_unique_kmers = metrics["proband_unique_kmers"]
     n_candidates = metrics["child_candidate_kmers"]
     n_non_ref = metrics["non_ref_kmers"]
@@ -1125,6 +1138,8 @@ def _write_discovery_summary(summary_path, regions, region_reads,
     lines.append("-" * 40)
     lines.append(f"  Candidate regions:           {n_regions:>8}")
     lines.append(f"  Total informative reads:     {n_reads_total:>8}")
+    if n_unmapped > 0:
+        lines.append(f"    (unmapped informative):     {n_unmapped:>8}")
     lines.append("")
 
     if regions:
@@ -1192,10 +1207,14 @@ def _write_discovery_summary(summary_path, regions, region_reads,
 
 
 def _write_informative_reads_discovery(
-    child_bam, ref_fasta, proband_unique_kmers, kmer_size, min_mapq,
+    child_bam, ref_fasta, proband_unique_kmers, kmer_size,
     output_bam,
 ):
     """Write child reads carrying proband-unique k-mers to a BAM file.
+
+    Includes **all** primary, non-duplicate reads — mapped and unmapped,
+    regardless of mapping quality — so that downstream re-alignment can
+    rescue initially unmapped reads.
 
     Each output read is tagged with ``dk:i:1`` indicating it contains
     a proband-unique k-mer. Reads are sorted and indexed for IGV.
@@ -1205,7 +1224,6 @@ def _write_informative_reads_discovery(
         ref_fasta: Path to the reference FASTA.
         proband_unique_kmers: Set of canonical k-mer strings.
         kmer_size: K-mer size.
-        min_mapq: Minimum mapping quality.
         output_bam: Path for the output BAM file.
     """
     bam_in = pysam.AlignmentFile(
@@ -1217,11 +1235,9 @@ def _write_informative_reads_discovery(
 
     written = set()
     for read in bam_in.fetch():
-        if read.is_unmapped or read.is_secondary or read.is_supplementary:
+        if read.is_secondary or read.is_supplementary:
             continue
         if read.is_duplicate:
-            continue
-        if read.mapping_quality < min_mapq:
             continue
 
         seq = read.query_sequence
@@ -1343,6 +1359,7 @@ def run_discovery_pipeline(args):
                 "non_ref_kmers": 0,
                 "proband_unique_kmers": 0,
                 "informative_reads": 0,
+                "unmapped_informative_reads": 0,
                 "candidate_regions": 0,
             }
             _write_empty_discovery_outputs(
@@ -1372,6 +1389,7 @@ def run_discovery_pipeline(args):
                 "non_ref_kmers": 0,
                 "proband_unique_kmers": 0,
                 "informative_reads": 0,
+                "unmapped_informative_reads": 0,
                 "candidate_regions": 0,
             }
             _write_empty_discovery_outputs(
@@ -1406,6 +1424,7 @@ def run_discovery_pipeline(args):
                 "non_ref_kmers": n_non_ref,
                 "proband_unique_kmers": 0,
                 "informative_reads": 0,
+                "unmapped_informative_reads": 0,
                 "candidate_regions": 0,
             }
             _write_empty_discovery_outputs(
@@ -1423,10 +1442,10 @@ def run_discovery_pipeline(args):
         "[Module 3] Anchoring %d proband-unique k-mers to child reads",
         len(proband_unique_kmers),
     )
-    regions, region_reads, total_informative, region_kmers = (
+    regions, region_reads, total_informative, region_kmers, unmapped_informative = (
         _anchor_and_cluster(
             args.child, args.ref_fasta, proband_unique_kmers,
-            args.kmer_size, args.min_mapq,
+            args.kmer_size,
         )
     )
     logger.info(
@@ -1443,7 +1462,7 @@ def run_discovery_pipeline(args):
     logger.info("[Module 4] Writing informative reads BAM: %s", info_bam_path)
     _write_informative_reads_discovery(
         args.child, args.ref_fasta, proband_unique_kmers,
-        args.kmer_size, args.min_mapq, info_bam_path,
+        args.kmer_size, info_bam_path,
     )
 
     metrics = {
@@ -1452,6 +1471,7 @@ def run_discovery_pipeline(args):
         "non_ref_kmers": n_non_ref,
         "proband_unique_kmers": len(proband_unique_kmers),
         "informative_reads": total_informative,
+        "unmapped_informative_reads": unmapped_informative,
         "candidate_regions": len(regions),
         "regions": [
             {
