@@ -35,7 +35,7 @@ jobs:
       - name: Run integration tests
         run: pytest tests/test_pipeline.py -v
 
-      - name: Run GIAB integration pipeline
+      - name: Run GIAB VCF-mode integration pipeline
         run: |
           mkdir -p integration_output
           kmer-denovo \
@@ -48,21 +48,44 @@ jobs:
             --summary integration_output/summary.txt    \
             --proband-id HG002
 
-      - name: Display summary
+      - name: Display VCF-mode summary
         run: cat integration_output/summary.txt
 
-      - name: Upload integration results
+      - name: Run GIAB discovery-mode integration pipeline
+        run: |
+          mkdir -p integration_output_discovery
+          kmer-denovo \
+            --child   tests/data/giab/HG002_child.bam   \
+            --father  tests/data/giab/HG003_father.bam  \
+            --mother  tests/data/giab/HG004_mother.bam  \
+            --ref-fasta tests/data/giab/mini_ref.fa      \
+            --ref-jf  tests/data/giab/mini_ref.fa.k31.jf \
+            --out-prefix integration_output_discovery/giab_discovery \
+            --min-child-count 3 \
+            --kmer-size 31
+
+      - name: Display discovery-mode summary
+        run: cat integration_output_discovery/giab_discovery.summary.txt
+
+      - name: Upload VCF-mode integration results
         uses: actions/upload-artifact@v4
         with:
           name: giab-integration-results
           path: integration_output/
 
+      - name: Upload discovery-mode integration results
+        uses: actions/upload-artifact@v4
+        with:
+          name: giab-discovery-results
+          path: integration_output_discovery/
+
       - name: Update example output
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
-          mkdir -p tests/example_output
-          cp integration_output/* tests/example_output/
+          mkdir -p tests/example_output tests/example_output_discovery
+          cp integration_output/annotated.vcf.gz integration_output/annotated.vcf.gz.tbi integration_output/metrics.json integration_output/summary.txt tests/example_output/
+          cp integration_output_discovery/giab_discovery.bed integration_output_discovery/giab_discovery.metrics.json integration_output_discovery/giab_discovery.summary.txt tests/example_output_discovery/
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add tests/example_output/
+          git add tests/example_output/ tests/example_output_discovery/
           git diff --staged --quiet || (git commit -m "Update example output [skip ci]" && git push || echo "Push failed; example output will be updated on next successful run.")

@@ -1,0 +1,147 @@
+{
+  "mode": "discovery",
+  "child_candidate_kmers": 29326,
+  "non_ref_kmers": 5057,
+  "proband_unique_kmers": 344,
+  "informative_reads": 152,
+  "unmapped_informative_reads": 10,
+  "candidate_regions": 17,
+  "regions": [
+    {
+      "chrom": "chr10",
+      "start": 50011259,
+      "end": 50011537,
+      "size": 278,
+      "reads": 4,
+      "unique_kmers": 5
+    },
+    {
+      "chrom": "chr10",
+      "start": 50012051,
+      "end": 50012428,
+      "size": 377,
+      "reads": 3,
+      "unique_kmers": 22
+    },
+    {
+      "chrom": "chr10",
+      "start": 50023694,
+      "end": 50024902,
+      "size": 1208,
+      "reads": 7,
+      "unique_kmers": 28
+    },
+    {
+      "chrom": "chr11",
+      "start": 54999699,
+      "end": 55000801,
+      "size": 1102,
+      "reads": 7,
+      "unique_kmers": 37
+    },
+    {
+      "chrom": "chr11",
+      "start": 55003556,
+      "end": 55004560,
+      "size": 1004,
+      "reads": 31,
+      "unique_kmers": 52
+    },
+    {
+      "chrom": "chr11",
+      "start": 55006491,
+      "end": 55007423,
+      "size": 932,
+      "reads": 9,
+      "unique_kmers": 58
+    },
+    {
+      "chrom": "chr11",
+      "start": 55008329,
+      "end": 55009053,
+      "size": 724,
+      "reads": 32,
+      "unique_kmers": 62
+    },
+    {
+      "chrom": "chr12",
+      "start": 60008501,
+      "end": 60008907,
+      "size": 406,
+      "reads": 3,
+      "unique_kmers": 18
+    },
+    {
+      "chrom": "chr15",
+      "start": 35009229,
+      "end": 35010147,
+      "size": 918,
+      "reads": 4,
+      "unique_kmers": 7
+    },
+    {
+      "chrom": "chr18",
+      "start": 30028500,
+      "end": 30028931,
+      "size": 431,
+      "reads": 8,
+      "unique_kmers": 13
+    },
+    {
+      "chrom": "chr19",
+      "start": 15035184,
+      "end": 15036414,
+      "size": 1230,
+      "reads": 10,
+      "unique_kmers": 24
+    },
+    {
+      "chrom": "chr19",
+      "start": 15041206,
+      "end": 15041997,
+      "size": 791,
+      "reads": 3,
+      "unique_kmers": 6
+    },
+    {
+      "chrom": "chr22",
+      "start": 25046132,
+      "end": 25046424,
+      "size": 292,
+      "reads": 3,
+      "unique_kmers": 7
+    },
+    {
+      "chrom": "chr8",
+      "start": 40002915,
+      "end": 40003477,
+      "size": 562,
+      "reads": 4,
+      "unique_kmers": 15
+    },
+    {
+      "chrom": "chr8",
+      "start": 40008045,
+      "end": 40008215,
+      "size": 170,
+      "reads": 3,
+      "unique_kmers": 1
+    },
+    {
+      "chrom": "chr8",
+      "start": 40036855,
+      "end": 40037411,
+      "size": 556,
+      "reads": 6,
+      "unique_kmers": 7
+    },
+    {
+      "chrom": "chr8",
+      "start": 70042205,
+      "end": 70043420,
+      "size": 1215,
+      "reads": 5,
+      "unique_kmers": 23
+    }
+  ]
+}

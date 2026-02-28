@@ -13,6 +13,7 @@ from kmer_denovo_filter.pipeline import (
     _format_elapsed,
     _format_file_size,
     _validate_inputs,
+    run_discovery_pipeline,
     run_pipeline,
 )
 
@@ -871,3 +872,381 @@ class TestGIABIntegration:
         assert "De Novo Variant Summary" in summary
         assert "Likely de novo" in summary
         assert "DE_NOVO" in summary
+
+
+class TestDiscoveryPipeline:
+    """End-to-end tests for VCF-free discovery mode."""
+
+    @pytest.fixture()
+    def tmpdir(self, tmp_path):
+        return str(tmp_path)
+
+    def test_discovery_denovo_detected(self, tmpdir):
+        """A de novo variant should produce a BED region and informative reads."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        # Child read with a mutation at position 50
+        child_seq = list(ref_seq[30:90])
+        child_seq[20] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        # Create multiple copies to exceed min_child_count
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [
+                ("read1", 30, child_seq, None),
+                ("read2", 30, child_seq, None),
+                ("read3", 30, child_seq, None),
+                ("read4", 30, child_seq, None),
+            ],
+        )
+
+        # Parent reads match reference (no mutation)
+        parent_seq = ref_seq[30:90]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(
+            mother_bam, ref_fa, chrom,
+            [
+                ("mread1", 30, parent_seq, None),
+                ("mread2", 30, parent_seq, None),
+                ("mread3", 30, parent_seq, None),
+            ],
+        )
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(
+            father_bam, ref_fa, chrom,
+            [
+                ("fread1", 30, parent_seq, None),
+                ("fread2", 30, parent_seq, None),
+                ("fread3", 30, parent_seq, None),
+            ],
+        )
+
+        out_prefix = os.path.join(tmpdir, "disc_out")
+
+        args = parse_args([
+            "--child", child_bam,
+            "--mother", mother_bam,
+            "--father", father_bam,
+            "--ref-fasta", ref_fa,
+            "--out-prefix", out_prefix,
+            "--min-child-count", "3",
+            "--kmer-size", "5",
+        ])
+        run_discovery_pipeline(args)
+
+        # Check BED file with per-region read/k-mer counts
+        bed_path = f"{out_prefix}.bed"
+        assert os.path.exists(bed_path)
+        with open(bed_path) as fh:
+            bed_lines = [l.strip() for l in fh if l.strip()]
+        assert len(bed_lines) >= 1, "Expected at least one candidate region"
+        # BED lines should have 5 columns: chrom, start, end, reads, kmers
+        parts = bed_lines[0].split("\t")
+        assert len(parts) == 5
+        assert int(parts[3]) >= 1  # at least 1 read
+        assert int(parts[4]) >= 1  # at least 1 k-mer
+
+        # Check informative reads BAM
+        info_bam = f"{out_prefix}.informative.bam"
+        assert os.path.exists(info_bam)
+        assert os.path.exists(info_bam + ".bai")
+        bam_info = pysam.AlignmentFile(info_bam)
+        info_reads = list(bam_info)
+        assert len(info_reads) >= 1
+        for read in info_reads:
+            assert read.has_tag("dk")
+            assert read.get_tag("dk") == 1
+        bam_info.close()
+
+        # Check metrics JSON with per-region detail
+        metrics_path = f"{out_prefix}.metrics.json"
+        assert os.path.exists(metrics_path)
+        with open(metrics_path) as fh:
+            metrics = json.load(fh)
+        assert metrics["mode"] == "discovery"
+        assert metrics["proband_unique_kmers"] > 0
+        assert metrics["informative_reads"] > 0
+        assert metrics["candidate_regions"] >= 1
+        # Per-region detail should be present
+        assert "regions" in metrics
+        assert len(metrics["regions"]) >= 1
+        for region in metrics["regions"]:
+            assert "chrom" in region
+            assert "start" in region
+            assert "end" in region
+            assert "size" in region
+            assert region["reads"] >= 1
+            assert region["unique_kmers"] >= 1
+
+        # Check summary text file
+        summary_path = f"{out_prefix}.summary.txt"
+        assert os.path.exists(summary_path)
+        with open(summary_path) as fh:
+            summary = fh.read()
+        assert "Discovery Mode Summary" in summary
+        assert "K-mer Filtering" in summary
+        assert "Proband-unique k-mers" in summary
+        assert "Candidate regions" in summary
+        assert "Per-Region Results" in summary
+
+    def test_discovery_inherited_no_regions(self, tmpdir):
+        """When child shares k-mers with a parent, no regions should appear."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        # Same mutation in child and mother
+        mut_seq = list(ref_seq[30:90])
+        mut_seq[20] = "G" if ref_seq[50] != "G" else "T"
+        mut_seq = "".join(mut_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [
+                ("read1", 30, mut_seq, None),
+                ("read2", 30, mut_seq, None),
+                ("read3", 30, mut_seq, None),
+                ("read4", 30, mut_seq, None),
+            ],
+        )
+
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(
+            mother_bam, ref_fa, chrom,
+            [
+                ("mread1", 30, mut_seq, None),
+                ("mread2", 30, mut_seq, None),
+                ("mread3", 30, mut_seq, None),
+            ],
+        )
+
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(
+            father_bam, ref_fa, chrom,
+            [
+                ("fread1", 30, ref_seq[30:90], None),
+                ("fread2", 30, ref_seq[30:90], None),
+                ("fread3", 30, ref_seq[30:90], None),
+            ],
+        )
+
+        out_prefix = os.path.join(tmpdir, "disc_inh")
+
+        args = parse_args([
+            "--child", child_bam,
+            "--mother", mother_bam,
+            "--father", father_bam,
+            "--ref-fasta", ref_fa,
+            "--out-prefix", out_prefix,
+            "--min-child-count", "3",
+            "--kmer-size", "5",
+        ])
+        run_discovery_pipeline(args)
+
+        bed_path = f"{out_prefix}.bed"
+        assert os.path.exists(bed_path)
+        with open(bed_path) as fh:
+            bed_lines = [l.strip() for l in fh if l.strip()]
+        # No candidate regions expected for inherited variation
+        assert len(bed_lines) == 0
+
+        metrics_path = f"{out_prefix}.metrics.json"
+        with open(metrics_path) as fh:
+            metrics = json.load(fh)
+        assert metrics["proband_unique_kmers"] == 0
+
+        # Summary should still be written for inherited/empty case
+        summary_path = f"{out_prefix}.summary.txt"
+        assert os.path.exists(summary_path)
+        with open(summary_path) as fh:
+            summary = fh.read()
+        assert "Discovery Mode Summary" in summary
+
+    def test_discovery_with_prebuilt_ref_jf(self, tmpdir):
+        """Discovery mode should accept a prebuilt --ref-jf."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        child_seq = list(ref_seq[30:90])
+        child_seq[20] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [
+                ("read1", 30, child_seq, None),
+                ("read2", 30, child_seq, None),
+                ("read3", 30, child_seq, None),
+                ("read4", 30, child_seq, None),
+            ],
+        )
+
+        parent_seq = ref_seq[30:90]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(
+            mother_bam, ref_fa, chrom,
+            [
+                ("mread1", 30, parent_seq, None),
+                ("mread2", 30, parent_seq, None),
+                ("mread3", 30, parent_seq, None),
+            ],
+        )
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(
+            father_bam, ref_fa, chrom,
+            [
+                ("fread1", 30, parent_seq, None),
+                ("fread2", 30, parent_seq, None),
+                ("fread3", 30, parent_seq, None),
+            ],
+        )
+
+        # Pre-build the reference jellyfish index
+        import subprocess
+        ref_jf = os.path.join(tmpdir, "ref.k5.jf")
+        subprocess.run([
+            "jellyfish", "count", "-m", "5", "-s", "10M",
+            "-t", "1", "-C", ref_fa, "-o", ref_jf,
+        ], check=True)
+        assert os.path.exists(ref_jf)
+
+        out_prefix = os.path.join(tmpdir, "disc_prebuilt")
+
+        args = parse_args([
+            "--child", child_bam,
+            "--mother", mother_bam,
+            "--father", father_bam,
+            "--ref-fasta", ref_fa,
+            "--ref-jf", ref_jf,
+            "--out-prefix", out_prefix,
+            "--min-child-count", "3",
+            "--kmer-size", "5",
+        ])
+        run_discovery_pipeline(args)
+
+        bed_path = f"{out_prefix}.bed"
+        assert os.path.exists(bed_path)
+        metrics_path = f"{out_prefix}.metrics.json"
+        assert os.path.exists(metrics_path)
+        summary_path = f"{out_prefix}.summary.txt"
+        assert os.path.exists(summary_path)
+
+    def test_discovery_empty_child(self, tmpdir):
+        """Discovery should handle an empty child BAM without error."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        _create_ref_fasta(ref_fa, chrom, 200)
+
+        for label in ("child", "mother", "father"):
+            bam = os.path.join(tmpdir, f"{label}.bam")
+            _create_bam(bam, ref_fa, chrom, [])
+
+        out_prefix = os.path.join(tmpdir, "disc_empty")
+
+        args = parse_args([
+            "--child", os.path.join(tmpdir, "child.bam"),
+            "--mother", os.path.join(tmpdir, "mother.bam"),
+            "--father", os.path.join(tmpdir, "father.bam"),
+            "--ref-fasta", ref_fa,
+            "--out-prefix", out_prefix,
+            "--min-child-count", "3",
+            "--kmer-size", "5",
+        ])
+        run_discovery_pipeline(args)
+
+        bed_path = f"{out_prefix}.bed"
+        assert os.path.exists(bed_path)
+        with open(bed_path) as fh:
+            assert fh.read().strip() == ""
+
+        metrics_path = f"{out_prefix}.metrics.json"
+        with open(metrics_path) as fh:
+            metrics = json.load(fh)
+        assert metrics["child_candidate_kmers"] == 0
+
+        # Summary should be written even for empty case
+        summary_path = f"{out_prefix}.summary.txt"
+        assert os.path.exists(summary_path)
+        with open(summary_path) as fh:
+            summary = fh.read()
+        assert "Discovery Mode Summary" in summary
+        assert "Candidate regions:" in summary
+
+
+class TestDiscoveryValidation:
+    """Tests for input validation in discovery mode."""
+
+    @pytest.fixture()
+    def tmpdir(self, tmp_path):
+        return str(tmp_path)
+
+    def _make_discovery_args(self, tmpdir, **overrides):
+        """Build a minimal args namespace for discovery mode."""
+        for name in (
+            "child.bam", "child.bam.bai",
+            "mother.bam", "mother.bam.bai",
+            "father.bam", "father.bam.bai",
+            "ref.fa",
+        ):
+            path = os.path.join(tmpdir, name)
+            if not os.path.exists(path):
+                open(path, "w").close()
+
+        defaults = {
+            "child": os.path.join(tmpdir, "child.bam"),
+            "mother": os.path.join(tmpdir, "mother.bam"),
+            "father": os.path.join(tmpdir, "father.bam"),
+            "vcf": None,
+            "output": None,
+            "ref_fasta": os.path.join(tmpdir, "ref.fa"),
+            "ref_jf": None,
+            "out_prefix": os.path.join(tmpdir, "output"),
+            "min_child_count": 3,
+            "kmer_size": 31,
+            "min_baseq": 20,
+            "min_mapq": 20,
+            "threads": 4,
+            "debug_kmers": False,
+        }
+        defaults.update(overrides)
+        import argparse
+        return argparse.Namespace(**defaults)
+
+    def test_valid_discovery_inputs(self, tmpdir):
+        args = self._make_discovery_args(tmpdir)
+        _validate_inputs(args)
+
+    def test_discovery_missing_ref_fasta(self, tmpdir):
+        args = self._make_discovery_args(
+            tmpdir, ref_fasta=None, ref_jf=None,
+        )
+        with pytest.raises(SystemExit):
+            _validate_inputs(args)
+
+    def test_discovery_ref_jf_not_found(self, tmpdir):
+        args = self._make_discovery_args(
+            tmpdir, ref_jf="/no/such/ref.jf",
+        )
+        with pytest.raises(SystemExit):
+            _validate_inputs(args)
+
+    def test_discovery_min_child_count_zero(self, tmpdir):
+        args = self._make_discovery_args(tmpdir, min_child_count=0)
+        with pytest.raises(SystemExit):
+            _validate_inputs(args)
+
+    def test_discovery_with_ref_jf_only(self, tmpdir):
+        """When --ref-jf is provided, --ref-fasta can be None."""
+        ref_jf = os.path.join(tmpdir, "ref.k31.jf")
+        open(ref_jf, "w").close()
+        args = self._make_discovery_args(
+            tmpdir, ref_fasta=None, ref_jf=ref_jf,
+        )
+        _validate_inputs(args)

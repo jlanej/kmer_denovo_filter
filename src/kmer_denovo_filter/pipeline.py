@@ -63,12 +63,14 @@ def _validate_inputs(args):
     errors = []
 
     # Check required input files exist
-    for label, path in [
+    required_files = [
         ("Child BAM/CRAM (--child)", args.child),
         ("Mother BAM/CRAM (--mother)", args.mother),
         ("Father BAM/CRAM (--father)", args.father),
-        ("Input VCF (--vcf)", args.vcf),
-    ]:
+    ]
+    if args.vcf is not None:
+        required_files.append(("Input VCF (--vcf)", args.vcf))
+    for label, path in required_files:
         if not os.path.isfile(path):
             errors.append(f"{label}: file not found: {path}")
 
@@ -138,6 +140,25 @@ def _validate_inputs(args):
         errors.append(
             f"--threads must be >= 1, got {args.threads}"
         )
+
+    # Discovery-mode-specific validation
+    if args.vcf is None:
+        if args.ref_fasta is None and getattr(args, 'ref_jf', None) is None:
+            errors.append(
+                "Discovery mode requires --ref-fasta (or --ref-jf) "
+                "to subtract reference k-mers"
+            )
+        ref_jf = getattr(args, 'ref_jf', None)
+        if ref_jf is not None and not os.path.isfile(ref_jf):
+            errors.append(
+                f"Reference Jellyfish index (--ref-jf): file not found: "
+                f"{ref_jf}"
+            )
+        min_child_count = getattr(args, 'min_child_count', 3)
+        if min_child_count < 1:
+            errors.append(
+                f"--min-child-count must be >= 1, got {min_child_count}"
+            )
 
     if errors:
         for err in errors:
@@ -708,6 +729,804 @@ def _write_summary(summary_path, variants, annotations):
         fh.write(text)
 
     return text
+
+
+# ── Discovery-mode helpers ────────────────────────────────────────
+
+
+def _ensure_ref_jf(ref_fasta, kmer_size, threads, ref_jf=None):
+    """Ensure a Jellyfish reference index exists, building it if necessary.
+
+    Args:
+        ref_fasta: Path to the reference FASTA file.
+        kmer_size: K-mer size.
+        threads: Number of threads for jellyfish.
+        ref_jf: Explicit path to the Jellyfish index; when *None*,
+            defaults to ``{ref_fasta}.k{kmer_size}.jf``.
+
+    Returns:
+        Path to the Jellyfish reference index.
+    """
+    if ref_jf is None:
+        ref_jf = f"{ref_fasta}.k{kmer_size}.jf"
+
+    if os.path.isfile(ref_jf):
+        logger.info("Reference Jellyfish index found: %s", ref_jf)
+        return ref_jf
+
+    logger.info(
+        "Building reference Jellyfish index: %s (k=%d, threads=%d)",
+        ref_jf, kmer_size, threads,
+    )
+    build_start = time.monotonic()
+    cmd = [
+        "jellyfish", "count",
+        "-m", str(kmer_size),
+        "-s", "3G",
+        "-t", str(threads),
+        "-C",
+        ref_fasta,
+        "-o", ref_jf,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"jellyfish count (reference) failed: {result.stderr}"
+        )
+    logger.info(
+        "Reference index built in %s (%s)",
+        _format_elapsed(time.monotonic() - build_start),
+        _format_file_size(ref_jf),
+    )
+    return ref_jf
+
+
+def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
+                                   min_child_count, threads, tmpdir):
+    """Module 1: Extract all child k-mers and filter by minimum count.
+
+    Child k-mers are counted with ``jellyfish count -C`` (canonical mode)
+    to match the reference index built by :func:`_ensure_ref_jf`.  This
+    ensures that ``jellyfish query`` during reference subtraction compares
+    k-mers in the same canonical orientation.
+
+    Returns:
+        child_candidates_fa: path to FASTA of candidate child k-mers
+            (count >= min_child_count).
+        n_candidates: number of candidate k-mers.
+    """
+    child_jf = os.path.join(tmpdir, "child.jf")
+
+    # Step 1: Count all child k-mers
+    logger.info("Extracting child k-mers from BAM (k=%d)…", kmer_size)
+    samtools_cmd = ["samtools", "fasta", "-F", "0x500", "-@", "2", child_bam]
+    if ref_fasta:
+        samtools_cmd.extend(["--reference", ref_fasta])
+
+    jellyfish_cmd = [
+        "jellyfish", "count",
+        "-m", str(kmer_size),
+        "-s", "1G",
+        "-t", str(threads),
+        "-C",
+        "-o", child_jf,
+        "/dev/fd/0",
+    ]
+
+    extract_start = time.monotonic()
+    p_samtools = subprocess.Popen(
+        samtools_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    p_jellyfish = subprocess.Popen(
+        jellyfish_cmd, stdin=p_samtools.stdout,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    p_samtools.stdout.close()
+    jf_stdout, jf_stderr = p_jellyfish.communicate()
+    p_samtools.communicate()
+
+    if p_jellyfish.returncode != 0:
+        raise RuntimeError(
+            f"jellyfish count (child) failed: "
+            f"{jf_stderr.decode() if jf_stderr else ''}"
+        )
+    logger.info(
+        "Child k-mer counting complete (%s, index: %s)",
+        _format_elapsed(time.monotonic() - extract_start),
+        _format_file_size(child_jf),
+    )
+
+    # Step 2: Dump k-mers with count >= min_child_count
+    dump_cmd = [
+        "jellyfish", "dump", "-c",
+        "-L", str(min_child_count),
+        child_jf,
+    ]
+    result = subprocess.run(dump_cmd, capture_output=True, text=True, check=True)
+
+    child_candidates_fa = os.path.join(tmpdir, "child_candidates.fa")
+    n_candidates = 0
+    with open(child_candidates_fa, "w") as fh:
+        for line in result.stdout.strip().split("\n"):
+            if line:
+                kmer = line.split()[0]
+                fh.write(f">{n_candidates}\n{kmer}\n")
+                n_candidates += 1
+
+    logger.info(
+        "Child candidate k-mers (count >= %d): %d",
+        min_child_count, n_candidates,
+    )
+    return child_candidates_fa, n_candidates
+
+
+def _subtract_reference_kmers(ref_jf, child_candidates_fa, tmpdir):
+    """Subtract reference genome k-mers from child candidates.
+
+    Both the reference index (*ref_jf*) and the child candidates FASTA are
+    produced with ``jellyfish -C`` (canonical mode), so ``jellyfish query``
+    correctly matches k-mers regardless of strand orientation.
+
+    Returns:
+        child_non_ref_fa: path to FASTA of non-reference child k-mers.
+        n_non_ref: number of surviving k-mers.
+    """
+    query_cmd = [
+        "jellyfish", "query", ref_jf, "-s", child_candidates_fa,
+    ]
+    result = subprocess.run(query_cmd, capture_output=True, text=True, check=True)
+
+    child_non_ref_fa = os.path.join(tmpdir, "child_non_ref_kmers.fa")
+    n_non_ref = 0
+    with open(child_non_ref_fa, "w") as fh:
+        for line in result.stdout.strip().split("\n"):
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == "0":
+                fh.write(f">{n_non_ref}\n{parts[0]}\n")
+                n_non_ref += 1
+
+    logger.info(
+        "Non-reference child k-mers after subtraction: %d", n_non_ref,
+    )
+    return child_non_ref_fa, n_non_ref
+
+
+def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
+                              child_non_ref_fa, kmer_size, threads, tmpdir):
+    """Module 2: Filter non-reference child k-mers against both parents.
+
+    Returns:
+        Set of canonical k-mer strings that are absent from both parents
+        (proband-unique k-mers).
+    """
+    # Read the non-ref child k-mers into a set
+    non_ref_kmers = set()
+    with open(child_non_ref_fa) as fh:
+        for line in fh:
+            if not line.startswith(">"):
+                non_ref_kmers.add(line.strip())
+
+    if not non_ref_kmers:
+        return set()
+
+    logger.info(
+        "Filtering %d non-reference k-mers against parents…",
+        len(non_ref_kmers),
+    )
+
+    # Scan mother
+    mother_kmers = _scan_parent_jellyfish(
+        mother_bam, ref_fasta, child_non_ref_fa, kmer_size,
+        os.path.join(tmpdir, "mother"), threads,
+    )
+    logger.info(
+        "Mother: %d / %d non-ref k-mers found",
+        len(mother_kmers), len(non_ref_kmers),
+    )
+
+    # Scan father
+    father_kmers = _scan_parent_jellyfish(
+        father_bam, ref_fasta, child_non_ref_fa, kmer_size,
+        os.path.join(tmpdir, "father"), threads,
+    )
+    logger.info(
+        "Father: %d / %d non-ref k-mers found",
+        len(father_kmers), len(non_ref_kmers),
+    )
+
+    # Keep only k-mers absent from BOTH parents
+    parent_kmers = set(mother_kmers) | set(father_kmers)
+    proband_unique = non_ref_kmers - parent_kmers
+    logger.info(
+        "Proband-unique k-mers (absent from both parents): %d / %d",
+        len(proband_unique), len(non_ref_kmers),
+    )
+    return proband_unique
+
+
+def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
+                        kmer_size, merge_distance=500):
+    """Module 3: Find reads containing proband-unique k-mers and cluster regions.
+
+    Scans **all** primary, non-duplicate child reads — including unmapped and
+    low-MAPQ reads — so that no proband-unique k-mers are missed at this
+    stage.  Downstream re-alignment may rescue unmapped reads, and the
+    aligner's confidence should not gate discovery.  Mapped reads with
+    proband-unique k-mers are clustered into genomic windows; unmapped
+    informative reads are tracked separately.
+
+    Each read k-mer is canonicalized (matching the ``-C`` convention used by
+    all Jellyfish steps) and checked against *proband_unique_kmers* via O(1)
+    ``set`` lookup.  Progress is logged every 1 M reads.
+
+    Args:
+        child_bam: Path to child BAM file.
+        ref_fasta: Path to reference FASTA (or None).
+        proband_unique_kmers: Set of canonical k-mer strings.
+        kmer_size: K-mer size.
+        merge_distance: Maximum gap for merging adjacent regions.
+
+    Returns:
+        regions: List of (chrom, start, end) tuples (0-based, half-open BED).
+        region_reads: Dict mapping region tuple to set of read names.
+        total_informative: Total number of informative reads found
+            (mapped + unmapped).
+        region_kmers: Dict mapping region tuple to set of proband-unique
+            k-mer strings observed in that region's reads.
+        unmapped_informative: Number of unmapped reads carrying
+            proband-unique k-mers.
+    """
+    bam = pysam.AlignmentFile(
+        child_bam, reference_filename=ref_fasta if ref_fasta else None,
+    )
+
+    # (chrom, start, end, read_name, unique_kmers_in_read)
+    read_hits = []
+    reads_seen = set()
+    unmapped_informative = 0
+
+    anchor_start = time.monotonic()
+    total_reads_scanned = 0
+
+    for read in bam.fetch():
+        # Skip secondary, supplementary, and duplicate reads
+        if read.is_secondary or read.is_supplementary:
+            continue
+        if read.is_duplicate:
+            continue
+
+        total_reads_scanned += 1
+        seq = read.query_sequence
+        if seq is None:
+            continue
+
+        # Canonicalize each k-mer (same convention as jellyfish -C) and
+        # check membership in the proband-unique set via O(1) hash lookup.
+        unique_in_read = set()
+        seq_len = len(seq)
+        if seq_len >= kmer_size:
+            for i in range(seq_len - kmer_size + 1):
+                kmer = canonicalize(seq[i:i + kmer_size])
+                if kmer in proband_unique_kmers:
+                    unique_in_read.add(kmer)
+
+        if unique_in_read and read.query_name not in reads_seen:
+            reads_seen.add(read.query_name)
+            if read.is_unmapped:
+                # Unmapped reads lack reference coordinates; count them
+                # separately since they cannot be placed into regions.
+                unmapped_informative += 1
+            else:
+                read_hits.append((
+                    read.reference_name,
+                    read.reference_start,
+                    read.reference_end,
+                    read.query_name,
+                    unique_in_read,
+                ))
+
+        if total_reads_scanned % 1_000_000 == 0:
+            logger.info(
+                "  Anchoring: %d reads scanned, %d informative (%s)",
+                total_reads_scanned,
+                len(read_hits) + unmapped_informative,
+                _format_elapsed(time.monotonic() - anchor_start),
+            )
+
+    bam.close()
+
+    total_informative = len(read_hits) + unmapped_informative
+    logger.info(
+        "Anchoring complete: %d informative reads (%d mapped, %d unmapped) "
+        "from %d scanned (%s)",
+        total_informative, len(read_hits), unmapped_informative,
+        total_reads_scanned,
+        _format_elapsed(time.monotonic() - anchor_start),
+    )
+
+    if not read_hits:
+        return [], {}, total_informative, {}, unmapped_informative
+
+    # Sort by chrom, start
+    read_hits.sort(key=lambda x: (x[0], x[1]))
+
+    # Cluster into regions
+    regions = []
+    region_reads = {}
+    region_kmers = {}
+    current_chrom = read_hits[0][0]
+    current_start = read_hits[0][1]
+    current_end = read_hits[0][2]
+    current_names = {read_hits[0][3]}
+    current_kmers = set(read_hits[0][4])
+
+    for chrom, start, end, name, unique_in_read in read_hits[1:]:
+        if chrom == current_chrom and start <= current_end + merge_distance:
+            current_end = max(current_end, end)
+            current_names.add(name)
+            current_kmers.update(unique_in_read)
+        else:
+            region_key = (current_chrom, current_start, current_end)
+            regions.append(region_key)
+            region_reads[region_key] = current_names
+            region_kmers[region_key] = current_kmers
+            current_chrom = chrom
+            current_start = start
+            current_end = end
+            current_names = {name}
+            current_kmers = set(unique_in_read)
+
+    # Don't forget the last region
+    region_key = (current_chrom, current_start, current_end)
+    regions.append(region_key)
+    region_reads[region_key] = current_names
+    region_kmers[region_key] = current_kmers
+
+    logger.info(
+        "Clustered %d mapped informative reads into %d regions",
+        len(read_hits), len(regions),
+    )
+
+    return regions, region_reads, total_informative, region_kmers, unmapped_informative
+
+
+def _write_bed(regions, region_reads, region_kmers, bed_path):
+    """Write clustered regions to a BED file with read/k-mer counts."""
+    with open(bed_path, "w") as fh:
+        for chrom, start, end in regions:
+            region_key = (chrom, start, end)
+            n_reads = len(region_reads.get(region_key, set()))
+            n_kmers = len(region_kmers.get(region_key, set()))
+            fh.write(f"{chrom}\t{start}\t{end}\t{n_reads}\t{n_kmers}\n")
+    logger.info("BED file written: %s (%d regions)", bed_path, len(regions))
+
+
+def _write_discovery_summary(summary_path, regions, region_reads,
+                             region_kmers, metrics):
+    """Write a human-readable summary for the discovery pipeline.
+
+    Analogous to ``_write_summary()`` in VCF mode, but reports
+    per-region statistics instead of per-variant annotations.
+
+    Args:
+        summary_path: Output file path for the summary text.
+        regions: List of (chrom, start, end) tuples (0-based, half-open).
+        region_reads: Dict mapping region tuple to set of read names.
+        region_kmers: Dict mapping region tuple to set of proband-unique
+            k-mer strings observed in that region's reads.
+        metrics: Dict with overall discovery pipeline statistics.
+    """
+    n_regions = metrics["candidate_regions"]
+    n_reads_total = metrics["informative_reads"]
+    n_unmapped = metrics.get("unmapped_informative_reads", 0)
+    n_unique_kmers = metrics["proband_unique_kmers"]
+    n_candidates = metrics["child_candidate_kmers"]
+    n_non_ref = metrics["non_ref_kmers"]
+
+    lines = []
+    lines.append("=" * 60)
+    lines.append("  kmer-denovo  —  Discovery Mode Summary")
+    lines.append("=" * 60)
+    lines.append("")
+    lines.append("K-mer Filtering")
+    lines.append("-" * 40)
+    lines.append(f"  Child candidate k-mers:      {n_candidates:>8}")
+    lines.append(f"  Non-reference k-mers:        {n_non_ref:>8}")
+    lines.append(f"  Proband-unique k-mers:       {n_unique_kmers:>8}")
+    lines.append("")
+    lines.append("Region Counts")
+    lines.append("-" * 40)
+    lines.append(f"  Candidate regions:           {n_regions:>8}")
+    lines.append(f"  Total informative reads:     {n_reads_total:>8}")
+    if n_unmapped > 0:
+        lines.append(f"    (unmapped informative):     {n_unmapped:>8}")
+    lines.append("")
+
+    if regions:
+        reads_per_region = [
+            len(region_reads.get(r, set())) for r in regions
+        ]
+        kmers_per_region = [
+            len(region_kmers.get(r, set())) for r in regions
+        ]
+        sizes = [end - start for _, start, end in regions]
+
+        lines.append("Region Statistics")
+        lines.append("-" * 40)
+        lines.append(
+            f"  Reads/region   mean: {sum(reads_per_region) / len(reads_per_region):>6.1f}"
+            f"   median: {statistics.median(reads_per_region):>4}"
+            f"   max: {max(reads_per_region):>4}"
+        )
+        lines.append(
+            f"  K-mers/region  mean: {sum(kmers_per_region) / len(kmers_per_region):>6.1f}"
+            f"   median: {statistics.median(kmers_per_region):>4}"
+            f"   max: {max(kmers_per_region):>4}"
+        )
+        lines.append(
+            f"  Region size    mean: {sum(sizes) / len(sizes):>6.0f} bp"
+            f"   median: {statistics.median(sizes):>4} bp"
+            f"   max: {max(sizes):>4} bp"
+        )
+        lines.append("")
+
+    if regions:
+        lines.append("Per-Region Results")
+        lines.append("-" * 80)
+        lines.append(
+            f"  {'Region':<35s} {'Size':>8s} {'Reads':>6s}"
+            f" {'Unique K-mers':>14s}"
+        )
+        lines.append(
+            f"  {'------':<35s} {'----':>8s} {'-----':>6s}"
+            f" {'-------------':>14s}"
+        )
+
+        for chrom, start, end in regions:
+            region_key = (chrom, start, end)
+            n_reads = len(region_reads.get(region_key, set()))
+            n_kmers = len(region_kmers.get(region_key, set()))
+            # Display as 1-based coordinates for human readability
+            label = f"{chrom}:{start + 1}-{end}"
+            size = end - start
+            lines.append(
+                f"  {label:<35s} {size:>7d}bp {n_reads:>6d}"
+                f" {n_kmers:>14d}"
+            )
+
+    lines.append("")
+    lines.append("=" * 60)
+    lines.append("")
+
+    text = "\n".join(lines)
+
+    with open(summary_path, "w") as fh:
+        fh.write(text)
+
+    return text
+
+
+def _write_informative_reads_discovery(
+    child_bam, ref_fasta, proband_unique_kmers, kmer_size,
+    output_bam,
+):
+    """Write child reads carrying proband-unique k-mers to a BAM file.
+
+    Includes **all** primary, non-duplicate reads — mapped and unmapped,
+    regardless of mapping quality — so that downstream re-alignment can
+    rescue initially unmapped reads.
+
+    Each output read is tagged with ``dk:i:1`` indicating it contains
+    a proband-unique k-mer. Reads are sorted and indexed for IGV.
+
+    Args:
+        child_bam: Path to the child BAM file.
+        ref_fasta: Path to the reference FASTA.
+        proband_unique_kmers: Set of canonical k-mer strings.
+        kmer_size: K-mer size.
+        output_bam: Path for the output BAM file.
+    """
+    bam_in = pysam.AlignmentFile(
+        child_bam, reference_filename=ref_fasta if ref_fasta else None,
+    )
+
+    unsorted_path = output_bam + ".unsorted.bam"
+    bam_out = pysam.AlignmentFile(unsorted_path, "wb", header=bam_in.header)
+
+    written = set()
+    for read in bam_in.fetch():
+        if read.is_secondary or read.is_supplementary:
+            continue
+        if read.is_duplicate:
+            continue
+
+        seq = read.query_sequence
+        if seq is None:
+            continue
+
+        has_unique = False
+        seq_len = len(seq)
+        if seq_len >= kmer_size:
+            for i in range(seq_len - kmer_size + 1):
+                kmer = canonicalize(seq[i:i + kmer_size])
+                if kmer in proband_unique_kmers:
+                    has_unique = True
+                    break
+
+        if has_unique and read.query_name not in written:
+            read.set_tag("dk", 1, value_type="i")
+            bam_out.write(read)
+            written.add(read.query_name)
+
+    bam_out.close()
+    bam_in.close()
+
+    pysam.sort("-o", output_bam, unsorted_path)
+    pysam.index(output_bam)
+    os.remove(unsorted_path)
+
+    logger.info(
+        "Informative reads BAM written: %s (%d reads)",
+        output_bam, len(written),
+    )
+
+
+def _write_empty_discovery_outputs(bed_path, metrics_path, summary_path,
+                                   metrics):
+    """Write empty discovery outputs for early-exit cases."""
+    _write_bed([], {}, {}, bed_path)
+    with open(metrics_path, "w") as fh:
+        json.dump(metrics, fh, indent=2)
+    _write_discovery_summary(summary_path, [], {}, {}, metrics)
+
+
+def run_discovery_pipeline(args):
+    """Run the VCF-free de novo k-mer discovery pipeline."""
+    pipeline_start = time.monotonic()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug_kmers else logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+
+    # ── Pre-flight checks ──────────────────────────────────────────
+    for tool in ("samtools", "jellyfish"):
+        if not _check_tool(tool):
+            logger.error("%s not found in PATH", tool)
+            sys.exit(1)
+
+    _validate_inputs(args)
+
+    out_prefix = args.out_prefix
+    bed_path = f"{out_prefix}.bed"
+    info_bam_path = f"{out_prefix}.informative.bam"
+    metrics_path = f"{out_prefix}.metrics.json"
+    summary_path = f"{out_prefix}.summary.txt"
+
+    # ── Configuration summary ──────────────────────────────────────
+    logger.info("=" * 60)
+    logger.info("  kmer-denovo  —  discovery pipeline starting")
+    logger.info("=" * 60)
+    logger.info(
+        "  Child BAM/CRAM:    %s (%s)", args.child,
+        _format_file_size(args.child),
+    )
+    logger.info(
+        "  Mother BAM/CRAM:   %s (%s)", args.mother,
+        _format_file_size(args.mother),
+    )
+    logger.info(
+        "  Father BAM/CRAM:   %s (%s)", args.father,
+        _format_file_size(args.father),
+    )
+    logger.info("  Reference FASTA:   %s", args.ref_fasta or "(not set)")
+    logger.info("  Reference JF:      %s", getattr(args, 'ref_jf', None) or "(auto)")
+    logger.info("  Output prefix:     %s", out_prefix)
+    logger.info("  k-mer size:        %d", args.kmer_size)
+    logger.info("  Min child count:   %d", args.min_child_count)
+    logger.info("  Min base quality:  %d", args.min_baseq)
+    logger.info("  Min mapping qual:  %d", args.min_mapq)
+    logger.info("  Threads:           %d", args.threads)
+    logger.info("=" * 60)
+
+    with tempfile.TemporaryDirectory(prefix="kmer_denovo_disc_") as tmpdir:
+
+        # ── Module 0: Reference K-mer Indexing ─────────────────────
+        step_start = time.monotonic()
+        logger.info("[Module 0] Ensuring reference Jellyfish index")
+        ref_jf = _ensure_ref_jf(
+            args.ref_fasta, args.kmer_size, args.threads,
+            getattr(args, 'ref_jf', None),
+        )
+        logger.info(
+            "[Module 0] Reference index ready (%s)",
+            _format_elapsed(time.monotonic() - step_start),
+        )
+
+        # ── Module 1: Child K-merization & Reference Subtraction ───
+        step_start = time.monotonic()
+        logger.info("[Module 1] Child k-mer extraction & reference subtraction")
+        child_candidates_fa, n_candidates = _extract_child_kmers_discovery(
+            args.child, args.ref_fasta, args.kmer_size,
+            args.min_child_count, args.threads, tmpdir,
+        )
+
+        if n_candidates == 0:
+            logger.warning("No child candidate k-mers found; writing empty outputs")
+            empty_metrics = {
+                "mode": "discovery",
+                "child_candidate_kmers": 0,
+                "non_ref_kmers": 0,
+                "proband_unique_kmers": 0,
+                "informative_reads": 0,
+                "unmapped_informative_reads": 0,
+                "candidate_regions": 0,
+            }
+            _write_empty_discovery_outputs(
+                bed_path, metrics_path, summary_path, empty_metrics,
+            )
+            logger.info(
+                "Pipeline finished in %s",
+                _format_elapsed(time.monotonic() - pipeline_start),
+            )
+            return
+
+        child_non_ref_fa, n_non_ref = _subtract_reference_kmers(
+            ref_jf, child_candidates_fa, tmpdir,
+        )
+        logger.info(
+            "[Module 1] Complete (%s)",
+            _format_elapsed(time.monotonic() - step_start),
+        )
+
+        if n_non_ref == 0:
+            logger.warning(
+                "All child k-mers are in the reference; writing empty outputs"
+            )
+            empty_metrics = {
+                "mode": "discovery",
+                "child_candidate_kmers": n_candidates,
+                "non_ref_kmers": 0,
+                "proband_unique_kmers": 0,
+                "informative_reads": 0,
+                "unmapped_informative_reads": 0,
+                "candidate_regions": 0,
+            }
+            _write_empty_discovery_outputs(
+                bed_path, metrics_path, summary_path, empty_metrics,
+            )
+            logger.info(
+                "Pipeline finished in %s",
+                _format_elapsed(time.monotonic() - pipeline_start),
+            )
+            return
+
+        # ── Module 2: Parent Filtering ─────────────────────────────
+        step_start = time.monotonic()
+        logger.info("[Module 2] Parent filtering")
+        proband_unique_kmers = _filter_parents_discovery(
+            args.mother, args.father, args.ref_fasta,
+            child_non_ref_fa, args.kmer_size, args.threads, tmpdir,
+        )
+        logger.info(
+            "[Module 2] Complete (%s)",
+            _format_elapsed(time.monotonic() - step_start),
+        )
+
+        if not proband_unique_kmers:
+            logger.warning(
+                "No proband-unique k-mers after parent filtering; "
+                "writing empty outputs"
+            )
+            empty_metrics = {
+                "mode": "discovery",
+                "child_candidate_kmers": n_candidates,
+                "non_ref_kmers": n_non_ref,
+                "proband_unique_kmers": 0,
+                "informative_reads": 0,
+                "unmapped_informative_reads": 0,
+                "candidate_regions": 0,
+            }
+            _write_empty_discovery_outputs(
+                bed_path, metrics_path, summary_path, empty_metrics,
+            )
+            logger.info(
+                "Pipeline finished in %s",
+                _format_elapsed(time.monotonic() - pipeline_start),
+            )
+            return
+
+    # ── Module 3: Anchoring & Region Clustering ────────────────────
+    step_start = time.monotonic()
+    logger.info(
+        "[Module 3] Anchoring %d proband-unique k-mers to child reads",
+        len(proband_unique_kmers),
+    )
+    regions, region_reads, total_informative, region_kmers, unmapped_informative = (
+        _anchor_and_cluster(
+            args.child, args.ref_fasta, proband_unique_kmers,
+            args.kmer_size,
+        )
+    )
+    logger.info(
+        "[Module 3] Complete (%s)",
+        _format_elapsed(time.monotonic() - step_start),
+    )
+
+    # ── Module 4: Output ───────────────────────────────────────────
+    step_start = time.monotonic()
+    logger.info("[Module 4] Writing output files")
+
+    _write_bed(regions, region_reads, region_kmers, bed_path)
+
+    logger.info("[Module 4] Writing informative reads BAM: %s", info_bam_path)
+    _write_informative_reads_discovery(
+        args.child, args.ref_fasta, proband_unique_kmers,
+        args.kmer_size, info_bam_path,
+    )
+
+    metrics = {
+        "mode": "discovery",
+        "child_candidate_kmers": n_candidates,
+        "non_ref_kmers": n_non_ref,
+        "proband_unique_kmers": len(proband_unique_kmers),
+        "informative_reads": total_informative,
+        "unmapped_informative_reads": unmapped_informative,
+        "candidate_regions": len(regions),
+        "regions": [
+            {
+                "chrom": chrom,
+                "start": start,
+                "end": end,
+                "size": end - start,
+                "reads": len(region_reads.get((chrom, start, end), set())),
+                "unique_kmers": len(
+                    region_kmers.get((chrom, start, end), set())
+                ),
+            }
+            for chrom, start, end in regions
+        ],
+    }
+    with open(metrics_path, "w") as fh:
+        json.dump(metrics, fh, indent=2)
+    logger.info("[Module 4] Metrics written to: %s", metrics_path)
+
+    logger.info("[Module 4] Writing summary: %s", summary_path)
+    summary_text = _write_discovery_summary(
+        summary_path, regions, region_reads, region_kmers, metrics,
+    )
+    logger.info("\n%s", summary_text)
+
+    logger.info(
+        "[Module 4] Output complete (%s)",
+        _format_elapsed(time.monotonic() - step_start),
+    )
+
+    # ── User guidance ──────────────────────────────────────────────
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("  Discovery pipeline complete!")
+    logger.info("=" * 60)
+    logger.info("  Candidate regions: %s", bed_path)
+    logger.info("  Informative BAM:   %s", info_bam_path)
+    logger.info("  Metrics:           %s", metrics_path)
+    logger.info("  Summary:           %s", summary_path)
+    logger.info("")
+    logger.info(
+        "  Next step: pass %s to a genotyper such as", bed_path,
+    )
+    logger.info(
+        "  GATK HaplotypeCaller (--intervals) or DeepVariant for"
+    )
+    logger.info("  robust VCF generation.")
+    logger.info("=" * 60)
+
+    logger.info(
+        "Pipeline finished successfully in %s",
+        _format_elapsed(time.monotonic() - pipeline_start),
+    )
 
 
 def run_pipeline(args):

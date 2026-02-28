@@ -34,6 +34,9 @@ class TestParseArgs:
         assert args.informative_reads is None
         assert args.summary is None
         assert args.ref_fasta is None
+        assert args.ref_jf is None
+        assert args.min_child_count == 3
+        assert args.out_prefix is None
 
     def test_custom_kmer_size(self):
         args = parse_args(self.REQUIRED_ARGS + ["--kmer-size", "25"])
@@ -105,3 +108,41 @@ class TestParseArgs:
     def test_missing_required(self):
         with pytest.raises(SystemExit):
             parse_args(["--child", "child.bam"])
+
+    def test_vcf_optional(self):
+        """--vcf is no longer required at the parser level."""
+        args = parse_args([
+            "--child", "child.bam",
+            "--mother", "mother.bam",
+            "--father", "father.bam",
+        ])
+        assert args.vcf is None
+        assert args.output is None
+
+    def test_discovery_mode_args(self):
+        """Discovery mode arguments are parsed correctly."""
+        args = parse_args([
+            "--child", "child.bam",
+            "--mother", "mother.bam",
+            "--father", "father.bam",
+            "--ref-fasta", "ref.fa",
+            "--out-prefix", "trio1",
+            "--min-child-count", "5",
+            "--ref-jf", "ref.k31.jf",
+        ])
+        assert args.vcf is None
+        assert args.out_prefix == "trio1"
+        assert args.min_child_count == 5
+        assert args.ref_jf == "ref.k31.jf"
+
+    def test_ref_jf_default(self):
+        args = parse_args(self.REQUIRED_ARGS)
+        assert args.ref_jf is None
+
+    def test_min_child_count_default(self):
+        args = parse_args(self.REQUIRED_ARGS)
+        assert args.min_child_count == 3
+
+    def test_out_prefix(self):
+        args = parse_args(self.REQUIRED_ARGS + ["--out-prefix", "myprefix"])
+        assert args.out_prefix == "myprefix"

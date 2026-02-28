@@ -31,8 +31,13 @@ mutation filtering workflows.
 - `HG003_father.bam` / `.bai` – Father reads around variant sites
 - `HG004_mother.bam` / `.bai` – Mother reads around variant sites
 - `candidates.vcf.gz` / `.tbi` – VCF with child-private SNVs
+- `mini_ref.fa` / `.fai` – Mini reference FASTA built from BAM reads with
+  no mismatches (NM:i:0, CIGAR all-M), for discovery-mode testing
+- `mini_ref.fa.k31.jf` – Precomputed Jellyfish k-mer index of mini reference
 
 ## Usage with kmer-denovo
+
+### VCF mode (candidate VCF required)
 
 ```bash
 kmer-denovo \
@@ -41,4 +46,33 @@ kmer-denovo \
     --mother  tests/data/giab/HG004_mother.bam  \
     --vcf     tests/data/giab/candidates.vcf.gz  \
     --output  output.vcf
+```
+
+### Discovery mode (no VCF needed)
+
+```bash
+kmer-denovo \
+    --child   tests/data/giab/HG002_child.bam   \
+    --father  tests/data/giab/HG003_father.bam  \
+    --mother  tests/data/giab/HG004_mother.bam  \
+    --ref-fasta tests/data/giab/mini_ref.fa      \
+    --ref-jf  tests/data/giab/mini_ref.fa.k31.jf \
+    --out-prefix discovery_output \
+    --min-child-count 3 --kmer-size 31
+```
+
+## Building the mini reference
+
+The mini reference can be regenerated from the BAMs:
+
+```bash
+python scripts/build_mini_ref.py \
+    -b tests/data/giab/HG002_child.bam \
+    -b tests/data/giab/HG003_father.bam \
+    -b tests/data/giab/HG004_mother.bam \
+    -o tests/data/giab/mini_ref.fa
+
+jellyfish count -m 31 -s 10M -t 4 -C \
+    tests/data/giab/mini_ref.fa \
+    -o tests/data/giab/mini_ref.fa.k31.jf
 ```
