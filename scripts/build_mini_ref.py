@@ -28,7 +28,7 @@ import pysam
 
 
 def _reads_with_no_mismatches(bam_path):
-    """Yield (chrom, pos, seq, cigar_tuples) for reads with NM==0.
+    """Yield (chrom, pos, seq) for reads with NM==0.
 
     Only primary, non-duplicate, mapped reads with the NM:i:0 tag
     and a CIGAR consisting entirely of M (BAM_CMATCH) operations are
