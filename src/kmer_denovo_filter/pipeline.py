@@ -1,6 +1,7 @@
 """Main pipeline for de novo variant k-mer analysis."""
 
 import collections
+import concurrent.futures
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ import pysam
 
 from kmer_denovo_filter.kmer_utils import (
     _is_symbolic,
+    build_kmer_automaton,
     canonicalize,
     extract_variant_spanning_kmers,
     read_supports_alt,
@@ -946,8 +948,79 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
     return proband_unique
 
 
+# ── Multiprocessing helpers for _anchor_and_cluster ────────────────────
+
+_worker_automaton = None
+
+
+def _init_scan_worker(proband_unique_kmers):
+    """Initializer for per-contig scan workers; builds a shared automaton."""
+    global _worker_automaton
+    _worker_automaton = build_kmer_automaton(proband_unique_kmers)
+
+
+def _scan_contig_for_hits(child_bam, ref_fasta, contig):
+    """Scan reads mapped to *contig* for proband-unique k-mers.
+
+    When *contig* is ``None``, unmapped reads are scanned instead.
+
+    Returns:
+        (read_hits, reads_seen, unmapped_informative, total_reads_scanned)
+    """
+    automaton = _worker_automaton
+    bam = pysam.AlignmentFile(
+        child_bam, reference_filename=ref_fasta if ref_fasta else None,
+    )
+
+    read_hits = []
+    reads_seen = set()
+    unmapped_informative = 0
+    total_reads_scanned = 0
+
+    if contig is None:
+        try:
+            iterator = bam.fetch("*")
+        except (ValueError, KeyError):
+            bam.close()
+            return read_hits, reads_seen, unmapped_informative, total_reads_scanned
+    else:
+        iterator = bam.fetch(contig=contig)
+
+    for read in iterator:
+        if read.is_secondary or read.is_supplementary:
+            continue
+        if read.is_duplicate:
+            continue
+
+        total_reads_scanned += 1
+        seq = read.query_sequence
+        if seq is None:
+            continue
+
+        unique_in_read = set()
+        if automaton is not None:
+            for _end_idx, canonical_kmer in automaton.iter(seq):
+                unique_in_read.add(canonical_kmer)
+
+        if unique_in_read and read.query_name not in reads_seen:
+            reads_seen.add(read.query_name)
+            if read.is_unmapped:
+                unmapped_informative += 1
+            else:
+                read_hits.append((
+                    read.reference_name,
+                    read.reference_start,
+                    read.reference_end,
+                    read.query_name,
+                    unique_in_read,
+                ))
+
+    bam.close()
+    return read_hits, reads_seen, unmapped_informative, total_reads_scanned
+
+
 def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
-                        kmer_size, merge_distance=500):
+                        kmer_size, merge_distance=500, threads=1):
     """Module 3: Find reads containing proband-unique k-mers and cluster regions.
 
     Scans **all** primary, non-duplicate child reads — including unmapped and
@@ -957,9 +1030,11 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     proband-unique k-mers are clustered into genomic windows; unmapped
     informative reads are tracked separately.
 
-    Each read k-mer is canonicalized (matching the ``-C`` convention used by
-    all Jellyfish steps) and checked against *proband_unique_kmers* via O(1)
-    ``set`` lookup.  Progress is logged every 1 M reads.
+    An Aho-Corasick automaton is built from the proband-unique k-mers
+    (both forward and reverse-complement forms) so that each read is
+    scanned in C without per-position string slicing or
+    canonicalization.  When *threads* > 1 the BAM is scanned in
+    parallel by chromosome using a :class:`ProcessPoolExecutor`.
 
     Args:
         child_bam: Path to child BAM file.
@@ -967,6 +1042,8 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         proband_unique_kmers: Set of canonical k-mer strings.
         kmer_size: K-mer size.
         merge_distance: Maximum gap for merging adjacent regions.
+        threads: Number of parallel workers for chromosome-level
+            scanning (default 1 = single-threaded).
 
     Returns:
         regions: List of (chrom, start, end) tuples (0-based, half-open BED).
@@ -978,64 +1055,114 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         unmapped_informative: Number of unmapped reads carrying
             proband-unique k-mers.
     """
-    bam = pysam.AlignmentFile(
-        child_bam, reference_filename=ref_fasta if ref_fasta else None,
-    )
-
-    # (chrom, start, end, read_name, unique_kmers_in_read)
-    read_hits = []
-    reads_seen = set()
-    unmapped_informative = 0
-
     anchor_start = time.monotonic()
-    total_reads_scanned = 0
 
-    for read in bam.fetch():
-        # Skip secondary, supplementary, and duplicate reads
-        if read.is_secondary or read.is_supplementary:
-            continue
-        if read.is_duplicate:
-            continue
+    if threads > 1:
+        # ── Parallel scanning by chromosome ────────────────────────
+        bam = pysam.AlignmentFile(
+            child_bam,
+            reference_filename=ref_fasta if ref_fasta else None,
+        )
+        contigs = list(bam.references)
+        bam.close()
 
-        total_reads_scanned += 1
-        seq = read.query_sequence
-        if seq is None:
-            continue
+        # One task per contig + one for unmapped reads
+        tasks = [(child_bam, ref_fasta, c) for c in contigs]
+        tasks.append((child_bam, ref_fasta, None))
 
-        # Canonicalize each k-mer (same convention as jellyfish -C) and
-        # check membership in the proband-unique set via O(1) hash lookup.
-        unique_in_read = set()
-        seq_len = len(seq)
-        if seq_len >= kmer_size:
-            for i in range(seq_len - kmer_size + 1):
-                kmer = canonicalize(seq[i:i + kmer_size])
-                if kmer in proband_unique_kmers:
-                    unique_in_read.add(kmer)
+        n_workers = min(threads, len(tasks))
 
-        if unique_in_read and read.query_name not in reads_seen:
-            reads_seen.add(read.query_name)
-            if read.is_unmapped:
-                # Unmapped reads lack reference coordinates; count them
-                # separately since they cannot be placed into regions.
-                unmapped_informative += 1
-            else:
-                read_hits.append((
-                    read.reference_name,
-                    read.reference_start,
-                    read.reference_end,
-                    read.query_name,
-                    unique_in_read,
-                ))
+        read_hits = []
+        reads_seen = set()
+        unmapped_informative = 0
+        total_reads_scanned = 0
 
-        if total_reads_scanned % 1_000_000 == 0:
-            logger.info(
-                "  Anchoring: %d reads scanned, %d informative (%s)",
-                total_reads_scanned,
-                len(read_hits) + unmapped_informative,
-                _format_elapsed(time.monotonic() - anchor_start),
-            )
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=n_workers,
+            initializer=_init_scan_worker,
+            initargs=(proband_unique_kmers,),
+        ) as executor:
+            futures = {
+                executor.submit(_scan_contig_for_hits, *t): t[2]
+                for t in tasks
+            }
+            for future in concurrent.futures.as_completed(futures):
+                contig = futures[future]
+                try:
+                    hits, seen, unmapped, scanned = future.result()
+                except Exception:
+                    logger.error(
+                        "Worker failed for contig=%s", contig,
+                    )
+                    raise
+                total_reads_scanned += scanned
+                unmapped_informative += unmapped
+                for hit in hits:
+                    name = hit[3]
+                    if name not in reads_seen:
+                        reads_seen.add(name)
+                        read_hits.append(hit)
+                # Track all seen names for cross-contig dedup
+                reads_seen.update(seen)
 
-    bam.close()
+        logger.info(
+            "  Anchoring: %d reads scanned, %d informative (%s) [%d workers]",
+            total_reads_scanned,
+            len(read_hits) + unmapped_informative,
+            _format_elapsed(time.monotonic() - anchor_start),
+            n_workers,
+        )
+    else:
+        # ── Single-threaded scanning with Aho-Corasick ─────────────
+        automaton = build_kmer_automaton(proband_unique_kmers)
+        bam = pysam.AlignmentFile(
+            child_bam,
+            reference_filename=ref_fasta if ref_fasta else None,
+        )
+
+        read_hits = []
+        reads_seen = set()
+        unmapped_informative = 0
+        total_reads_scanned = 0
+
+        for read in bam.fetch():
+            if read.is_secondary or read.is_supplementary:
+                continue
+            if read.is_duplicate:
+                continue
+
+            total_reads_scanned += 1
+            seq = read.query_sequence
+            if seq is None:
+                continue
+
+            unique_in_read = set()
+            if automaton is not None:
+                for _end_idx, canonical_kmer in automaton.iter(seq):
+                    unique_in_read.add(canonical_kmer)
+
+            if unique_in_read and read.query_name not in reads_seen:
+                reads_seen.add(read.query_name)
+                if read.is_unmapped:
+                    unmapped_informative += 1
+                else:
+                    read_hits.append((
+                        read.reference_name,
+                        read.reference_start,
+                        read.reference_end,
+                        read.query_name,
+                        unique_in_read,
+                    ))
+
+            if total_reads_scanned % 1_000_000 == 0:
+                logger.info(
+                    "  Anchoring: %d reads scanned, %d informative (%s)",
+                    total_reads_scanned,
+                    len(read_hits) + unmapped_informative,
+                    _format_elapsed(time.monotonic() - anchor_start),
+                )
+
+        bam.close()
 
     total_informative = len(read_hits) + unmapped_informative
     logger.info(
@@ -1339,6 +1466,9 @@ def _write_informative_reads_discovery(
     Each output read is tagged with ``dk:i:1`` indicating it contains
     a proband-unique k-mer. Reads are sorted and indexed for IGV.
 
+    An Aho-Corasick automaton is used so that the search runs in C
+    without per-position string slicing or canonicalization.
+
     Args:
         child_bam: Path to the child BAM file.
         ref_fasta: Path to the reference FASTA.
@@ -1346,6 +1476,7 @@ def _write_informative_reads_discovery(
         kmer_size: K-mer size.
         output_bam: Path for the output BAM file.
     """
+    automaton = build_kmer_automaton(proband_unique_kmers)
     bam_in = pysam.AlignmentFile(
         child_bam, reference_filename=ref_fasta if ref_fasta else None,
     )
@@ -1365,13 +1496,10 @@ def _write_informative_reads_discovery(
             continue
 
         has_unique = False
-        seq_len = len(seq)
-        if seq_len >= kmer_size:
-            for i in range(seq_len - kmer_size + 1):
-                kmer = canonicalize(seq[i:i + kmer_size])
-                if kmer in proband_unique_kmers:
-                    has_unique = True
-                    break
+        if automaton is not None:
+            for _end_idx, _canonical_kmer in automaton.iter(seq):
+                has_unique = True
+                break
 
         if has_unique and read.query_name not in written:
             read.set_tag("dk", 1, value_type="i")
@@ -1565,7 +1693,7 @@ def run_discovery_pipeline(args):
     regions, region_reads, total_informative, region_kmers, unmapped_informative = (
         _anchor_and_cluster(
             args.child, args.ref_fasta, proband_unique_kmers,
-            args.kmer_size,
+            args.kmer_size, threads=args.threads,
         )
     )
     logger.info(

@@ -2,6 +2,7 @@
 
 from kmer_denovo_filter.kmer_utils import (
     _is_symbolic,
+    build_kmer_automaton,
     canonicalize,
     extract_variant_spanning_kmers,
     read_supports_alt,
@@ -438,3 +439,60 @@ class TestReadSupportsAlt:
         read = self.MockRead(seq, pairs)
         # REF=T, ALT=TCATA — but read has no insertion
         assert read_supports_alt(read, 103, "T", "TCATA") is False
+
+
+class TestBuildKmerAutomaton:
+    """Tests for the Aho-Corasick automaton builder."""
+
+    def test_empty_set(self):
+        """An empty k-mer set should produce None (no automaton)."""
+        A = build_kmer_automaton(set())
+        assert A is None
+
+    def test_single_canonical_kmer(self):
+        """A single canonical k-mer should be found in a matching sequence."""
+        kmer = canonicalize("ACGTAC")
+        A = build_kmer_automaton({kmer})
+        hits = {v for _, v in A.iter("ACGTAC")}
+        assert kmer in hits
+
+    def test_finds_reverse_complement(self):
+        """The automaton should match the reverse-complement of a canonical k-mer."""
+        kmer = canonicalize("AACGT")   # canonical = "AACGT"
+        rc = reverse_complement("AACGT")    # "ACGTT"
+        A = build_kmer_automaton({kmer})
+        # Searching for the reverse complement should return the canonical form
+        hits = {v for _, v in A.iter(rc)}
+        assert kmer in hits
+
+    def test_palindrome_kmer(self):
+        """A palindromic k-mer is its own reverse complement."""
+        kmer = "ACGT"  # palindrome
+        assert reverse_complement(kmer) == kmer
+        A = build_kmer_automaton({kmer})
+        hits = {v for _, v in A.iter("ACGT")}
+        assert kmer in hits
+
+    def test_multiple_kmers_in_sequence(self):
+        """Multiple k-mers found in a single sequence."""
+        kmers = {canonicalize("AAACCC"), canonicalize("CCCGGG")}
+        A = build_kmer_automaton(kmers)
+        seq = "AAACCCGGG"
+        hits = {v for _, v in A.iter(seq)}
+        assert hits == kmers
+
+    def test_no_match(self):
+        """No matches when k-mers are absent from the sequence."""
+        A = build_kmer_automaton({canonicalize("TTTTT")})
+        hits = list(A.iter("AACCC"))
+        assert hits == []
+
+    def test_returns_canonical_value(self):
+        """The value stored for every match must be the canonical k-mer."""
+        kmer = canonicalize("GGGTA")  # canonical = "GGGTA" or its rc
+        A = build_kmer_automaton({kmer})
+        rc = reverse_complement(kmer)
+        # Search with whichever orientation matches
+        for seq in (kmer, rc):
+            for _, val in A.iter(seq):
+                assert val == kmer

@@ -1,5 +1,7 @@
 """K-mer utility functions."""
 
+import ahocorasick
+
 _COMP = str.maketrans("ACGTacgt", "TGCAtgca")
 
 
@@ -24,6 +26,33 @@ def canonicalize(kmer):
     """Return the canonical (lexicographically smaller) form of a k-mer."""
     rc = kmer.translate(_COMP)[::-1]
     return kmer if kmer < rc else rc
+
+
+def build_kmer_automaton(canonical_kmers):
+    """Build an Aho-Corasick automaton from canonical k-mers.
+
+    Adds both the forward and reverse-complement of each canonical
+    k-mer so that reads can be scanned without per-position
+    canonicalization.  The stored value for every pattern is the
+    original canonical k-mer.
+
+    Args:
+        canonical_kmers: Iterable of canonical k-mer strings.
+
+    Returns:
+        An :class:`ahocorasick.Automaton` ready for ``iter()``,
+        or ``None`` if *canonical_kmers* is empty.
+    """
+    A = ahocorasick.Automaton()
+    for kmer in canonical_kmers:
+        A.add_word(kmer, kmer)
+        rc = reverse_complement(kmer)
+        if rc != kmer:
+            A.add_word(rc, kmer)
+    if len(A) == 0:
+        return None
+    A.make_automaton()
+    return A
 
 
 def read_supports_alt(read, variant_pos, ref, alt, *, aligned_pairs=None, seq=None):
