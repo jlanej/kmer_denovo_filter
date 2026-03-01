@@ -1333,6 +1333,147 @@ class TestDiscoveryPipeline:
             bed_lines = [l.strip() for l in fh if l.strip()]
         assert len(bed_lines) >= 1
 
+    def test_discovery_parent_max_count(self, tmpdir):
+        """--parent-max-count allows low-count parental k-mers through."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        # Child mutation at position 50
+        child_seq = list(ref_seq[30:90])
+        child_seq[20] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [
+                ("read1", 30, child_seq, None),
+                ("read2", 30, child_seq, None),
+                ("read3", 30, child_seq, None),
+                ("read4", 30, child_seq, None),
+            ],
+        )
+
+        # Mother has one read with the mutation (count=1 in parent)
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(
+            mother_bam, ref_fa, chrom,
+            [("mread1", 30, child_seq, None)],
+        )
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(
+            father_bam, ref_fa, chrom,
+            [("fread1", 30, ref_seq[30:90], None)],
+        )
+
+        # Default parent-max-count=0: mutation k-mers found in mother (count=1)
+        # should be removed → no regions
+        out_strict = os.path.join(tmpdir, "disc_strict")
+        args_strict = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--out-prefix", out_strict, "--min-child-count", "3",
+            "--kmer-size", "5", "--parent-max-count", "0",
+        ])
+        run_discovery_pipeline(args_strict)
+        with open(f"{out_strict}.bed") as fh:
+            strict_lines = [l.strip() for l in fh if l.strip()]
+        assert len(strict_lines) == 0, (
+            "With parent-max-count=0, k-mers present in mother should be removed"
+        )
+
+        # Relaxed parent-max-count=1: k-mers with count=1 in mother are
+        # tolerated → regions should appear
+        out_relaxed = os.path.join(tmpdir, "disc_relaxed")
+        args_relaxed = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--out-prefix", out_relaxed, "--min-child-count", "3",
+            "--kmer-size", "5", "--parent-max-count", "1",
+        ])
+        run_discovery_pipeline(args_relaxed)
+        with open(f"{out_relaxed}.bed") as fh:
+            relaxed_lines = [l.strip() for l in fh if l.strip()]
+        assert len(relaxed_lines) >= 1, (
+            "With parent-max-count=1, k-mers with count=1 in mother "
+            "should be tolerated"
+        )
+
+    def test_discovery_multiple_regions(self, tmpdir):
+        """Two distant mutations should produce two separate BED regions."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        # Mutation 1 at position 50 (read covering 30-90)
+        child_seq1 = list(ref_seq[30:90])
+        child_seq1[20] = "G" if ref_seq[50] != "G" else "T"
+        child_seq1 = "".join(child_seq1)
+
+        # Mutation 2 at position 150 (read covering 130-190)
+        child_seq2 = list(ref_seq[130:190])
+        child_seq2[20] = "G" if ref_seq[150] != "G" else "T"
+        child_seq2 = "".join(child_seq2)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [
+                ("read1a", 30, child_seq1, None),
+                ("read2a", 30, child_seq1, None),
+                ("read3a", 30, child_seq1, None),
+                ("read4a", 30, child_seq1, None),
+                ("read1b", 130, child_seq2, None),
+                ("read2b", 130, child_seq2, None),
+                ("read3b", 130, child_seq2, None),
+                ("read4b", 130, child_seq2, None),
+            ],
+        )
+
+        parent_seq1 = ref_seq[30:90]
+        parent_seq2 = ref_seq[130:190]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(
+            mother_bam, ref_fa, chrom,
+            [
+                ("mread1", 30, parent_seq1, None),
+                ("mread2", 130, parent_seq2, None),
+            ],
+        )
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(
+            father_bam, ref_fa, chrom,
+            [
+                ("fread1", 30, parent_seq1, None),
+                ("fread2", 130, parent_seq2, None),
+            ],
+        )
+
+        # Use cluster-distance=0 so the two mutations stay separate
+        out = os.path.join(tmpdir, "disc_multi")
+        args = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--out-prefix", out, "--min-child-count", "3",
+            "--kmer-size", "5", "--cluster-distance", "0",
+        ])
+        run_discovery_pipeline(args)
+
+        bed_path = f"{out}.bed"
+        with open(bed_path) as fh:
+            bed_lines = [l.strip() for l in fh if l.strip()]
+        assert len(bed_lines) == 2, (
+            f"Expected 2 regions for 2 distant mutations, got {len(bed_lines)}"
+        )
+
+        # Verify metrics match
+        metrics_path = f"{out}.metrics.json"
+        with open(metrics_path) as fh:
+            metrics = json.load(fh)
+        assert metrics["candidate_regions"] == 2
+        assert len(metrics["regions"]) == 2
+
 
 class TestDiscoveryValidation:
     """Tests for input validation in discovery mode."""
