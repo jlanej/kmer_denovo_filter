@@ -1348,13 +1348,17 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta):
     # ── Annotation from metadata ──
     for dedup_key, meta in read_sv_meta.items():
         qname = dedup_key[0]
+        is_supplementary = dedup_key[1]
         if qname not in read_to_regions:
             continue
 
         for region_key in read_to_regions[qname]:
             ann = annotations[region_key]
 
-            if meta["has_sa"]:
+            # Only count split reads from primary alignments to avoid
+            # double-counting when both primary and supplementary are
+            # informative in the same region.
+            if meta["has_sa"] and not is_supplementary:
                 ann["split_reads"] += 1
 
             if meta["is_paired"]:
@@ -1458,7 +1462,7 @@ def _write_bedpe(links, bedpe_path):
     """Write linked SV breakpoint pairs to a BEDPE file.
 
     Args:
-        links: List of link dicts from ``_link_sv_regions()``.
+        links: List of link dicts from ``_annotate_and_link_from_metadata()``.
         bedpe_path: Output BEDPE file path.
     """
     with open(bedpe_path, "w") as fh:
