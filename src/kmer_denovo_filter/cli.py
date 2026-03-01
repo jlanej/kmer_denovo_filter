@@ -78,6 +78,12 @@ def parse_args(argv=None):
              "fields.",
     )
     parser.add_argument(
+        "--candidate-summary", default=None,
+        help="Path to a VCF-mode summary.txt for candidate comparison "
+             "in discovery mode. High-quality de novos (DKA_DKT > 0.25, "
+             "DKA > 10) are checked against discovered regions.",
+    )
+    parser.add_argument(
         "--threads", "-t", type=int, default=4,
         help="Number of threads for jellyfish (default: 4)",
     )

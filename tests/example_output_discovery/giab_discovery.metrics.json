@@ -143,5 +143,26 @@
       "reads": 5,
       "unique_kmers": 23
     }
-  ]
+  ],
+  "candidate_comparison": {
+    "hq_candidates": 2,
+    "captured": 2,
+    "capture_rate": 1.0,
+    "candidates": [
+      {
+        "variant": "chr11:55003995 T>C",
+        "dka": 24,
+        "dka_dkt": 0.4528,
+        "captured": true,
+        "region": "chr11:55003557-55004560"
+      },
+      {
+        "variant": "chr11:55008577 C>T",
+        "dka": 13,
+        "dka_dkt": 0.3824,
+        "captured": true,
+        "region": "chr11:55008330-55009053"
+      }
+    ]
+  }
 }
