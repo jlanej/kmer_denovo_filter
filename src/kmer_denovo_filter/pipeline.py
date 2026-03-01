@@ -1103,8 +1103,95 @@ def _write_bed(regions, region_reads, region_kmers, bed_path):
     logger.info("BED file written: %s (%d regions)", bed_path, len(regions))
 
 
+def _parse_candidate_summary(summary_path, dka_dkt_min=0.25, dka_min=10):
+    """Parse a VCF-mode summary.txt and return high-quality de novo candidates.
+
+    Filters the Per-Variant Results table for candidates meeting both
+    ``DKA_DKT > dka_dkt_min`` and ``DKA > dka_min``.
+
+    Args:
+        summary_path: Path to a VCF-mode summary.txt file.
+        dka_dkt_min: Minimum DKA_DKT proportion (exclusive).
+        dka_min: Minimum DKA count (exclusive).
+
+    Returns:
+        List of dicts with keys: chrom, pos (1-based), ref, alt, dka,
+        dka_dkt, call.
+    """
+    candidates = []
+    in_table = False
+    with open(summary_path) as fh:
+        for line in fh:
+            line = line.rstrip()
+            if line.strip().startswith("Variant") and "DKU" in line:
+                in_table = True
+                continue
+            if in_table and line.strip().startswith("-------"):
+                continue
+            if in_table and line.strip() == "":
+                break
+            if in_table and line.strip().startswith("="):
+                break
+            if in_table:
+                parts = line.split()
+                if len(parts) < 12:
+                    continue
+                # e.g. "chr11:55003995" "T>C" "24" "53" "24" "0.4528" ...
+                variant = parts[0]  # chr:pos
+                ref_alt = parts[1]  # R>A
+                dku = int(parts[2])
+                dkt = int(parts[3])
+                dka = int(parts[4])
+                dka_dkt = float(parts[5])
+                call = parts[-1]
+                chrom, pos_str = variant.rsplit(":", 1)
+                pos = int(pos_str)
+                ref, alt = ref_alt.split(">")
+
+                if dka_dkt > dka_dkt_min and dka > dka_min:
+                    candidates.append({
+                        "chrom": chrom,
+                        "pos": pos,
+                        "ref": ref,
+                        "alt": alt,
+                        "dka": dka,
+                        "dka_dkt": dka_dkt,
+                        "call": call,
+                    })
+    return candidates
+
+
+def _compare_candidates_to_regions(candidates, regions):
+    """Compare high-quality VCF candidates to discovery regions.
+
+    For each candidate, checks whether its 1-based position falls within
+    any discovery region (0-based half-open BED coordinates).
+
+    Args:
+        candidates: List of dicts from ``_parse_candidate_summary()``.
+        regions: List of (chrom, start, end) tuples (0-based, half-open).
+
+    Returns:
+        List of dicts with original candidate fields plus:
+        - captured (bool): Whether the candidate falls in a region.
+        - region (str or None): The matching region label, if captured.
+    """
+    results = []
+    for cand in candidates:
+        captured = False
+        match_region = None
+        for chrom, start, end in regions:
+            if cand["chrom"] == chrom and start < cand["pos"] <= end:
+                captured = True
+                match_region = f"{chrom}:{start + 1}-{end}"
+                break
+        results.append({**cand, "captured": captured, "region": match_region})
+    return results
+
+
 def _write_discovery_summary(summary_path, regions, region_reads,
-                             region_kmers, metrics):
+                             region_kmers, metrics,
+                             candidate_comparison=None):
     """Write a human-readable summary for the discovery pipeline.
 
     Analogous to ``_write_summary()`` in VCF mode, but reports
@@ -1117,6 +1204,8 @@ def _write_discovery_summary(summary_path, regions, region_reads,
         region_kmers: Dict mapping region tuple to set of proband-unique
             k-mer strings observed in that region's reads.
         metrics: Dict with overall discovery pipeline statistics.
+        candidate_comparison: Optional list of comparison dicts from
+            ``_compare_candidates_to_regions()``.
     """
     n_regions = metrics["candidate_regions"]
     n_reads_total = metrics["informative_reads"]
@@ -1196,7 +1285,36 @@ def _write_discovery_summary(summary_path, regions, region_reads,
                 f" {n_kmers:>14d}"
             )
 
-    lines.append("")
+    if candidate_comparison:
+        n_total = len(candidate_comparison)
+        n_captured = sum(1 for c in candidate_comparison if c["captured"])
+        pct = (n_captured / n_total * 100) if n_total else 0.0
+
+        lines.append("Candidate Comparison (DKA_DKT > 0.25, DKA > 10)")
+        lines.append("-" * 80)
+        lines.append(f"  High-quality candidates:     {n_total:>8}")
+        lines.append(
+            f"  Captured by discovery:       {n_captured:>8}"
+            f" / {n_total} ({pct:.1f}%)"
+        )
+        lines.append("")
+        lines.append(
+            f"  {'Candidate':<30s}  {'DKA':>4s}  {'DKA_DKT':>8s}"
+            f"  {'Region':>35s}"
+        )
+        lines.append(
+            f"  {'---------':<30s}  {'---':>4s}  {'-------':>8s}"
+            f"  {'------':>35s}"
+        )
+        for c in candidate_comparison:
+            var_label = f"{c['chrom']}:{c['pos']} {c['ref']}>{c['alt']}"
+            region_label = c["region"] if c["captured"] else "NOT CAPTURED"
+            lines.append(
+                f"  {var_label:<30s}  {c['dka']:>4d}  {c['dka_dkt']:>8.4f}"
+                f"  {region_label:>35s}"
+            )
+        lines.append("")
+
     lines.append("=" * 60)
     lines.append("")
 
@@ -1467,6 +1585,22 @@ def run_discovery_pipeline(args):
         args.kmer_size, info_bam_path,
     )
 
+    # ── Optional candidate comparison ──────────────────────────────
+    candidate_comparison = None
+    candidate_summary = getattr(args, "candidate_summary", None)
+    if candidate_summary and os.path.isfile(candidate_summary):
+        logger.info("[Module 4] Comparing to candidate summary: %s",
+                     candidate_summary)
+        hq_candidates = _parse_candidate_summary(candidate_summary)
+        candidate_comparison = _compare_candidates_to_regions(
+            hq_candidates, regions,
+        )
+        n_captured = sum(1 for c in candidate_comparison if c["captured"])
+        logger.info(
+            "[Module 4] High-quality candidates: %d, captured: %d",
+            len(candidate_comparison), n_captured,
+        )
+
     metrics = {
         "mode": "discovery",
         "child_candidate_kmers": n_candidates,
@@ -1489,6 +1623,25 @@ def run_discovery_pipeline(args):
             for chrom, start, end in regions
         ],
     }
+    if candidate_comparison is not None:
+        n_total = len(candidate_comparison)
+        n_captured = sum(1 for c in candidate_comparison if c["captured"])
+        metrics["candidate_comparison"] = {
+            "hq_candidates": n_total,
+            "captured": n_captured,
+            "capture_rate": (n_captured / n_total) if n_total else 0.0,
+            "candidates": [
+                {
+                    "variant": (f"{c['chrom']}:{c['pos']}"
+                                f" {c['ref']}>{c['alt']}"),
+                    "dka": c["dka"],
+                    "dka_dkt": c["dka_dkt"],
+                    "captured": c["captured"],
+                    "region": c["region"],
+                }
+                for c in candidate_comparison
+            ],
+        }
     with open(metrics_path, "w") as fh:
         json.dump(metrics, fh, indent=2)
     logger.info("[Module 4] Metrics written to: %s", metrics_path)
@@ -1496,6 +1649,7 @@ def run_discovery_pipeline(args):
     logger.info("[Module 4] Writing summary: %s", summary_path)
     summary_text = _write_discovery_summary(
         summary_path, regions, region_reads, region_kmers, metrics,
+        candidate_comparison=candidate_comparison,
     )
     logger.info("\n%s", summary_text)
 

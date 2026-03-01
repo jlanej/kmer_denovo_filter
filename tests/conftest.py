@@ -103,6 +103,9 @@ def generated_discovery_output():
         "--out-prefix", out_prefix,
         "--min-child-count", "3",
         "--kmer-size", "31",
+        "--candidate-summary", os.path.join(
+            EXAMPLE_OUTPUT_DIR, "summary.txt",
+        ),
     ])
     run_discovery_pipeline(args)
 
