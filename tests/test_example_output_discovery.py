@@ -149,5 +149,6 @@ class TestDiscoveryExampleOutput:
         assert len(metrics["regions"]) == metrics["candidate_regions"]
         for region in metrics["regions"]:
             for key in ("chrom", "start", "end", "size", "reads",
-                        "unique_kmers"):
+                        "unique_kmers", "split_reads", "discordant_pairs",
+                        "max_clip_len", "unmapped_mates", "class"):
                 assert key in region, f"Region missing key: {key}"

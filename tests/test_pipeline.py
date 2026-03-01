@@ -944,9 +944,10 @@ class TestDiscoveryPipeline:
         with open(bed_path) as fh:
             bed_lines = [l.strip() for l in fh if l.strip()]
         assert len(bed_lines) >= 1, "Expected at least one candidate region"
-        # BED lines should have 5 columns: chrom, start, end, reads, kmers
+        # BED lines should have 10 columns: chrom, start, end, reads, kmers,
+        # split_reads, discordant_pairs, max_clip_len, unmapped_mates, class
         parts = bed_lines[0].split("\t")
-        assert len(parts) == 5
+        assert len(parts) == 10
         assert int(parts[3]) >= 1  # at least 1 read
         assert int(parts[4]) >= 1  # at least 1 k-mer
 
@@ -981,6 +982,17 @@ class TestDiscoveryPipeline:
             assert "size" in region
             assert region["reads"] >= 1
             assert region["unique_kmers"] >= 1
+            # SV annotation fields
+            assert "split_reads" in region
+            assert "discordant_pairs" in region
+            assert "max_clip_len" in region
+            assert "unmapped_mates" in region
+            assert "class" in region
+            assert region["class"] in ("SV", "SMALL", "AMBIGUOUS")
+
+        # Check BEDPE file exists
+        bedpe_path = f"{out_prefix}.sv.bedpe"
+        assert os.path.exists(bedpe_path)
 
         # Check summary text file
         summary_path = f"{out_prefix}.summary.txt"
@@ -992,6 +1004,8 @@ class TestDiscoveryPipeline:
         assert "Proband-unique k-mers" in summary
         assert "Candidate regions" in summary
         assert "Per-Region Results" in summary
+        assert "Split" in summary
+        assert "Class" in summary
 
     def test_discovery_inherited_no_regions(self, tmpdir):
         """When child shares k-mers with a parent, no regions should appear."""

@@ -115,4 +115,5 @@ def generated_discovery_output():
         "summary": f"{out_prefix}.summary.txt",
         "bam": f"{out_prefix}.informative.bam",
         "bam_bai": f"{out_prefix}.informative.bam.bai",
+        "bedpe": f"{out_prefix}.sv.bedpe",
     }
