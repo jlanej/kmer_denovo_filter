@@ -1179,6 +1179,160 @@ class TestDiscoveryPipeline:
         assert "Discovery Mode Summary" in summary
         assert "Candidate regions:" in summary
 
+    def test_discovery_min_supporting_reads_filters(self, tmpdir):
+        """Regions with fewer reads than --min-supporting-reads are removed."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        child_seq = list(ref_seq[30:90])
+        child_seq[20] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [
+                ("read1", 30, child_seq, None),
+                ("read2", 30, child_seq, None),
+                ("read3", 30, child_seq, None),
+                ("read4", 30, child_seq, None),
+            ],
+        )
+
+        parent_seq = ref_seq[30:90]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(
+            mother_bam, ref_fa, chrom,
+            [("mread1", 30, parent_seq, None)],
+        )
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(
+            father_bam, ref_fa, chrom,
+            [("fread1", 30, parent_seq, None)],
+        )
+
+        # First run without the filter — should produce regions
+        out1 = os.path.join(tmpdir, "disc_nofilt")
+        args1 = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--out-prefix", out1, "--min-child-count", "3",
+            "--kmer-size", "5",
+        ])
+        run_discovery_pipeline(args1)
+        with open(f"{out1}.bed") as fh:
+            baseline = [l.strip() for l in fh if l.strip()]
+        assert len(baseline) >= 1
+
+        # Run with very high --min-supporting-reads — should filter all
+        out2 = os.path.join(tmpdir, "disc_hifilt")
+        args2 = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--out-prefix", out2, "--min-child-count", "3",
+            "--kmer-size", "5",
+            "--min-supporting-reads", "100",
+        ])
+        run_discovery_pipeline(args2)
+        with open(f"{out2}.bed") as fh:
+            filtered = [l.strip() for l in fh if l.strip()]
+        assert len(filtered) == 0
+
+    def test_discovery_min_distinct_kmers_filters(self, tmpdir):
+        """Regions with fewer k-mers than --min-distinct-kmers are removed."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        child_seq = list(ref_seq[30:90])
+        child_seq[20] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [
+                ("read1", 30, child_seq, None),
+                ("read2", 30, child_seq, None),
+                ("read3", 30, child_seq, None),
+                ("read4", 30, child_seq, None),
+            ],
+        )
+
+        parent_seq = ref_seq[30:90]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(
+            mother_bam, ref_fa, chrom,
+            [("mread1", 30, parent_seq, None)],
+        )
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(
+            father_bam, ref_fa, chrom,
+            [("fread1", 30, parent_seq, None)],
+        )
+
+        out = os.path.join(tmpdir, "disc_kfilt")
+        args = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--out-prefix", out, "--min-child-count", "3",
+            "--kmer-size", "5",
+            "--min-distinct-kmers", "10000",
+        ])
+        run_discovery_pipeline(args)
+        with open(f"{out}.bed") as fh:
+            filtered = [l.strip() for l in fh if l.strip()]
+        assert len(filtered) == 0
+
+    def test_discovery_cluster_distance(self, tmpdir):
+        """--cluster-distance is accepted and passed to the pipeline."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        child_seq = list(ref_seq[30:90])
+        child_seq[20] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [
+                ("read1", 30, child_seq, None),
+                ("read2", 30, child_seq, None),
+                ("read3", 30, child_seq, None),
+                ("read4", 30, child_seq, None),
+            ],
+        )
+
+        parent_seq = ref_seq[30:90]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(
+            mother_bam, ref_fa, chrom,
+            [("mread1", 30, parent_seq, None)],
+        )
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(
+            father_bam, ref_fa, chrom,
+            [("fread1", 30, parent_seq, None)],
+        )
+
+        out = os.path.join(tmpdir, "disc_cd")
+        args = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--out-prefix", out, "--min-child-count", "3",
+            "--kmer-size", "5",
+            "--cluster-distance", "100",
+        ])
+        run_discovery_pipeline(args)
+        bed_path = f"{out}.bed"
+        assert os.path.exists(bed_path)
+        with open(bed_path) as fh:
+            bed_lines = [l.strip() for l in fh if l.strip()]
+        assert len(bed_lines) >= 1
+
 
 class TestDiscoveryValidation:
     """Tests for input validation in discovery mode."""

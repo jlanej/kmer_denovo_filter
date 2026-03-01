@@ -84,6 +84,27 @@ def parse_args(argv=None):
              "DKA > 10) are checked against discovered regions.",
     )
     parser.add_argument(
+        "--cluster-distance", type=int, default=500,
+        help="Maximum gap (bp) for merging adjacent regions in discovery "
+             "mode (default: 500)",
+    )
+    parser.add_argument(
+        "--min-supporting-reads", type=int, default=1,
+        help="Minimum number of supporting reads per region in discovery "
+             "mode (default: 1)",
+    )
+    parser.add_argument(
+        "--min-distinct-kmers", type=int, default=1,
+        help="Minimum number of distinct proband-unique k-mers per region "
+             "in discovery mode (default: 1)",
+    )
+    parser.add_argument(
+        "--parent-max-count", type=int, default=0,
+        help="Maximum k-mer count in a parent before the k-mer is "
+             "considered parental. K-mers with count > this value in "
+             "either parent are removed (default: 0)",
+    )
+    parser.add_argument(
         "--threads", "-t", type=int, default=4,
         help="Number of threads for jellyfish (default: 4)",
     )

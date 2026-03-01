@@ -177,6 +177,10 @@ kmer-denovo \
 | `--out-prefix` | – | Output prefix for discovery mode files (activates discovery mode) |
 | `--ref-jf` | – | Precomputed Jellyfish reference index; defaults to `[ref-fasta].k[kmer-size].jf` |
 | `--min-child-count` | 3 | Minimum k-mer occurrences in the child to be considered a candidate |
+| `--cluster-distance` | 500 | Maximum gap (bp) for merging adjacent regions |
+| `--min-supporting-reads` | 1 | Minimum number of supporting reads per region |
+| `--min-distinct-kmers` | 1 | Minimum number of distinct proband-unique k-mers per region |
+| `--parent-max-count` | 0 | Maximum k-mer count in a parent before the k-mer is considered parental; k-mers with count > this value in either parent are removed |
 | `--candidate-summary` | – | Path to a VCF-mode `summary.txt` for candidate comparison. High-quality *de novos* (DKA\_DKT > 0.25, DKA > 10) are checked against discovered regions |
 
 ### VCF Mode Output

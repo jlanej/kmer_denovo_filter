@@ -896,8 +896,14 @@ def _subtract_reference_kmers(ref_jf, child_candidates_fa, tmpdir):
 
 
 def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
-                              child_non_ref_fa, kmer_size, threads, tmpdir):
+                              child_non_ref_fa, kmer_size, threads, tmpdir,
+                              parent_max_count=0):
     """Module 2: Filter non-reference child k-mers against both parents.
+
+    Args:
+        parent_max_count: Maximum k-mer count allowed in a parent before
+            the k-mer is considered parental.  K-mers with count >
+            parent_max_count in either parent are removed.
 
     Returns:
         Set of canonical k-mer strings that are absent from both parents
@@ -938,8 +944,9 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
         len(father_kmers), len(non_ref_kmers),
     )
 
-    # Keep only k-mers absent from BOTH parents
-    parent_kmers = set(mother_kmers) | set(father_kmers)
+    # Keep only k-mers absent from BOTH parents (count <= parent_max_count)
+    parent_kmers = {k for k, v in mother_kmers.items() if v > parent_max_count} | \
+                   {k for k, v in father_kmers.items() if v > parent_max_count}
     proband_unique = non_ref_kmers - parent_kmers
     logger.info(
         "Proband-unique k-mers (absent from both parents): %d / %d",
@@ -1655,6 +1662,7 @@ def run_discovery_pipeline(args):
         proband_unique_kmers = _filter_parents_discovery(
             args.mother, args.father, args.ref_fasta,
             child_non_ref_fa, args.kmer_size, args.threads, tmpdir,
+            parent_max_count=args.parent_max_count,
         )
         logger.info(
             "[Module 2] Complete (%s)",
@@ -1693,13 +1701,35 @@ def run_discovery_pipeline(args):
     regions, region_reads, total_informative, region_kmers, unmapped_informative = (
         _anchor_and_cluster(
             args.child, args.ref_fasta, proband_unique_kmers,
-            args.kmer_size, threads=args.threads,
+            args.kmer_size, merge_distance=args.cluster_distance,
+            threads=args.threads,
         )
     )
     logger.info(
         "[Module 3] Complete (%s)",
         _format_elapsed(time.monotonic() - step_start),
     )
+
+    # ── Region filtering ───────────────────────────────────────────
+    min_reads = args.min_supporting_reads
+    min_kmers = args.min_distinct_kmers
+    if min_reads > 1 or min_kmers > 1:
+        pre_filter = len(regions)
+        filtered_regions = []
+        for region_key in regions:
+            n_reads = len(region_reads.get(region_key, set()))
+            n_kmers = len(region_kmers.get(region_key, set()))
+            if n_reads >= min_reads and n_kmers >= min_kmers:
+                filtered_regions.append(region_key)
+            else:
+                region_reads.pop(region_key, None)
+                region_kmers.pop(region_key, None)
+        regions = filtered_regions
+        logger.info(
+            "Region filtering: %d → %d regions "
+            "(min-supporting-reads=%d, min-distinct-kmers=%d)",
+            pre_filter, len(regions), min_reads, min_kmers,
+        )
 
     # ── Module 4: Output ───────────────────────────────────────────
     step_start = time.monotonic()
