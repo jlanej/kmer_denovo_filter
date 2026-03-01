@@ -1,5 +1,6 @@
 """Main pipeline for de novo variant k-mer analysis."""
 
+import bisect
 import collections
 import concurrent.futures
 import json
@@ -972,7 +973,13 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
     When *contig* is ``None``, unmapped reads are scanned instead.
 
     Returns:
-        (read_hits, reads_seen, unmapped_informative, total_reads_scanned)
+        (read_hits, reads_seen, unmapped_informative, total_reads_scanned,
+         read_sv_meta)
+
+    ``read_sv_meta`` is a dict keyed by ``(query_name, is_supplementary)``
+    with per-read SV metadata (has_sa, sa_str, is_paired, is_proper_pair,
+    mate_is_unmapped, max_clip) collected for each informative read so
+    that annotation and linking can be done without re-scanning the BAM.
     """
     automaton = _worker_automaton
     bam = pysam.AlignmentFile(
@@ -981,6 +988,7 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
 
     read_hits = []
     reads_seen = set()
+    read_sv_meta = {}
     unmapped_informative = 0
     total_reads_scanned = 0
 
@@ -989,12 +997,13 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
             iterator = bam.fetch("*")
         except (ValueError, KeyError):
             bam.close()
-            return read_hits, reads_seen, unmapped_informative, total_reads_scanned
+            return (read_hits, reads_seen, unmapped_informative,
+                    total_reads_scanned, read_sv_meta)
     else:
         iterator = bam.fetch(contig=contig)
 
     for read in iterator:
-        if read.is_secondary or read.is_supplementary:
+        if read.is_secondary:
             continue
         if read.is_duplicate:
             continue
@@ -1009,8 +1018,9 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
             for _end_idx, canonical_kmer in automaton.iter(seq):
                 unique_in_read.add(canonical_kmer)
 
-        if unique_in_read and read.query_name not in reads_seen:
-            reads_seen.add(read.query_name)
+        dedup_key = (read.query_name, read.is_supplementary)
+        if unique_in_read and dedup_key not in reads_seen:
+            reads_seen.add(dedup_key)
             if read.is_unmapped:
                 unmapped_informative += 1
             else:
@@ -1020,10 +1030,31 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
                     read.reference_end,
                     read.query_name,
                     unique_in_read,
+                    read.is_supplementary,
                 ))
 
+            # Collect SV metadata for this informative read
+            max_clip = 0
+            if read.cigartuples:
+                for op, length in read.cigartuples:
+                    if op == 4 and length > max_clip:  # soft clip
+                        max_clip = length
+            read_sv_meta[dedup_key] = {
+                "has_sa": read.has_tag("SA"),
+                "sa_str": read.get_tag("SA") if (
+                    read.has_tag("SA") and not read.is_supplementary
+                ) else None,
+                "is_paired": read.is_paired,
+                "is_proper_pair": read.is_proper_pair,
+                "mate_is_unmapped": (
+                    read.mate_is_unmapped if read.is_paired else False
+                ),
+                "max_clip": max_clip,
+            }
+
     bam.close()
-    return read_hits, reads_seen, unmapped_informative, total_reads_scanned
+    return (read_hits, reads_seen, unmapped_informative,
+            total_reads_scanned, read_sv_meta)
 
 
 def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
@@ -1061,6 +1092,8 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
             k-mer strings observed in that region's reads.
         unmapped_informative: Number of unmapped reads carrying
             proband-unique k-mers.
+        read_sv_meta: Dict mapping (query_name, is_supplementary) to
+            per-read SV metadata dict.
     """
     anchor_start = time.monotonic()
 
@@ -1081,6 +1114,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
 
         read_hits = []
         reads_seen = set()
+        read_sv_meta = {}
         unmapped_informative = 0
         total_reads_scanned = 0
 
@@ -1096,7 +1130,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
             for future in concurrent.futures.as_completed(futures):
                 contig = futures[future]
                 try:
-                    hits, seen, unmapped, scanned = future.result()
+                    hits, seen, unmapped, scanned, sv_meta = future.result()
                 except Exception:
                     logger.error(
                         "Worker failed for contig=%s", contig,
@@ -1105,11 +1139,16 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                 total_reads_scanned += scanned
                 unmapped_informative += unmapped
                 for hit in hits:
-                    name = hit[3]
-                    if name not in reads_seen:
-                        reads_seen.add(name)
+                    # hit: (ref_name, start, end, qname, kmers, is_supp)
+                    dedup_key = (hit[3], hit[5])  # (qname, is_supplementary)
+                    if dedup_key not in reads_seen:
+                        reads_seen.add(dedup_key)
                         read_hits.append(hit)
-                # Track all seen names for cross-contig dedup
+                # Merge SV metadata (only for keys not already seen)
+                for key, meta in sv_meta.items():
+                    if key not in read_sv_meta:
+                        read_sv_meta[key] = meta
+                # Track all seen keys for cross-contig dedup
                 reads_seen.update(seen)
 
         logger.info(
@@ -1129,11 +1168,12 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
 
         read_hits = []
         reads_seen = set()
+        read_sv_meta = {}
         unmapped_informative = 0
         total_reads_scanned = 0
 
         for read in bam.fetch():
-            if read.is_secondary or read.is_supplementary:
+            if read.is_secondary:
                 continue
             if read.is_duplicate:
                 continue
@@ -1148,8 +1188,9 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                 for _end_idx, canonical_kmer in automaton.iter(seq):
                     unique_in_read.add(canonical_kmer)
 
-            if unique_in_read and read.query_name not in reads_seen:
-                reads_seen.add(read.query_name)
+            dedup_key = (read.query_name, read.is_supplementary)
+            if unique_in_read and dedup_key not in reads_seen:
+                reads_seen.add(dedup_key)
                 if read.is_unmapped:
                     unmapped_informative += 1
                 else:
@@ -1159,7 +1200,27 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                         read.reference_end,
                         read.query_name,
                         unique_in_read,
+                        read.is_supplementary,
                     ))
+
+                # Collect SV metadata for this informative read
+                max_clip = 0
+                if read.cigartuples:
+                    for op, length in read.cigartuples:
+                        if op == 4 and length > max_clip:
+                            max_clip = length
+                read_sv_meta[dedup_key] = {
+                    "has_sa": read.has_tag("SA"),
+                    "sa_str": read.get_tag("SA") if (
+                        read.has_tag("SA") and not read.is_supplementary
+                    ) else None,
+                    "is_paired": read.is_paired,
+                    "is_proper_pair": read.is_proper_pair,
+                    "mate_is_unmapped": (
+                        read.mate_is_unmapped if read.is_paired else False
+                    ),
+                    "max_clip": max_clip,
+                }
 
             if total_reads_scanned % 1_000_000 == 0:
                 logger.info(
@@ -1181,7 +1242,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     )
 
     if not read_hits:
-        return [], {}, total_informative, {}, unmapped_informative
+        return [], {}, total_informative, {}, unmapped_informative, read_sv_meta
 
     # Sort by chrom, start
     read_hits.sort(key=lambda x: (x[0], x[1]))
@@ -1196,7 +1257,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     current_names = {read_hits[0][3]}
     current_kmers = set(read_hits[0][4])
 
-    for chrom, start, end, name, unique_in_read in read_hits[1:]:
+    for chrom, start, end, name, unique_in_read, _is_supp in read_hits[1:]:
         if chrom == current_chrom and start <= current_end + merge_distance:
             current_end = max(current_end, end)
             current_names.add(name)
@@ -1223,18 +1284,239 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         len(read_hits), len(regions),
     )
 
-    return regions, region_reads, total_informative, region_kmers, unmapped_informative
+    return regions, region_reads, total_informative, region_kmers, unmapped_informative, read_sv_meta
 
 
-def _write_bed(regions, region_reads, region_kmers, bed_path):
-    """Write clustered regions to a BED file with read/k-mer counts."""
+def _write_bed(regions, region_reads, region_kmers, bed_path,
+               region_annotations=None):
+    """Write clustered regions to a BED file with read/k-mer counts and SV annotations."""
     with open(bed_path, "w") as fh:
         for chrom, start, end in regions:
             region_key = (chrom, start, end)
             n_reads = len(region_reads.get(region_key, set()))
             n_kmers = len(region_kmers.get(region_key, set()))
-            fh.write(f"{chrom}\t{start}\t{end}\t{n_reads}\t{n_kmers}\n")
+            ann = (region_annotations or {}).get(region_key, {})
+            split_reads = ann.get("split_reads", 0)
+            discordant_pairs = ann.get("discordant_pairs", 0)
+            max_clip_len = ann.get("max_clip_len", 0)
+            unmapped_mates = ann.get("unmapped_mates", 0)
+            region_class = ann.get("class", "SMALL")
+            fh.write(
+                f"{chrom}\t{start}\t{end}\t{n_reads}\t{n_kmers}"
+                f"\t{split_reads}\t{discordant_pairs}"
+                f"\t{max_clip_len}\t{unmapped_mates}\t{region_class}\n"
+            )
     logger.info("BED file written: %s (%d regions)", bed_path, len(regions))
+
+
+def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta):
+    """Annotate regions and link breakpoints using pre-collected metadata.
+
+    Uses per-read SV metadata collected during the anchoring scan
+    (Module 3), so no additional BAM I/O is needed.
+
+    Args:
+        regions: List of (chrom, start, end) tuples.
+        region_reads: Dict mapping region tuple to set of read names.
+        read_sv_meta: Dict mapping (query_name, is_supplementary) to
+            per-read SV metadata dict with keys: has_sa, sa_str,
+            is_paired, is_proper_pair, mate_is_unmapped, max_clip.
+
+    Returns:
+        (annotations, links) where:
+        - annotations: Dict mapping region tuple to annotation dict with
+          keys: split_reads, discordant_pairs, max_clip_len, unmapped_mates.
+        - links: List of dicts with keys: region_a, region_b,
+          supporting_reads, sv_type_hint.
+    """
+    # Build lookup from read name to regions it belongs to
+    read_to_regions = {}
+    for region_key in regions:
+        for qname in region_reads.get(region_key, set()):
+            read_to_regions.setdefault(qname, set()).add(region_key)
+
+    # Initialize annotations
+    annotations = {
+        r: {"split_reads": 0, "discordant_pairs": 0,
+            "max_clip_len": 0, "unmapped_mates": 0}
+        for r in regions
+    }
+
+    if not read_to_regions:
+        return annotations, []
+
+    # ── Annotation from metadata ──
+    # Track which (qname, region) pairs have already been counted for
+    # split_reads so each molecule is counted at most once per region,
+    # even when both primary and supplementary alignments are informative.
+    split_read_counted = set()
+
+    for dedup_key, meta in read_sv_meta.items():
+        qname = dedup_key[0]
+        if qname not in read_to_regions:
+            continue
+
+        for region_key in read_to_regions[qname]:
+            ann = annotations[region_key]
+
+            if meta["has_sa"]:
+                sr_key = (qname, region_key)
+                if sr_key not in split_read_counted:
+                    ann["split_reads"] += 1
+                    split_read_counted.add(sr_key)
+
+            if meta["is_paired"]:
+                if meta["mate_is_unmapped"]:
+                    ann["unmapped_mates"] += 1
+                elif not meta["is_proper_pair"]:
+                    ann["discordant_pairs"] += 1
+
+            if meta["max_clip"] > ann["max_clip_len"]:
+                ann["max_clip_len"] = meta["max_clip"]
+
+    # ── Linking via SA tags ──
+    # Build interval index per chromosome for O(log n) SA target lookup
+    region_by_chrom = {}
+    for r in regions:
+        region_by_chrom.setdefault(r[0], []).append(r)
+    chrom_starts = {}
+    chrom_regions_sorted = {}
+    for chrom, rlist in region_by_chrom.items():
+        rlist.sort(key=lambda x: x[1])
+        chrom_starts[chrom] = [r[1] for r in rlist]
+        chrom_regions_sorted[chrom] = rlist
+
+    sa_bridges = {}
+
+    for dedup_key, meta in read_sv_meta.items():
+        qname = dedup_key[0]
+        sa_str = meta.get("sa_str")
+        if not sa_str:
+            continue
+        if qname not in read_to_regions:
+            continue
+
+        primary_regions = read_to_regions[qname]
+
+        for sa_entry in sa_str.rstrip(";").split(";"):
+            parts = sa_entry.split(",")
+            if len(parts) < 3:
+                continue
+            sa_chrom = parts[0]
+            try:
+                sa_pos = int(parts[1]) - 1  # 1-based to 0-based
+            except ValueError:
+                continue
+
+            if sa_chrom not in chrom_starts:
+                continue
+            starts = chrom_starts[sa_chrom]
+            sorted_regions = chrom_regions_sorted[sa_chrom]
+            idx = bisect.bisect_right(starts, sa_pos) - 1
+            if idx >= 0:
+                t_chrom, t_start, t_end = sorted_regions[idx]
+                if t_start <= sa_pos < t_end:
+                    target_region = (t_chrom, t_start, t_end)
+                    for p_region in primary_regions:
+                        if p_region != target_region:
+                            key = tuple(sorted(
+                                [p_region, target_region],
+                            ))
+                            sa_bridges.setdefault(
+                                key, set(),
+                            ).add(qname)
+
+    # Also link regions sharing query_names across primary/supplementary
+    for qname, rset in read_to_regions.items():
+        if len(rset) >= 2:
+            rlist = sorted(rset)
+            for i in range(len(rlist)):
+                for j in range(i + 1, len(rlist)):
+                    key = (rlist[i], rlist[j])
+                    sa_bridges.setdefault(key, set()).add(qname)
+
+    # Build links list
+    links = []
+    for region_a, region_b in sorted(sa_bridges):
+        qnames = sa_bridges[(region_a, region_b)]
+        sv_type = _infer_sv_type(region_a, region_b)
+        links.append({
+            "region_a": region_a,
+            "region_b": region_b,
+            "supporting_reads": qnames,
+            "sv_type_hint": sv_type,
+        })
+
+    return annotations, links
+
+
+def _infer_sv_type(region_a, region_b):
+    """Infer SV type from two linked regions.
+
+    Returns one of: INTRA (same chromosome) or BND (translocation).
+    Distinguishing DEL/DUP/INV would require SA tag strand information
+    which is not carried in the region data structure.
+    """
+    if region_a[0] != region_b[0]:
+        return "BND"
+    return "INTRA"
+
+
+def _write_bedpe(links, bedpe_path):
+    """Write linked SV breakpoint pairs to a BEDPE file.
+
+    Args:
+        links: List of link dicts from ``_annotate_and_link_from_metadata()``.
+        bedpe_path: Output BEDPE file path.
+    """
+    with open(bedpe_path, "w") as fh:
+        fh.write(
+            "#chrom1\tstart1\tend1\tchrom2\tstart2\tend2"
+            "\tsv_id\tsupporting_reads\tsv_type\n"
+        )
+        for idx, link in enumerate(links, 1):
+            ra = link["region_a"]
+            rb = link["region_b"]
+            n_support = len(link["supporting_reads"])
+            sv_type = link["sv_type_hint"]
+            fh.write(
+                f"{ra[0]}\t{ra[1]}\t{ra[2]}"
+                f"\t{rb[0]}\t{rb[1]}\t{rb[2]}"
+                f"\tSV_{idx}\t{n_support}\t{sv_type}\n"
+            )
+    logger.info("BEDPE file written: %s (%d links)", bedpe_path, len(links))
+
+
+def _classify_regions(regions, region_annotations, sv_links):
+    """Assign SV classification to each region.
+
+    - ``SV``: split_reads >= 2 OR discordant_pairs >= 2 OR
+      unmapped_mates >= 2 OR region is linked via sv_links
+    - ``SMALL``: split_reads == 0 AND discordant_pairs == 0 AND
+      unmapped_mates == 0 AND not linked
+    - ``AMBIGUOUS``: otherwise
+
+    Updates region_annotations in place with a ``class`` key.
+    """
+    linked_regions = set()
+    for link in sv_links:
+        linked_regions.add(link["region_a"])
+        linked_regions.add(link["region_b"])
+
+    for region_key in regions:
+        ann = region_annotations.get(region_key, {})
+        split_reads = ann.get("split_reads", 0)
+        discordant_pairs = ann.get("discordant_pairs", 0)
+        unmapped_mates = ann.get("unmapped_mates", 0)
+        if (split_reads >= 2 or discordant_pairs >= 2
+                or unmapped_mates >= 2
+                or region_key in linked_regions):
+            ann["class"] = "SV"
+        elif split_reads == 0 and discordant_pairs == 0 and unmapped_mates == 0:
+            ann["class"] = "SMALL"
+        else:
+            ann["class"] = "AMBIGUOUS"
+        region_annotations[region_key] = ann
 
 
 def _parse_candidate_summary(summary_path, dka_dkt_min=0.25, dka_min=10):
@@ -1325,7 +1607,8 @@ def _compare_candidates_to_regions(candidates, regions):
 
 def _write_discovery_summary(summary_path, regions, region_reads,
                              region_kmers, metrics,
-                             candidate_comparison=None):
+                             candidate_comparison=None,
+                             region_annotations=None):
     """Write a human-readable summary for the discovery pipeline.
 
     Analogous to ``_write_summary()`` in VCF mode, but reports
@@ -1340,6 +1623,8 @@ def _write_discovery_summary(summary_path, regions, region_reads,
         metrics: Dict with overall discovery pipeline statistics.
         candidate_comparison: Optional list of comparison dicts from
             ``_compare_candidates_to_regions()``.
+        region_annotations: Optional dict mapping region tuple to SV
+            annotation dict.
     """
     n_regions = metrics["candidate_regions"]
     n_reads_total = metrics["informative_reads"]
@@ -1397,26 +1682,36 @@ def _write_discovery_summary(summary_path, regions, region_reads,
 
     if regions:
         lines.append("Per-Region Results")
-        lines.append("-" * 80)
+        lines.append("-" * 120)
         lines.append(
             f"  {'Region':<35s} {'Size':>8s} {'Reads':>6s}"
             f" {'Unique K-mers':>14s}"
+            f" {'Split':>6s} {'Disc':>5s} {'MaxClip':>8s}"
+            f" {'UnmapMate':>10s} {'Class':>10s}"
         )
         lines.append(
             f"  {'------':<35s} {'----':>8s} {'-----':>6s}"
             f" {'-------------':>14s}"
+            f" {'-----':>6s} {'----':>5s} {'-------':>8s}"
+            f" {'---------':>10s} {'-----':>10s}"
         )
 
         for chrom, start, end in regions:
             region_key = (chrom, start, end)
             n_reads = len(region_reads.get(region_key, set()))
             n_kmers = len(region_kmers.get(region_key, set()))
+            ann = (region_annotations or {}).get(region_key, {})
             # Display as 1-based coordinates for human readability
             label = f"{chrom}:{start + 1}-{end}"
             size = end - start
             lines.append(
                 f"  {label:<35s} {size:>7d}bp {n_reads:>6d}"
                 f" {n_kmers:>14d}"
+                f" {ann.get('split_reads', 0):>6d}"
+                f" {ann.get('discordant_pairs', 0):>5d}"
+                f" {ann.get('max_clip_len', 0):>8d}"
+                f" {ann.get('unmapped_mates', 0):>10d}"
+                f" {ann.get('class', 'SMALL'):>10s}"
             )
 
     if candidate_comparison:
@@ -1493,7 +1788,7 @@ def _write_informative_reads_discovery(
 
     written = set()
     for read in bam_in.fetch():
-        if read.is_secondary or read.is_supplementary:
+        if read.is_secondary:
             continue
         if read.is_duplicate:
             continue
@@ -1508,10 +1803,11 @@ def _write_informative_reads_discovery(
                 has_unique = True
                 break
 
-        if has_unique and read.query_name not in written:
+        dedup_key = (read.query_name, read.is_supplementary)
+        if has_unique and dedup_key not in written:
             read.set_tag("dk", 1, value_type="i")
             bam_out.write(read)
-            written.add(read.query_name)
+            written.add(dedup_key)
 
     bam_out.close()
     bam_in.close()
@@ -1527,9 +1823,11 @@ def _write_informative_reads_discovery(
 
 
 def _write_empty_discovery_outputs(bed_path, metrics_path, summary_path,
-                                   metrics):
+                                   metrics, bedpe_path=None):
     """Write empty discovery outputs for early-exit cases."""
     _write_bed([], {}, {}, bed_path)
+    if bedpe_path:
+        _write_bedpe([], bedpe_path)
     with open(metrics_path, "w") as fh:
         json.dump(metrics, fh, indent=2)
     _write_discovery_summary(summary_path, [], {}, {}, metrics)
@@ -1557,6 +1855,7 @@ def run_discovery_pipeline(args):
     info_bam_path = f"{out_prefix}.informative.bam"
     metrics_path = f"{out_prefix}.metrics.json"
     summary_path = f"{out_prefix}.summary.txt"
+    bedpe_path = getattr(args, "sv_bedpe", None) or f"{out_prefix}.sv.bedpe"
 
     # ── Configuration summary ──────────────────────────────────────
     logger.info("=" * 60)
@@ -1619,6 +1918,7 @@ def run_discovery_pipeline(args):
             }
             _write_empty_discovery_outputs(
                 bed_path, metrics_path, summary_path, empty_metrics,
+                bedpe_path=bedpe_path,
             )
             logger.info(
                 "Pipeline finished in %s",
@@ -1649,6 +1949,7 @@ def run_discovery_pipeline(args):
             }
             _write_empty_discovery_outputs(
                 bed_path, metrics_path, summary_path, empty_metrics,
+                bedpe_path=bedpe_path,
             )
             logger.info(
                 "Pipeline finished in %s",
@@ -1685,6 +1986,7 @@ def run_discovery_pipeline(args):
             }
             _write_empty_discovery_outputs(
                 bed_path, metrics_path, summary_path, empty_metrics,
+                bedpe_path=bedpe_path,
             )
             logger.info(
                 "Pipeline finished in %s",
@@ -1698,7 +2000,8 @@ def run_discovery_pipeline(args):
         "[Module 3] Anchoring %d proband-unique k-mers to child reads",
         len(proband_unique_kmers),
     )
-    regions, region_reads, total_informative, region_kmers, unmapped_informative = (
+    (regions, region_reads, total_informative, region_kmers,
+     unmapped_informative, read_sv_meta) = (
         _anchor_and_cluster(
             args.child, args.ref_fasta, proband_unique_kmers,
             args.kmer_size, merge_distance=args.cluster_distance,
@@ -1735,7 +2038,17 @@ def run_discovery_pipeline(args):
     step_start = time.monotonic()
     logger.info("[Module 4] Writing output files")
 
-    _write_bed(regions, region_reads, region_kmers, bed_path)
+    # SV annotation and linking (from metadata — no extra BAM scan)
+    logger.info("[Module 4] Annotating regions and linking breakpoints")
+    region_annotations, sv_links = _annotate_and_link_from_metadata(
+        regions, region_reads, read_sv_meta,
+    )
+    _classify_regions(regions, region_annotations, sv_links)
+
+    _write_bed(regions, region_reads, region_kmers, bed_path,
+               region_annotations=region_annotations)
+
+    _write_bedpe(sv_links, bedpe_path)
 
     logger.info("[Module 4] Writing informative reads BAM: %s", info_bam_path)
     _write_informative_reads_discovery(
@@ -1777,6 +2090,21 @@ def run_discovery_pipeline(args):
                 "unique_kmers": len(
                     region_kmers.get((chrom, start, end), set())
                 ),
+                "split_reads": region_annotations.get(
+                    (chrom, start, end), {},
+                ).get("split_reads", 0),
+                "discordant_pairs": region_annotations.get(
+                    (chrom, start, end), {},
+                ).get("discordant_pairs", 0),
+                "max_clip_len": region_annotations.get(
+                    (chrom, start, end), {},
+                ).get("max_clip_len", 0),
+                "unmapped_mates": region_annotations.get(
+                    (chrom, start, end), {},
+                ).get("unmapped_mates", 0),
+                "class": region_annotations.get(
+                    (chrom, start, end), {},
+                ).get("class", "SMALL"),
             }
             for chrom, start, end in regions
         ],
@@ -1808,6 +2136,7 @@ def run_discovery_pipeline(args):
     summary_text = _write_discovery_summary(
         summary_path, regions, region_reads, region_kmers, metrics,
         candidate_comparison=candidate_comparison,
+        region_annotations=region_annotations,
     )
     logger.info("\n%s", summary_text)
 
@@ -1823,6 +2152,7 @@ def run_discovery_pipeline(args):
     logger.info("=" * 60)
     logger.info("  Candidate regions: %s", bed_path)
     logger.info("  Informative BAM:   %s", info_bam_path)
+    logger.info("  SV breakpoints:    %s", bedpe_path)
     logger.info("  Metrics:           %s", metrics_path)
     logger.info("  Summary:           %s", summary_path)
     logger.info("")
