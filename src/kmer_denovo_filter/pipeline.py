@@ -1346,20 +1346,24 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta):
         return annotations, []
 
     # ── Annotation from metadata ──
+    # Track which (qname, region) pairs have already been counted for
+    # split_reads so each molecule is counted at most once per region,
+    # even when both primary and supplementary alignments are informative.
+    split_read_counted = set()
+
     for dedup_key, meta in read_sv_meta.items():
         qname = dedup_key[0]
-        is_supplementary = dedup_key[1]
         if qname not in read_to_regions:
             continue
 
         for region_key in read_to_regions[qname]:
             ann = annotations[region_key]
 
-            # Only count split reads from primary alignments to avoid
-            # double-counting when both primary and supplementary are
-            # informative in the same region.
-            if meta["has_sa"] and not is_supplementary:
-                ann["split_reads"] += 1
+            if meta["has_sa"]:
+                sr_key = (qname, region_key)
+                if sr_key not in split_read_counted:
+                    ann["split_reads"] += 1
+                    split_read_counted.add(sr_key)
 
             if meta["is_paired"]:
                 if meta["mate_is_unmapped"]:
