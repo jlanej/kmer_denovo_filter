@@ -292,12 +292,12 @@ def _scan_parent_jellyfish(
     are tracked while the parent BAM is streamed.
 
     Returns:
-        Set of canonical k-mers found in the parent.
+        Dict mapping canonical k-mer string to its count in the parent.
     """
     os.makedirs(parent_dir, exist_ok=True)
     jf_output = os.path.join(parent_dir, "parent.jf")
 
-    samtools_cmd = ["samtools", "fasta", "-F", "0x500", "-@", "2", parent_bam]
+    samtools_cmd = ["samtools", "fasta", "-F", "0xD00", "-@", "2", parent_bam]
     if ref_fasta:
         samtools_cmd.extend(["--reference", ref_fasta])
 
@@ -801,7 +801,7 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
 
     # Step 1: Count all child k-mers
     logger.info("Extracting child k-mers from BAM (k=%d)…", kmer_size)
-    samtools_cmd = ["samtools", "fasta", "-F", "0x500", "-@", "2", child_bam]
+    samtools_cmd = ["samtools", "fasta", "-F", "0xD00", "-@", "2", child_bam]
     if ref_fasta:
         samtools_cmd.extend(["--reference", ref_fasta])
 
