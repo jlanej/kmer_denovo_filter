@@ -146,3 +146,57 @@ class TestParseArgs:
     def test_out_prefix(self):
         args = parse_args(self.REQUIRED_ARGS + ["--out-prefix", "myprefix"])
         assert args.out_prefix == "myprefix"
+
+    def test_cluster_distance_default(self):
+        args = parse_args(self.REQUIRED_ARGS)
+        assert args.cluster_distance == 500
+
+    def test_cluster_distance_custom(self):
+        args = parse_args(self.REQUIRED_ARGS + ["--cluster-distance", "1000"])
+        assert args.cluster_distance == 1000
+
+    def test_min_supporting_reads_default(self):
+        args = parse_args(self.REQUIRED_ARGS)
+        assert args.min_supporting_reads == 1
+
+    def test_min_supporting_reads_custom(self):
+        args = parse_args(
+            self.REQUIRED_ARGS + ["--min-supporting-reads", "3"]
+        )
+        assert args.min_supporting_reads == 3
+
+    def test_min_distinct_kmers_default(self):
+        args = parse_args(self.REQUIRED_ARGS)
+        assert args.min_distinct_kmers == 1
+
+    def test_min_distinct_kmers_custom(self):
+        args = parse_args(
+            self.REQUIRED_ARGS + ["--min-distinct-kmers", "5"]
+        )
+        assert args.min_distinct_kmers == 5
+
+    def test_parent_max_count_default(self):
+        args = parse_args(self.REQUIRED_ARGS)
+        assert args.parent_max_count == 0
+
+    def test_parent_max_count_custom(self):
+        args = parse_args(self.REQUIRED_ARGS + ["--parent-max-count", "2"])
+        assert args.parent_max_count == 2
+
+    def test_discovery_mode_new_args(self):
+        """Discovery mode new arguments are parsed correctly."""
+        args = parse_args([
+            "--child", "child.bam",
+            "--mother", "mother.bam",
+            "--father", "father.bam",
+            "--ref-fasta", "ref.fa",
+            "--out-prefix", "trio1",
+            "--cluster-distance", "250",
+            "--min-supporting-reads", "4",
+            "--min-distinct-kmers", "3",
+            "--parent-max-count", "1",
+        ])
+        assert args.cluster_distance == 250
+        assert args.min_supporting_reads == 4
+        assert args.min_distinct_kmers == 3
+        assert args.parent_max_count == 1
