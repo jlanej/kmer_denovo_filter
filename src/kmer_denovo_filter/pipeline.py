@@ -1082,11 +1082,19 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
             initializer=_init_scan_worker,
             initargs=(proband_unique_kmers,),
         ) as executor:
-            futures = [
-                executor.submit(_scan_contig_for_hits, *t) for t in tasks
-            ]
+            futures = {
+                executor.submit(_scan_contig_for_hits, *t): t[2]
+                for t in tasks
+            }
             for future in concurrent.futures.as_completed(futures):
-                hits, seen, unmapped, scanned = future.result()
+                contig = futures[future]
+                try:
+                    hits, seen, unmapped, scanned = future.result()
+                except Exception:
+                    logger.error(
+                        "Worker failed for contig=%s", contig,
+                    )
+                    raise
                 total_reads_scanned += scanned
                 unmapped_informative += unmapped
                 for hit in hits:
