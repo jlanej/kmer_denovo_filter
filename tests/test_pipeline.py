@@ -10,9 +10,11 @@ import pytest
 
 from kmer_denovo_filter.cli import parse_args
 from kmer_denovo_filter.pipeline import (
+    _classify_regions,
     _format_elapsed,
     _format_file_size,
     _validate_inputs,
+    _write_bedpe,
     run_discovery_pipeline,
     run_pipeline,
 )
@@ -944,9 +946,10 @@ class TestDiscoveryPipeline:
         with open(bed_path) as fh:
             bed_lines = [l.strip() for l in fh if l.strip()]
         assert len(bed_lines) >= 1, "Expected at least one candidate region"
-        # BED lines should have 5 columns: chrom, start, end, reads, kmers
+        # BED lines should have 10 columns: chrom, start, end, reads, kmers,
+        # split_reads, discordant_pairs, max_clip_len, unmapped_mates, class
         parts = bed_lines[0].split("\t")
-        assert len(parts) == 5
+        assert len(parts) == 10
         assert int(parts[3]) >= 1  # at least 1 read
         assert int(parts[4]) >= 1  # at least 1 k-mer
 
@@ -981,6 +984,17 @@ class TestDiscoveryPipeline:
             assert "size" in region
             assert region["reads"] >= 1
             assert region["unique_kmers"] >= 1
+            # SV annotation fields
+            assert "split_reads" in region
+            assert "discordant_pairs" in region
+            assert "max_clip_len" in region
+            assert "unmapped_mates" in region
+            assert "class" in region
+            assert region["class"] in ("SV", "SMALL", "AMBIGUOUS")
+
+        # Check BEDPE file exists
+        bedpe_path = f"{out_prefix}.sv.bedpe"
+        assert os.path.exists(bedpe_path)
 
         # Check summary text file
         summary_path = f"{out_prefix}.summary.txt"
@@ -992,6 +1006,8 @@ class TestDiscoveryPipeline:
         assert "Proband-unique k-mers" in summary
         assert "Candidate regions" in summary
         assert "Per-Region Results" in summary
+        assert "Split" in summary
+        assert "Class" in summary
 
     def test_discovery_inherited_no_regions(self, tmpdir):
         """When child shares k-mers with a parent, no regions should appear."""
@@ -1545,3 +1561,389 @@ class TestDiscoveryValidation:
             tmpdir, ref_fasta=None, ref_jf=ref_jf,
         )
         _validate_inputs(args)
+
+
+def _create_bam_with_supplementary(path, ref_fasta, chroms, chrom_lengths,
+                                   reads):
+    """Create a BAM with support for supplementary alignments and SA tags.
+
+    ``reads`` is a list of dicts with keys:
+        name: query name
+        chrom_idx: reference index (0-based)
+        pos: 0-based reference start
+        seq: query sequence
+        cigar: CIGAR tuples list (default all-M)
+        flag: SAM flag (default 0)
+        sa_tag: SA tag string (optional)
+        mapq: mapping quality (default 60)
+    """
+    header = pysam.AlignmentHeader.from_references(chroms, chrom_lengths)
+    with pysam.AlignmentFile(path, "wb", header=header) as bam:
+        for entry in reads:
+            seg = pysam.AlignedSegment()
+            seg.query_name = entry["name"]
+            seg.query_sequence = entry["seq"]
+            seg.flag = entry.get("flag", 0)
+            seg.reference_id = entry.get("chrom_idx", 0)
+            seg.reference_start = entry["pos"]
+            seg.mapping_quality = entry.get("mapq", 60)
+            seg.cigar = entry.get("cigar", [(0, len(entry["seq"]))])
+            seg.query_qualities = pysam.qualitystring_to_array(
+                "I" * len(entry["seq"])
+            )
+            if "sa_tag" in entry:
+                seg.set_tag("SA", entry["sa_tag"])
+            bam.write(seg)
+    pysam.sort("-o", path, path)
+    pysam.index(path)
+
+
+class TestDiscoverySV:
+    """Tests for SV support in discovery mode."""
+
+    @pytest.fixture()
+    def tmpdir(self, tmp_path):
+        return str(tmp_path)
+
+    def test_supplementary_read_in_informative_bam(self, tmpdir):
+        """A supplementary read carrying proband-unique k-mers should appear
+        in the informative BAM."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        # Create a mutation at position 50
+        child_seq = list(ref_seq[30:90])
+        child_seq[20] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        # Create child BAM with primary + supplementary for same read name
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam_with_supplementary(
+            child_bam, ref_fa, [chrom], [300],
+            [
+                # Primary reads
+                {"name": "read1", "pos": 30, "seq": child_seq, "flag": 0},
+                {"name": "read2", "pos": 30, "seq": child_seq, "flag": 0},
+                {"name": "read3", "pos": 30, "seq": child_seq, "flag": 0},
+                {"name": "read4", "pos": 30, "seq": child_seq, "flag": 0},
+                # Supplementary read carrying same mutation sequence
+                {"name": "read1", "pos": 30, "seq": child_seq,
+                 "flag": 0x800},  # supplementary flag
+            ],
+        )
+
+        parent_seq = ref_seq[30:90]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom,
+                     [("mread1", 30, parent_seq, None)])
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(father_bam, ref_fa, chrom,
+                     [("fread1", 30, parent_seq, None)])
+
+        out_prefix = os.path.join(tmpdir, "sv_supp")
+        args = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--out-prefix", out_prefix, "--min-child-count", "3",
+            "--kmer-size", "5",
+        ])
+        run_discovery_pipeline(args)
+
+        # Check informative BAM includes supplementary
+        info_bam = f"{out_prefix}.informative.bam"
+        bam_info = pysam.AlignmentFile(info_bam)
+        info_reads = list(bam_info)
+        bam_info.close()
+
+        # Should have reads including the supplementary
+        supp_reads = [r for r in info_reads if r.is_supplementary]
+        primary_reads = [r for r in info_reads if not r.is_supplementary]
+        assert len(primary_reads) >= 1
+        assert len(supp_reads) >= 1
+        # All reads should have dk tag
+        for read in info_reads:
+            assert read.has_tag("dk")
+            assert read.get_tag("dk") == 1
+
+    def test_unlinked_snp_region_is_small(self, tmpdir):
+        """A simple point mutation (no split reads) should be classified SMALL."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        child_seq = list(ref_seq[30:90])
+        child_seq[20] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(child_bam, ref_fa, chrom, [
+            ("read1", 30, child_seq, None),
+            ("read2", 30, child_seq, None),
+            ("read3", 30, child_seq, None),
+            ("read4", 30, child_seq, None),
+        ])
+
+        parent_seq = ref_seq[30:90]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom,
+                     [("mread1", 30, parent_seq, None)])
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(father_bam, ref_fa, chrom,
+                     [("fread1", 30, parent_seq, None)])
+
+        out_prefix = os.path.join(tmpdir, "sv_snp")
+        args = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--out-prefix", out_prefix, "--min-child-count", "3",
+            "--kmer-size", "5",
+        ])
+        run_discovery_pipeline(args)
+
+        # Check BED: class should be SMALL
+        bed_path = f"{out_prefix}.bed"
+        with open(bed_path) as fh:
+            bed_lines = [l.strip() for l in fh if l.strip()]
+        assert len(bed_lines) >= 1
+        parts = bed_lines[0].split("\t")
+        assert parts[5] == "0"   # split_reads
+        assert parts[9] == "SMALL"
+
+        # Check metrics: class should be SMALL
+        metrics_path = f"{out_prefix}.metrics.json"
+        with open(metrics_path) as fh:
+            metrics = json.load(fh)
+        for region in metrics["regions"]:
+            assert region["split_reads"] == 0
+            assert region["class"] == "SMALL"
+
+        # BEDPE should be empty (header only)
+        bedpe_path = f"{out_prefix}.sv.bedpe"
+        assert os.path.exists(bedpe_path)
+        with open(bedpe_path) as fh:
+            lines = [l for l in fh if not l.startswith("#")]
+        assert len(lines) == 0
+
+    def test_split_read_sv_detection(self, tmpdir):
+        """A read with SA tag bridging two regions should produce SV
+        classification and BEDPE entry."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        # Create two different mutation sequences at distant positions
+        # Mutation 1: position 50 (read at 30-90)
+        child_seq1 = list(ref_seq[30:90])
+        child_seq1[20] = "G" if ref_seq[50] != "G" else "T"
+        child_seq1 = "".join(child_seq1)
+
+        # Mutation 2: position 150 (read at 130-190)
+        child_seq2 = list(ref_seq[130:190])
+        child_seq2[20] = "G" if ref_seq[150] != "G" else "T"
+        child_seq2 = "".join(child_seq2)
+
+        # SA tag pointing from first region to second (1-based pos)
+        sa_tag = f"{chrom},131,+,30M30S,60,0;"
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam_with_supplementary(
+            child_bam, ref_fa, [chrom], [300],
+            [
+                # Primary reads with mutation 1, with SA tags
+                {"name": "sv_read1", "pos": 30, "seq": child_seq1,
+                 "flag": 0, "sa_tag": sa_tag},
+                {"name": "sv_read2", "pos": 30, "seq": child_seq1,
+                 "flag": 0, "sa_tag": sa_tag},
+                {"name": "read3", "pos": 30, "seq": child_seq1, "flag": 0},
+                {"name": "read4", "pos": 30, "seq": child_seq1, "flag": 0},
+                # Supplementary reads with mutation 2 at position 130
+                {"name": "sv_read1", "pos": 130, "seq": child_seq2,
+                 "flag": 0x800},
+                {"name": "sv_read2", "pos": 130, "seq": child_seq2,
+                 "flag": 0x800},
+                # Primary reads with mutation 2
+                {"name": "read5", "pos": 130, "seq": child_seq2, "flag": 0},
+                {"name": "read6", "pos": 130, "seq": child_seq2, "flag": 0},
+            ],
+        )
+
+        parent_seq1 = ref_seq[30:90]
+        parent_seq2 = ref_seq[130:190]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom, [
+            ("mread1", 30, parent_seq1, None),
+            ("mread2", 130, parent_seq2, None),
+        ])
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(father_bam, ref_fa, chrom, [
+            ("fread1", 30, parent_seq1, None),
+            ("fread2", 130, parent_seq2, None),
+        ])
+
+        out_prefix = os.path.join(tmpdir, "sv_split")
+        args = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--out-prefix", out_prefix, "--min-child-count", "3",
+            "--kmer-size", "5", "--cluster-distance", "0",
+        ])
+        run_discovery_pipeline(args)
+
+        # Check that split_reads > 0 in at least one region
+        metrics_path = f"{out_prefix}.metrics.json"
+        with open(metrics_path) as fh:
+            metrics = json.load(fh)
+        assert metrics["candidate_regions"] >= 1
+        has_split = any(r["split_reads"] > 0 for r in metrics["regions"])
+        assert has_split, "Expected at least one region with split_reads > 0"
+        # Region with split reads should be classified SV
+        for region in metrics["regions"]:
+            if region["split_reads"] >= 2:
+                assert region["class"] == "SV"
+
+    def test_bedpe_written(self, tmpdir):
+        """BEDPE output file should always be written."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        child_seq = list(ref_seq[30:90])
+        child_seq[20] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(child_bam, ref_fa, chrom, [
+            ("read1", 30, child_seq, None),
+            ("read2", 30, child_seq, None),
+            ("read3", 30, child_seq, None),
+            ("read4", 30, child_seq, None),
+        ])
+
+        parent_seq = ref_seq[30:90]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom,
+                     [("mread1", 30, parent_seq, None)])
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(father_bam, ref_fa, chrom,
+                     [("fread1", 30, parent_seq, None)])
+
+        out_prefix = os.path.join(tmpdir, "sv_bedpe")
+        args = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--out-prefix", out_prefix, "--min-child-count", "3",
+            "--kmer-size", "5",
+        ])
+        run_discovery_pipeline(args)
+
+        bedpe_path = f"{out_prefix}.sv.bedpe"
+        assert os.path.exists(bedpe_path)
+        with open(bedpe_path) as fh:
+            header = fh.readline()
+        assert header.startswith("#chrom1")
+
+    def test_classify_regions_unit(self):
+        """Unit test for _classify_regions logic."""
+        regions = [
+            ("chr1", 100, 200),
+            ("chr1", 500, 600),
+            ("chr2", 100, 200),
+            ("chr3", 100, 200),
+            ("chr4", 100, 200),
+        ]
+        annotations = {
+            ("chr1", 100, 200): {"split_reads": 3, "discordant_pairs": 0,
+                                 "max_clip_len": 0, "unmapped_mates": 0},
+            ("chr1", 500, 600): {"split_reads": 0, "discordant_pairs": 0,
+                                 "max_clip_len": 0, "unmapped_mates": 0},
+            ("chr2", 100, 200): {"split_reads": 1, "discordant_pairs": 0,
+                                 "max_clip_len": 0, "unmapped_mates": 0},
+            # High discordant pairs → SV even with 0 split reads
+            ("chr3", 100, 200): {"split_reads": 0, "discordant_pairs": 3,
+                                 "max_clip_len": 0, "unmapped_mates": 0},
+            # High unmapped mates → SV even with 0 split reads
+            ("chr4", 100, 200): {"split_reads": 0, "discordant_pairs": 0,
+                                 "max_clip_len": 0, "unmapped_mates": 2},
+        }
+        # Region A is linked to region B
+        sv_links = [
+            {"region_a": ("chr1", 100, 200), "region_b": ("chr1", 500, 600),
+             "supporting_reads": {"r1"}, "sv_type_hint": "INTRA"},
+        ]
+        _classify_regions(regions, annotations, sv_links)
+
+        # Region with >= 2 split reads → SV
+        assert annotations[("chr1", 100, 200)]["class"] == "SV"
+        # Region linked via sv_links → SV (even with 0 split reads)
+        assert annotations[("chr1", 500, 600)]["class"] == "SV"
+        # Region with 1 split read but not linked → AMBIGUOUS
+        assert annotations[("chr2", 100, 200)]["class"] == "AMBIGUOUS"
+        # Region with >= 2 discordant pairs → SV
+        assert annotations[("chr3", 100, 200)]["class"] == "SV"
+        # Region with >= 2 unmapped mates → SV
+        assert annotations[("chr4", 100, 200)]["class"] == "SV"
+
+    def test_write_bedpe_format(self, tmpdir):
+        """Unit test for _write_bedpe output format."""
+        links = [
+            {"region_a": ("chr1", 100, 200), "region_b": ("chr1", 5000, 5100),
+             "supporting_reads": {"r1", "r2"}, "sv_type_hint": "INTRA"},
+            {"region_a": ("chr1", 100, 200), "region_b": ("chr2", 100, 200),
+             "supporting_reads": {"r3"}, "sv_type_hint": "BND"},
+        ]
+        bedpe_path = os.path.join(tmpdir, "test.bedpe")
+        _write_bedpe(links, bedpe_path)
+
+        with open(bedpe_path) as fh:
+            lines = fh.readlines()
+
+        assert lines[0].startswith("#chrom1")
+        parts1 = lines[1].strip().split("\t")
+        assert len(parts1) == 9
+        assert parts1[0] == "chr1"
+        assert parts1[6] == "SV_1"
+        assert parts1[7] == "2"  # 2 supporting reads
+        assert parts1[8] == "INTRA"
+
+        parts2 = lines[2].strip().split("\t")
+        assert parts2[3] == "chr2"
+        assert parts2[8] == "BND"
+
+    def test_sv_bedpe_cli_argument(self, tmpdir):
+        """--sv-bedpe argument should be accepted."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        child_seq = list(ref_seq[30:90])
+        child_seq[20] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(child_bam, ref_fa, chrom, [
+            ("read1", 30, child_seq, None),
+            ("read2", 30, child_seq, None),
+            ("read3", 30, child_seq, None),
+            ("read4", 30, child_seq, None),
+        ])
+
+        parent_seq = ref_seq[30:90]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom,
+                     [("mread1", 30, parent_seq, None)])
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(father_bam, ref_fa, chrom,
+                     [("fread1", 30, parent_seq, None)])
+
+        custom_bedpe = os.path.join(tmpdir, "custom.bedpe")
+        out_prefix = os.path.join(tmpdir, "sv_cli")
+        args = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--out-prefix", out_prefix, "--min-child-count", "3",
+            "--kmer-size", "5",
+            "--sv-bedpe", custom_bedpe,
+        ])
+        run_discovery_pipeline(args)
+        assert os.path.exists(custom_bedpe)

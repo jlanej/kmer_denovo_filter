@@ -105,6 +105,11 @@ def parse_args(argv=None):
              "either parent are removed (default: 0)",
     )
     parser.add_argument(
+        "--sv-bedpe", default=None,
+        help="Output BEDPE file for linked SV breakpoint pairs in "
+             "discovery mode (default: [out-prefix].sv.bedpe)",
+    )
+    parser.add_argument(
         "--threads", "-t", type=int, default=4,
         help="Number of threads for jellyfish (default: 4)",
     )
