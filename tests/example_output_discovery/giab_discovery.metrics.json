@@ -16,7 +16,7 @@
       "unique_kmers": 5,
       "split_reads": 0,
       "discordant_pairs": 0,
-      "max_clip_len": 27,
+      "max_clip_len": 52,
       "unmapped_mates": 0,
       "class": "SMALL"
     },
@@ -42,7 +42,7 @@
       "unique_kmers": 28,
       "split_reads": 0,
       "discordant_pairs": 0,
-      "max_clip_len": 42,
+      "max_clip_len": 44,
       "unmapped_mates": 0,
       "class": "SMALL"
     },
@@ -68,7 +68,7 @@
       "unique_kmers": 52,
       "split_reads": 0,
       "discordant_pairs": 0,
-      "max_clip_len": 53,
+      "max_clip_len": 54,
       "unmapped_mates": 0,
       "class": "SMALL"
     },
@@ -94,7 +94,7 @@
       "unique_kmers": 62,
       "split_reads": 0,
       "discordant_pairs": 0,
-      "max_clip_len": 58,
+      "max_clip_len": 27,
       "unmapped_mates": 0,
       "class": "SMALL"
     },
@@ -107,7 +107,7 @@
       "unique_kmers": 18,
       "split_reads": 0,
       "discordant_pairs": 0,
-      "max_clip_len": 4,
+      "max_clip_len": 1,
       "unmapped_mates": 0,
       "class": "SMALL"
     },
@@ -120,7 +120,7 @@
       "unique_kmers": 7,
       "split_reads": 0,
       "discordant_pairs": 0,
-      "max_clip_len": 9,
+      "max_clip_len": 14,
       "unmapped_mates": 0,
       "class": "SMALL"
     },
@@ -133,7 +133,7 @@
       "unique_kmers": 13,
       "split_reads": 0,
       "discordant_pairs": 0,
-      "max_clip_len": 2,
+      "max_clip_len": 32,
       "unmapped_mates": 0,
       "class": "SMALL"
     },
@@ -145,10 +145,10 @@
       "reads": 10,
       "unique_kmers": 24,
       "split_reads": 0,
-      "discordant_pairs": 1,
-      "max_clip_len": 3,
-      "unmapped_mates": 0,
-      "class": "SMALL"
+      "discordant_pairs": 0,
+      "max_clip_len": 95,
+      "unmapped_mates": 1,
+      "class": "AMBIGUOUS"
     },
     {
       "chrom": "chr19",
@@ -185,7 +185,7 @@
       "unique_kmers": 15,
       "split_reads": 0,
       "discordant_pairs": 0,
-      "max_clip_len": 50,
+      "max_clip_len": 46,
       "unmapped_mates": 0,
       "class": "SMALL"
     },
@@ -198,7 +198,7 @@
       "unique_kmers": 1,
       "split_reads": 0,
       "discordant_pairs": 0,
-      "max_clip_len": 0,
+      "max_clip_len": 113,
       "unmapped_mates": 0,
       "class": "SMALL"
     },
@@ -224,7 +224,7 @@
       "unique_kmers": 23,
       "split_reads": 0,
       "discordant_pairs": 0,
-      "max_clip_len": 54,
+      "max_clip_len": 55,
       "unmapped_mates": 0,
       "class": "SMALL"
     }

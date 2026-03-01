@@ -10,11 +10,9 @@ import pytest
 
 from kmer_denovo_filter.cli import parse_args
 from kmer_denovo_filter.pipeline import (
-    _annotate_regions_sv,
     _classify_regions,
     _format_elapsed,
     _format_file_size,
-    _link_sv_regions,
     _validate_inputs,
     _write_bedpe,
     run_discovery_pipeline,
@@ -1851,6 +1849,8 @@ class TestDiscoverySV:
             ("chr1", 100, 200),
             ("chr1", 500, 600),
             ("chr2", 100, 200),
+            ("chr3", 100, 200),
+            ("chr4", 100, 200),
         ]
         annotations = {
             ("chr1", 100, 200): {"split_reads": 3, "discordant_pairs": 0,
@@ -1859,11 +1859,17 @@ class TestDiscoverySV:
                                  "max_clip_len": 0, "unmapped_mates": 0},
             ("chr2", 100, 200): {"split_reads": 1, "discordant_pairs": 0,
                                  "max_clip_len": 0, "unmapped_mates": 0},
+            # High discordant pairs → SV even with 0 split reads
+            ("chr3", 100, 200): {"split_reads": 0, "discordant_pairs": 3,
+                                 "max_clip_len": 0, "unmapped_mates": 0},
+            # High unmapped mates → SV even with 0 split reads
+            ("chr4", 100, 200): {"split_reads": 0, "discordant_pairs": 0,
+                                 "max_clip_len": 0, "unmapped_mates": 2},
         }
         # Region A is linked to region B
         sv_links = [
             {"region_a": ("chr1", 100, 200), "region_b": ("chr1", 500, 600),
-             "supporting_reads": {"r1"}, "sv_type_hint": "DEL"},
+             "supporting_reads": {"r1"}, "sv_type_hint": "INTRA"},
         ]
         _classify_regions(regions, annotations, sv_links)
 
@@ -1873,12 +1879,16 @@ class TestDiscoverySV:
         assert annotations[("chr1", 500, 600)]["class"] == "SV"
         # Region with 1 split read but not linked → AMBIGUOUS
         assert annotations[("chr2", 100, 200)]["class"] == "AMBIGUOUS"
+        # Region with >= 2 discordant pairs → SV
+        assert annotations[("chr3", 100, 200)]["class"] == "SV"
+        # Region with >= 2 unmapped mates → SV
+        assert annotations[("chr4", 100, 200)]["class"] == "SV"
 
     def test_write_bedpe_format(self, tmpdir):
         """Unit test for _write_bedpe output format."""
         links = [
             {"region_a": ("chr1", 100, 200), "region_b": ("chr1", 5000, 5100),
-             "supporting_reads": {"r1", "r2"}, "sv_type_hint": "DEL"},
+             "supporting_reads": {"r1", "r2"}, "sv_type_hint": "INTRA"},
             {"region_a": ("chr1", 100, 200), "region_b": ("chr2", 100, 200),
              "supporting_reads": {"r3"}, "sv_type_hint": "BND"},
         ]
@@ -1894,7 +1904,7 @@ class TestDiscoverySV:
         assert parts1[0] == "chr1"
         assert parts1[6] == "SV_1"
         assert parts1[7] == "2"  # 2 supporting reads
-        assert parts1[8] == "DEL"
+        assert parts1[8] == "INTRA"
 
         parts2 = lines[2].strip().split("\t")
         assert parts2[3] == "chr2"
