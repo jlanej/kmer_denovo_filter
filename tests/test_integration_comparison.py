@@ -104,8 +104,7 @@ class TestCompareCandidatesToRegions:
         assert results[0]["captured"] is False
 
     def test_real_data_overlap(self):
-        """High-quality candidates from the example should overlap with
-        the committed discovery BED regions."""
+        """High-quality candidates should overlap with discovery regions."""
         summary_path = os.path.join(EXAMPLE_OUTPUT_DIR, "summary.txt")
         bed_path = os.path.join(
             EXAMPLE_OUTPUT_DISCOVERY_DIR, "giab_discovery.bed",

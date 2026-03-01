@@ -1293,8 +1293,10 @@ def _write_discovery_summary(summary_path, regions, region_reads,
         lines.append("Candidate Comparison (DKA_DKT > 0.25, DKA > 10)")
         lines.append("-" * 80)
         lines.append(f"  High-quality candidates:     {n_total:>8}")
-        lines.append(f"  Captured by discovery:       {n_captured:>8}"
-                     f" / {n_total} ({pct:.1f}%)")
+        lines.append(
+            f"  Captured by discovery:       {n_captured:>8}"
+            f" / {n_total} ({pct:.1f}%)"
+        )
         lines.append("")
         lines.append(
             f"  {'Candidate':<30s}  {'DKA':>4s}  {'DKA_DKT':>8s}"
