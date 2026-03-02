@@ -152,3 +152,23 @@ class TestDiscoveryExampleOutput:
                         "unique_kmers", "split_reads", "discordant_pairs",
                         "max_clip_len", "unmapped_mates", "class"):
                 assert key in region, f"Region missing key: {key}"
+
+    def test_bedpe_matches(self, generated_discovery_output):
+        """BEDPE file must match the committed example exactly."""
+        expected_path = os.path.join(
+            EXAMPLE_OUTPUT_DISCOVERY_DIR, "giab_discovery.sv.bedpe",
+        )
+        generated_path = generated_discovery_output["bedpe"]
+
+        with open(expected_path) as fh:
+            expected_lines = fh.read().splitlines()
+        with open(generated_path) as fh:
+            generated_lines = fh.read().splitlines()
+
+        if expected_lines != generated_lines:
+            diff = _unified_diff(
+                expected_lines, generated_lines, "giab_discovery.sv.bedpe",
+            )
+            pytest.fail(
+                f"BEDPE file differs from expected:\n{diff}"
+            )

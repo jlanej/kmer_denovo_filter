@@ -212,4 +212,3 @@ tests/data/giab/
 # Discovery-mode generated artifacts not needed for regression tests
 tests/example_output_discovery/*.bam
 tests/example_output_discovery/*.bam.bai
-tests/example_output_discovery/*.bedpe

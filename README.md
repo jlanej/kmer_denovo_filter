@@ -56,7 +56,8 @@ The tool supports two modes:
    candidate genomic regions.
 
 5. **Output** – Write a BED file of candidate regions, an informative-reads
-   BAM, a metrics JSON file, and a human-readable summary.
+   BAM, an SV breakpoints BEDPE, a metrics JSON file, and a human-readable
+   summary.
 
 ## Prerequisites
 
@@ -120,10 +121,11 @@ kmer-denovo \
   --threads 8
 ```
 
-This produces four output files (see [Discovery Mode Output](#discovery-mode-output)):
+This produces five output files (see [Discovery Mode Output](#discovery-mode-output)):
 
 * `discovery_output.bed`
 * `discovery_output.informative.bam`
+* `discovery_output.sv.bedpe`
 * `discovery_output.metrics.json`
 * `discovery_output.summary.txt`
 
@@ -182,6 +184,7 @@ kmer-denovo \
 | `--min-distinct-kmers` | 1 | Minimum number of distinct proband-unique k-mers per region |
 | `--parent-max-count` | 0 | Maximum k-mer count in a parent before the k-mer is considered parental; k-mers with count > this value in either parent are removed |
 | `--candidate-summary` | – | Path to a VCF-mode `summary.txt` for candidate comparison. High-quality *de novos* (DKA\_DKT > 0.25, DKA > 10) are checked against discovered regions |
+| `--sv-bedpe` | – | Output BEDPE file for linked SV breakpoint pairs (default: `[out-prefix].sv.bedpe`) |
 
 ### VCF Mode Output
 
@@ -222,7 +225,7 @@ and indexed for direct visualization in IGV.
 
 ### Discovery Mode Output
 
-Discovery mode always produces four files based on `--out-prefix`:
+Discovery mode always produces five files based on `--out-prefix`:
 
 #### BED file (`{prefix}.bed`)
 
@@ -236,6 +239,11 @@ cluster of reads carrying proband-unique k-mers:
 | end | End coordinate (exclusive) |
 | read_count | Number of unique reads with proband-unique k-mers in this region |
 | kmer_count | Number of distinct proband-unique k-mers in this region |
+| split_reads | Number of split-read alignments (SA-tag evidence) in this region |
+| discordant_pairs | Number of discordant read pairs in this region |
+| max_clip_len | Maximum soft-clip length among reads in this region |
+| unmapped_mates | Number of reads whose mate is unmapped |
+| class | SV classification: `SV`, `AMBIGUOUS`, or `SMALL` |
 
 #### Informative BAM (`{prefix}.informative.bam`)
 
@@ -264,7 +272,12 @@ Machine-readable pipeline statistics:
       "end": 5500,
       "size": 4500,
       "reads": 12,
-      "unique_kmers": 35
+      "unique_kmers": 35,
+      "split_reads": 0,
+      "discordant_pairs": 1,
+      "max_clip_len": 50,
+      "unmapped_mates": 0,
+      "class": "AMBIGUOUS"
     }
   ]
 }
@@ -280,8 +293,28 @@ Human-readable overview including:
 * K-mer filtering statistics (child candidates → non-reference → proband-unique)
 * Region counts and informative read totals
 * Region size statistics (mean, median, max)
-* Per-region results table with coordinates, size, read count, and k-mer count
+* Per-region results table with coordinates, size, read count, k-mer count, SV annotations, and classification
 * Candidate comparison results (when `--candidate-summary` is provided)
+
+#### SV breakpoints BEDPE (`{prefix}.sv.bedpe`)
+
+Tab-delimited [BEDPE](https://bedtools.readthedocs.io/en/latest/content/general-usage.html#bedpe-format)
+file listing linked SV breakpoint pairs identified from split-read and
+discordant-pair evidence across discovery regions:
+
+| Column | Description |
+|---|---|
+| chrom1 | Chromosome of the first breakpoint region |
+| start1 | 0-based start of the first breakpoint region |
+| end1 | End of the first breakpoint region |
+| chrom2 | Chromosome of the second breakpoint region |
+| start2 | 0-based start of the second breakpoint region |
+| end2 | End of the second breakpoint region |
+| sv_id | Identifier for the SV link (e.g. `SV_1`) |
+| supporting_reads | Number of reads supporting the link |
+| sv_type | SV type hint: `INTRA` (intra-chromosomal) or `BND` (inter-chromosomal) |
+
+When no linked breakpoints are found the file contains only the header line.
 
 ## Docker
 
