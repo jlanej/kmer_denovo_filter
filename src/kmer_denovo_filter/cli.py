@@ -44,7 +44,8 @@ def parse_args(argv=None):
     parser.add_argument(
         "--out-prefix", default=None,
         help="Output prefix for discovery mode files "
-             "([prefix].bed, [prefix].informative.bam, [prefix].metrics.json)",
+             "([prefix].bed, [prefix].informative.bam, "
+             "[prefix].sv.bedpe, [prefix].metrics.json)",
     )
     parser.add_argument(
         "--metrics", default=None, help="Output summary metrics JSON file"

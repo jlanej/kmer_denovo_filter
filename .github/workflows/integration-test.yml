@@ -85,7 +85,7 @@ jobs:
         run: |
           mkdir -p tests/example_output tests/example_output_discovery
           cp integration_output/annotated.vcf.gz integration_output/annotated.vcf.gz.tbi integration_output/metrics.json integration_output/summary.txt tests/example_output/
-          cp integration_output_discovery/giab_discovery.bed integration_output_discovery/giab_discovery.metrics.json integration_output_discovery/giab_discovery.summary.txt tests/example_output_discovery/
+          cp integration_output_discovery/giab_discovery.bed integration_output_discovery/giab_discovery.metrics.json integration_output_discovery/giab_discovery.summary.txt integration_output_discovery/giab_discovery.sv.bedpe tests/example_output_discovery/
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add tests/example_output/ tests/example_output_discovery/
