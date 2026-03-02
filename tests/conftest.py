@@ -113,6 +113,7 @@ def generated_discovery_output():
     return {
         "bed": f"{out_prefix}.bed",
         "bedgraph": f"{out_prefix}.kmer_coverage.bedgraph",
+        "read_coverage_bed": f"{out_prefix}.read_coverage.bed",
         "metrics": f"{out_prefix}.metrics.json",
         "summary": f"{out_prefix}.summary.txt",
         "bam": f"{out_prefix}.informative.bam",

@@ -100,6 +100,12 @@ def parse_args(argv=None):
              "in discovery mode (default: 1)",
     )
     parser.add_argument(
+        "--min-bedgraph-reads", type=int, default=3,
+        help="Minimum number of distinct reads with at least one de novo "
+             "k-mer at a position for it to be included in the bedGraph "
+             "and read coverage BED (default: 3)",
+    )
+    parser.add_argument(
         "--parent-max-count", type=int, default=0,
         help="Maximum k-mer count in a parent before the k-mer is "
              "considered parental. K-mers with count > this value in "
