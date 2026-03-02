@@ -1688,7 +1688,7 @@ def _evaluate_dnm_regions(discovery_regions, region_detail,
             if dr_chrom != chrom:
                 continue
             # Overlap check (both 0-based half-open)
-            if dr_start < dnm_end and dnm_start <= dr_end:
+            if dr_start < dnm_end and dnm_start < dr_end:
                 matches.append(dr_key)
 
         detected = len(matches) > 0

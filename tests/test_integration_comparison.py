@@ -260,6 +260,18 @@ class TestEvaluateDNMRegions:
         assert results[0]["assessment"] == "NOT_DETECTED"
         assert results[0]["kmer_signal"] == 0.0
 
+    def test_adjacent_not_overlapping(self):
+        """A DNM at region end boundary (half-open) → NOT_DETECTED."""
+        # Region [50, 200) and DNM at 200 → adjacent, not overlapping
+        dnm = [("chr1", 200, None, "sv_like")]
+        regions = [("chr1", 50, 200)]
+        detail = [{"chrom": "chr1", "start": 50, "end": 200, "size": 150,
+                    "reads": 5, "unique_kmers": 10, "split_reads": 0,
+                    "discordant_pairs": 0, "max_clip_len": 20,
+                    "unmapped_mates": 0, "class": "SMALL"}]
+        results = _evaluate_dnm_regions(regions, detail, dnm_regions=dnm)
+        assert results[0]["detected"] is False
+
     def test_multi_region_overlap(self):
         """A large deletion spanning multiple regions aggregates evidence."""
         dnm = [("chr1", 100, 500, "deletion")]
