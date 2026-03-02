@@ -999,7 +999,7 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
 
     Returns:
         (read_hits, reads_seen, unmapped_informative, total_reads_scanned,
-         read_sv_meta, kmer_coverage)
+         read_sv_meta, kmer_coverage, read_coverage)
 
     ``read_sv_meta`` is a dict keyed by ``(query_name, is_supplementary)``
     with per-read SV metadata (has_sa, sa_str, is_paired, is_proper_pair,
@@ -1007,7 +1007,12 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
     that annotation and linking can be done without re-scanning the BAM.
 
     ``kmer_coverage`` is a dict mapping chrom to a Counter of reference
-    positions overlapped by novel k-mers.
+    positions overlapped by novel k-mers (counts total k-mer base
+    overlaps across all reads).
+
+    ``read_coverage`` is a dict mapping chrom to a Counter of reference
+    positions where at least one novel k-mer was found, counting the
+    number of distinct reads touching each position.
     """
     automaton = _worker_automaton
     kmer_size = _worker_kmer_size
@@ -1019,6 +1024,7 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
     reads_seen = set()
     read_sv_meta = {}
     kmer_coverage = collections.defaultdict(collections.Counter)
+    read_coverage = collections.defaultdict(collections.Counter)
     unmapped_informative = 0
     total_reads_scanned = 0
 
@@ -1028,7 +1034,8 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
         except (ValueError, KeyError):
             bam.close()
             return (read_hits, reads_seen, unmapped_informative,
-                    total_reads_scanned, read_sv_meta, kmer_coverage)
+                    total_reads_scanned, read_sv_meta, kmer_coverage,
+                    read_coverage)
     else:
         iterator = bam.fetch(contig=contig)
 
@@ -1071,6 +1078,9 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
                         read, kmer_hit_indices, kmer_size,
                     )
                     kmer_coverage[chrom] += cov
+                    # Count one read per touched position
+                    for pos in cov:
+                        read_coverage[chrom][pos] += 1
 
             # Collect SV metadata for this informative read
             max_clip = 0
@@ -1093,7 +1103,8 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
 
     bam.close()
     return (read_hits, reads_seen, unmapped_informative,
-            total_reads_scanned, read_sv_meta, kmer_coverage)
+            total_reads_scanned, read_sv_meta, kmer_coverage,
+            read_coverage)
 
 
 def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
@@ -1135,6 +1146,9 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
             per-read SV metadata dict.
         kmer_coverage: Dict mapping chrom to Counter of reference
             positions overlapped by novel k-mers.
+        read_coverage: Dict mapping chrom to Counter of reference
+            positions with per-position read counts (number of distinct
+            reads touching each position with at least one novel k-mer).
     """
     anchor_start = time.monotonic()
 
@@ -1157,6 +1171,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         reads_seen = set()
         read_sv_meta = {}
         kmer_coverage = collections.defaultdict(collections.Counter)
+        read_coverage = collections.defaultdict(collections.Counter)
         unmapped_informative = 0
         total_reads_scanned = 0
 
@@ -1173,7 +1188,8 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                 contig = futures[future]
                 try:
                     (hits, seen, unmapped, scanned,
-                     sv_meta, worker_cov) = future.result()
+                     sv_meta, worker_cov,
+                     worker_read_cov) = future.result()
                 except Exception:
                     logger.error(
                         "Worker failed for contig=%s", contig,
@@ -1191,9 +1207,12 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                 for key, meta in sv_meta.items():
                     if key not in read_sv_meta:
                         read_sv_meta[key] = meta
-                # Merge k-mer coverage
+                # Merge k-mer coverage (update is faster than += for Counters)
                 for chrom, cov in worker_cov.items():
-                    kmer_coverage[chrom] += cov
+                    kmer_coverage[chrom].update(cov)
+                # Merge read coverage
+                for chrom, cov in worker_read_cov.items():
+                    read_coverage[chrom].update(cov)
                 # Track all seen keys for cross-contig dedup
                 reads_seen.update(seen)
 
@@ -1216,6 +1235,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         reads_seen = set()
         read_sv_meta = {}
         kmer_coverage = collections.defaultdict(collections.Counter)
+        read_coverage = collections.defaultdict(collections.Counter)
         unmapped_informative = 0
         total_reads_scanned = 0
 
@@ -1257,6 +1277,9 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                         read, kmer_hit_indices, kmer_size,
                     )
                     kmer_coverage[chrom] += cov
+                    # Count one read per touched position
+                    for pos in cov:
+                        read_coverage[chrom][pos] += 1
 
                 # Collect SV metadata for this informative read
                 max_clip = 0
@@ -1298,7 +1321,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
 
     if not read_hits:
         return ([], {}, total_informative, {}, unmapped_informative,
-                read_sv_meta, kmer_coverage)
+                read_sv_meta, kmer_coverage, read_coverage)
 
     # Sort by chrom, start
     read_hits.sort(key=lambda x: (x[0], x[1]))
@@ -1341,13 +1364,19 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     )
 
     return (regions, region_reads, total_informative, region_kmers,
-            unmapped_informative, read_sv_meta, kmer_coverage)
+            unmapped_informative, read_sv_meta, kmer_coverage,
+            read_coverage)
 
 
 def _write_bed(regions, region_reads, region_kmers, bed_path,
                region_annotations=None):
     """Write clustered regions to a BED file with read/k-mer counts and SV annotations."""
     with open(bed_path, "w") as fh:
+        fh.write(
+            "#chrom\tstart\tend\treads\tunique_kmers"
+            "\tsplit_reads\tdiscordant_pairs"
+            "\tmax_clip_len\tunmapped_mates\tclass\n"
+        )
         for chrom, start, end in regions:
             region_key = (chrom, start, end)
             n_reads = len(region_reads.get(region_key, set()))
@@ -1366,42 +1395,157 @@ def _write_bed(regions, region_reads, region_kmers, bed_path,
     logger.info("BED file written: %s (%d regions)", bed_path, len(regions))
 
 
-def _write_bedgraph(kmer_coverage, bedgraph_path):
+def _write_bedgraph(kmer_coverage, bedgraph_path, read_coverage=None,
+                    min_reads=3):
     """Write a 4-column bedGraph of novel k-mer reference coverage.
 
     Adjacent positions with identical coverage are merged into single
-    intervals to minimise file size.
+    intervals to minimise file size.  When *read_coverage* is provided,
+    only positions supported by at least *min_reads* distinct reads are
+    included, which dramatically reduces output size at WGS scale.
+
+    Positions are sorted once per chromosome and filtered inline to
+    avoid intermediate dict copies at WGS scale.
 
     Args:
         kmer_coverage: Dict mapping chrom to Counter of reference
-            positions with coverage counts.
+            positions with coverage counts (total k-mer base overlaps).
         bedgraph_path: Output file path.
+        read_coverage: Optional dict mapping chrom to Counter of reference
+            positions with the number of distinct reads touching each
+            position.  When provided, positions with fewer than
+            *min_reads* reads are filtered out.
+        min_reads: Minimum number of distinct reads with at least one
+            de novo k-mer required at a position for it to be included
+            in the bedGraph (default: 3).
     """
     total_intervals = 0
+    total_filtered = 0
     with open(bedgraph_path, "w") as fh:
+        fh.write(
+            f"#track type=bedGraph "
+            f"description=\"De novo k-mer coverage (unique k-mer base "
+            f"overlaps per position, min_reads>={min_reads})\"\n"
+        )
         for chrom in sorted(kmer_coverage):
             positions = kmer_coverage[chrom]
             if not positions:
                 continue
+            rc = read_coverage.get(chrom, {}) if read_coverage else None
             sorted_pos = sorted(positions)
-            run_start = sorted_pos[0]
-            run_val = positions[run_start]
-            run_end = run_start + 1
-            for pos in sorted_pos[1:]:
+            run_start = None
+            run_val = None
+            run_end = None
+            for pos in sorted_pos:
+                if rc is not None and rc.get(pos, 0) < min_reads:
+                    total_filtered += 1
+                    if run_start is not None:
+                        fh.write(
+                            f"{chrom}\t{run_start}\t{run_end}\t{run_val}\n"
+                        )
+                        total_intervals += 1
+                        run_start = None
+                    continue
                 val = positions[pos]
-                if pos == run_end and val == run_val:
+                if run_start is None:
+                    run_start = pos
+                    run_val = val
+                    run_end = pos + 1
+                elif pos == run_end and val == run_val:
                     run_end = pos + 1
                 else:
-                    fh.write(f"{chrom}\t{run_start}\t{run_end}\t{run_val}\n")
+                    fh.write(
+                        f"{chrom}\t{run_start}\t{run_end}\t{run_val}\n"
+                    )
                     total_intervals += 1
                     run_start = pos
                     run_val = val
                     run_end = pos + 1
-            fh.write(f"{chrom}\t{run_start}\t{run_end}\t{run_val}\n")
+            if run_start is not None:
+                fh.write(
+                    f"{chrom}\t{run_start}\t{run_end}\t{run_val}\n"
+                )
+                total_intervals += 1
+    if total_filtered:
+        logger.info(
+            "bedGraph file written: %s (%d intervals, %d positions "
+            "filtered by min_reads=%d)",
+            bedgraph_path, total_intervals, total_filtered, min_reads,
+        )
+    else:
+        logger.info(
+            "bedGraph file written: %s (%d intervals)",
+            bedgraph_path, total_intervals,
+        )
+
+
+def _write_read_coverage_bed(kmer_coverage, read_coverage, bed_path,
+                             min_reads=3):
+    """Write a BED file with per-position read count and average k-mers per read.
+
+    For every reference position where at least *min_reads* distinct reads
+    carry a de novo k-mer, writes a BED interval with two value columns:
+
+    - **read_count**: number of distinct reads touching the position with
+      at least one de novo k-mer.
+    - **avg_kmers_per_read**: ``kmer_coverage / read_count`` rounded to
+      one decimal — the average number of unique k-mer overlaps per read
+      at this position, measuring per-read k-mer signal density.
+
+    Adjacent positions with identical (read_count, avg_kmers) are merged
+    into intervals.
+
+    Args:
+        kmer_coverage: Dict mapping chrom to Counter of reference
+            positions with k-mer base overlap counts.
+        read_coverage: Dict mapping chrom to Counter of reference
+            positions with distinct read counts.
+        bed_path: Output BED file path.
+        min_reads: Minimum distinct reads at a position (default: 3).
+    """
+    total_intervals = 0
+    with open(bed_path, "w") as fh:
+        fh.write(
+            f"#track description=\"De novo k-mer read support "
+            f"(min_reads>={min_reads})\"\n"
+            f"#chrom\tstart\tend\tread_count\tavg_kmers_per_read\n"
+        )
+        for chrom in sorted(read_coverage):
+            rc = read_coverage[chrom]
+            kc = kmer_coverage.get(chrom, {})
+            # Build filtered positions
+            filtered = {}
+            for pos, n_reads in rc.items():
+                if n_reads >= min_reads:
+                    avg_k = round(kc.get(pos, 0) / n_reads, 1)
+                    filtered[pos] = (n_reads, avg_k)
+            if not filtered:
+                continue
+            sorted_pos = sorted(filtered)
+            run_start = sorted_pos[0]
+            run_val = filtered[run_start]
+            run_end = run_start + 1
+            for pos in sorted_pos[1:]:
+                val = filtered[pos]
+                if pos == run_end and val == run_val:
+                    run_end = pos + 1
+                else:
+                    fh.write(
+                        f"{chrom}\t{run_start}\t{run_end}"
+                        f"\t{run_val[0]}\t{run_val[1]}\n"
+                    )
+                    total_intervals += 1
+                    run_start = pos
+                    run_val = val
+                    run_end = pos + 1
+            fh.write(
+                f"{chrom}\t{run_start}\t{run_end}"
+                f"\t{run_val[0]}\t{run_val[1]}\n"
+            )
             total_intervals += 1
     logger.info(
-        "bedGraph file written: %s (%d intervals)",
-        bedgraph_path, total_intervals,
+        "Read coverage BED written: %s (%d intervals)",
+        bed_path, total_intervals,
     )
 
 
@@ -2145,6 +2289,8 @@ def run_discovery_pipeline(args):
     summary_path = f"{out_prefix}.summary.txt"
     bedpe_path = getattr(args, "sv_bedpe", None) or f"{out_prefix}.sv.bedpe"
     bedgraph_path = f"{out_prefix}.kmer_coverage.bedgraph"
+    read_cov_bed_path = f"{out_prefix}.read_coverage.bed"
+    min_bedgraph_reads = getattr(args, "min_bedgraph_reads", 3)
 
     # ── Configuration summary ──────────────────────────────────────
     logger.info("=" * 60)
@@ -2290,7 +2436,8 @@ def run_discovery_pipeline(args):
         len(proband_unique_kmers),
     )
     (regions, region_reads, total_informative, region_kmers,
-     unmapped_informative, read_sv_meta, kmer_coverage) = (
+     unmapped_informative, read_sv_meta, kmer_coverage,
+     read_coverage) = (
         _anchor_and_cluster(
             args.child, args.ref_fasta, proband_unique_kmers,
             args.kmer_size, merge_distance=args.cluster_distance,
@@ -2337,7 +2484,13 @@ def run_discovery_pipeline(args):
     _write_bed(regions, region_reads, region_kmers, bed_path,
                region_annotations=region_annotations)
 
-    _write_bedgraph(kmer_coverage, bedgraph_path)
+    _write_bedgraph(kmer_coverage, bedgraph_path,
+                    read_coverage=read_coverage,
+                    min_reads=min_bedgraph_reads)
+
+    _write_read_coverage_bed(kmer_coverage, read_coverage,
+                             read_cov_bed_path,
+                             min_reads=min_bedgraph_reads)
 
     _write_bedpe(sv_links, bedpe_path)
 
@@ -2463,6 +2616,7 @@ def run_discovery_pipeline(args):
     logger.info("=" * 60)
     logger.info("  Candidate regions: %s", bed_path)
     logger.info("  K-mer coverage:    %s", bedgraph_path)
+    logger.info("  Read coverage:     %s", read_cov_bed_path)
     logger.info("  Informative BAM:   %s", info_bam_path)
     logger.info("  SV breakpoints:    %s", bedpe_path)
     logger.info("  Metrics:           %s", metrics_path)

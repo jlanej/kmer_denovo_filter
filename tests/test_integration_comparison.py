@@ -119,6 +119,8 @@ class TestCompareCandidatesToRegions:
         regions = []
         with open(bed_path) as fh:
             for line in fh:
+                if line.startswith("#"):
+                    continue
                 parts = line.strip().split("\t")
                 regions.append((parts[0], int(parts[1]), int(parts[2])))
 
@@ -221,6 +223,8 @@ class TestEvaluateDNMRegions:
         regions = []
         with open(bed_path) as fh:
             for line in fh:
+                if line.startswith("#"):
+                    continue
                 parts = line.strip().split("\t")
                 regions.append((parts[0], int(parts[1]), int(parts[2])))
 
@@ -324,6 +328,8 @@ class TestEvaluateDNMRegions:
         regions = []
         with open(bed_path) as fh:
             for line in fh:
+                if line.startswith("#"):
+                    continue
                 parts = line.strip().split("\t")
                 regions.append((parts[0], int(parts[1]), int(parts[2])))
 
@@ -351,6 +357,8 @@ class TestEvaluateDNMRegions:
         regions = []
         with open(bed_path) as fh:
             for line in fh:
+                if line.startswith("#"):
+                    continue
                 parts = line.strip().split("\t")
                 regions.append((parts[0], int(parts[1]), int(parts[2])))
 
@@ -377,6 +385,8 @@ class TestEvaluateDNMRegions:
         regions = []
         with open(bed_path) as fh:
             for line in fh:
+                if line.startswith("#"):
+                    continue
                 parts = line.strip().split("\t")
                 regions.append((parts[0], int(parts[1]), int(parts[2])))
 

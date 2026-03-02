@@ -81,11 +81,12 @@ def generated_discovery_output():
     Returns a dict mapping output names to their file paths::
 
         {
-            "bed":     "<tmpdir>/giab_discovery.bed",
-            "metrics": "<tmpdir>/giab_discovery.metrics.json",
-            "summary": "<tmpdir>/giab_discovery.summary.txt",
-            "bam":     "<tmpdir>/giab_discovery.informative.bam",
-            "bam_bai": "<tmpdir>/giab_discovery.informative.bam.bai",
+            "bed":       "<tmpdir>/giab_discovery.bed",
+            "bedgraph":  "<tmpdir>/giab_discovery.kmer_coverage.bedgraph",
+            "metrics":   "<tmpdir>/giab_discovery.metrics.json",
+            "summary":   "<tmpdir>/giab_discovery.summary.txt",
+            "bam":       "<tmpdir>/giab_discovery.informative.bam",
+            "bam_bai":   "<tmpdir>/giab_discovery.informative.bam.bai",
         }
     """
     if not GIAB_DISCOVERY_DATA_EXISTS:
@@ -111,9 +112,54 @@ def generated_discovery_output():
 
     return {
         "bed": f"{out_prefix}.bed",
+        "bedgraph": f"{out_prefix}.kmer_coverage.bedgraph",
+        "read_coverage_bed": f"{out_prefix}.read_coverage.bed",
         "metrics": f"{out_prefix}.metrics.json",
         "summary": f"{out_prefix}.summary.txt",
         "bam": f"{out_prefix}.informative.bam",
         "bam_bai": f"{out_prefix}.informative.bam.bai",
         "bedpe": f"{out_prefix}.sv.bedpe",
     }
+
+
+@pytest.fixture(scope="session")
+def generated_comparison_output(generated_example_output, generated_discovery_output):
+    """Run compare_regions against the GIAB pipeline outputs and return the path.
+
+    This session-scoped fixture cross-references the VCF-mode annotated VCF
+    with the discovery bedGraph and BED file to produce a concordance summary.
+    It depends on both ``generated_example_output`` and
+    ``generated_discovery_output``, so those pipelines run first.
+
+    Returns a dict with a single key::
+
+        {
+            "comparison": "<tmpdir>/giab_discovery.comparison.txt",
+        }
+    """
+    import importlib.util
+    _scripts_dir = os.path.join(os.path.dirname(__file__), "..", "scripts")
+    spec = importlib.util.spec_from_file_location(
+        "compare_regions",
+        os.path.join(_scripts_dir, "compare_regions.py"),
+    )
+    cr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cr)
+
+    bedgraph_path = generated_discovery_output["bedgraph"]
+    bed_path = generated_discovery_output["bed"]
+    vcf_path = generated_example_output["vcf"]
+
+    bg = cr.load_bedgraph(bedgraph_path)
+    disc = cr.load_discovery_bed(bed_path)
+    variants = cr.load_vcf_variants(vcf_path)
+    result = cr.compare(bg, disc, variants)
+    summary_text = cr.format_summary(result)
+
+    # Write to a temp file beside the other discovery outputs
+    out_dir = os.path.dirname(bedgraph_path)
+    comparison_path = os.path.join(out_dir, "giab_discovery.comparison.txt")
+    with open(comparison_path, "w") as fh:
+        fh.write(summary_text + "\n")
+
+    return {"comparison": comparison_path}

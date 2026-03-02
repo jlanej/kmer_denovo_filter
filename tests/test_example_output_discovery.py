@@ -130,7 +130,10 @@ class TestDiscoveryExampleOutput:
     def test_region_count_matches(self, generated_discovery_output):
         """BED region count must match metrics.json candidate_regions."""
         with open(generated_discovery_output["bed"]) as fh:
-            bed_count = sum(1 for line in fh if line.strip())
+            bed_count = sum(
+                1 for line in fh
+                if line.strip() and not line.startswith("#")
+            )
 
         with open(generated_discovery_output["metrics"]) as fh:
             metrics = json.load(fh)
@@ -153,6 +156,36 @@ class TestDiscoveryExampleOutput:
                         "max_clip_len", "unmapped_mates", "class"):
                 assert key in region, f"Region missing key: {key}"
 
+    def test_bedgraph_exists_and_nonempty(self, generated_discovery_output):
+        """bedGraph file must be generated and contain intervals."""
+        bedgraph_path = generated_discovery_output["bedgraph"]
+        assert os.path.isfile(bedgraph_path), "bedGraph file not generated"
+        with open(bedgraph_path) as fh:
+            lines = [line for line in fh if line.strip()]
+        assert len(lines) > 0, "bedGraph file is empty"
+
+    def test_bedgraph_matches(self, generated_discovery_output):
+        """bedGraph file must match the committed example exactly."""
+        expected_path = os.path.join(
+            EXAMPLE_OUTPUT_DISCOVERY_DIR,
+            "giab_discovery.kmer_coverage.bedgraph",
+        )
+        generated_path = generated_discovery_output["bedgraph"]
+
+        with open(expected_path) as fh:
+            expected_lines = fh.read().splitlines()
+        with open(generated_path) as fh:
+            generated_lines = fh.read().splitlines()
+
+        if expected_lines != generated_lines:
+            diff = _unified_diff(
+                expected_lines, generated_lines,
+                "giab_discovery.kmer_coverage.bedgraph",
+            )
+            pytest.fail(
+                f"bedGraph file differs from expected:\n{diff}"
+            )
+
     def test_bedpe_matches(self, generated_discovery_output):
         """BEDPE file must match the committed example exactly."""
         expected_path = os.path.join(
@@ -171,4 +204,60 @@ class TestDiscoveryExampleOutput:
             )
             pytest.fail(
                 f"BEDPE file differs from expected:\n{diff}"
+            )
+
+    def test_read_coverage_bed_exists_and_nonempty(
+        self, generated_discovery_output,
+    ):
+        """Read coverage BED must be generated and contain intervals."""
+        rc_path = generated_discovery_output["read_coverage_bed"]
+        assert os.path.isfile(rc_path), "Read coverage BED not generated"
+        with open(rc_path) as fh:
+            data_lines = [
+                line for line in fh
+                if line.strip() and not line.startswith("#")
+            ]
+        assert len(data_lines) > 0, "Read coverage BED has no data"
+
+    def test_read_coverage_bed_matches(self, generated_discovery_output):
+        """Read coverage BED must match the committed example exactly."""
+        expected_path = os.path.join(
+            EXAMPLE_OUTPUT_DISCOVERY_DIR,
+            "giab_discovery.read_coverage.bed",
+        )
+        generated_path = generated_discovery_output["read_coverage_bed"]
+
+        with open(expected_path) as fh:
+            expected_lines = fh.read().splitlines()
+        with open(generated_path) as fh:
+            generated_lines = fh.read().splitlines()
+
+        if expected_lines != generated_lines:
+            diff = _unified_diff(
+                expected_lines, generated_lines,
+                "giab_discovery.read_coverage.bed",
+            )
+            pytest.fail(
+                f"Read coverage BED differs from expected:\n{diff}"
+            )
+
+    def test_comparison_matches(self, generated_comparison_output):
+        """compare_regions output must match the committed example exactly."""
+        expected_path = os.path.join(
+            EXAMPLE_OUTPUT_DISCOVERY_DIR, "giab_discovery.comparison.txt",
+        )
+        generated_path = generated_comparison_output["comparison"]
+
+        with open(expected_path) as fh:
+            expected_lines = fh.read().splitlines()
+        with open(generated_path) as fh:
+            generated_lines = fh.read().splitlines()
+
+        if expected_lines != generated_lines:
+            diff = _unified_diff(
+                expected_lines, generated_lines,
+                "giab_discovery.comparison.txt",
+            )
+            pytest.fail(
+                f"Comparison summary differs from expected:\n{diff}"
             )

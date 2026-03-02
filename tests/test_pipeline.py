@@ -947,7 +947,7 @@ class TestDiscoveryPipeline:
         bed_path = f"{out_prefix}.bed"
         assert os.path.exists(bed_path)
         with open(bed_path) as fh:
-            bed_lines = [l.strip() for l in fh if l.strip()]
+            bed_lines = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
         assert len(bed_lines) >= 1, "Expected at least one candidate region"
         # BED lines should have 10 columns: chrom, start, end, reads, kmers,
         # split_reads, discordant_pairs, max_clip_len, unmapped_mates, class
@@ -1070,7 +1070,7 @@ class TestDiscoveryPipeline:
         bed_path = f"{out_prefix}.bed"
         assert os.path.exists(bed_path)
         with open(bed_path) as fh:
-            bed_lines = [l.strip() for l in fh if l.strip()]
+            bed_lines = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
         # No candidate regions expected for inherited variation
         assert len(bed_lines) == 0
 
@@ -1183,7 +1183,10 @@ class TestDiscoveryPipeline:
         bed_path = f"{out_prefix}.bed"
         assert os.path.exists(bed_path)
         with open(bed_path) as fh:
-            assert fh.read().strip() == ""
+            data_lines = [
+                l for l in fh if l.strip() and not l.startswith("#")
+            ]
+        assert len(data_lines) == 0
 
         metrics_path = f"{out_prefix}.metrics.json"
         with open(metrics_path) as fh:
@@ -1241,7 +1244,7 @@ class TestDiscoveryPipeline:
         ])
         run_discovery_pipeline(args1)
         with open(f"{out1}.bed") as fh:
-            baseline = [l.strip() for l in fh if l.strip()]
+            baseline = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
         assert len(baseline) >= 1
 
         # Run with very high --min-supporting-reads — should filter all
@@ -1255,7 +1258,7 @@ class TestDiscoveryPipeline:
         ])
         run_discovery_pipeline(args2)
         with open(f"{out2}.bed") as fh:
-            filtered = [l.strip() for l in fh if l.strip()]
+            filtered = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
         assert len(filtered) == 0
 
     def test_discovery_min_distinct_kmers_filters(self, tmpdir):
@@ -1301,7 +1304,7 @@ class TestDiscoveryPipeline:
         ])
         run_discovery_pipeline(args)
         with open(f"{out}.bed") as fh:
-            filtered = [l.strip() for l in fh if l.strip()]
+            filtered = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
         assert len(filtered) == 0
 
     def test_discovery_cluster_distance(self, tmpdir):
@@ -1349,7 +1352,7 @@ class TestDiscoveryPipeline:
         bed_path = f"{out}.bed"
         assert os.path.exists(bed_path)
         with open(bed_path) as fh:
-            bed_lines = [l.strip() for l in fh if l.strip()]
+            bed_lines = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
         assert len(bed_lines) >= 1
 
     def test_discovery_parent_max_count(self, tmpdir):
@@ -1397,7 +1400,7 @@ class TestDiscoveryPipeline:
         ])
         run_discovery_pipeline(args_strict)
         with open(f"{out_strict}.bed") as fh:
-            strict_lines = [l.strip() for l in fh if l.strip()]
+            strict_lines = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
         assert len(strict_lines) == 0, (
             "With parent-max-count=0, k-mers present in mother should be removed"
         )
@@ -1413,7 +1416,7 @@ class TestDiscoveryPipeline:
         ])
         run_discovery_pipeline(args_relaxed)
         with open(f"{out_relaxed}.bed") as fh:
-            relaxed_lines = [l.strip() for l in fh if l.strip()]
+            relaxed_lines = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
         assert len(relaxed_lines) >= 1, (
             "With parent-max-count=1, k-mers with count=1 in mother "
             "should be tolerated"
@@ -1481,7 +1484,7 @@ class TestDiscoveryPipeline:
 
         bed_path = f"{out}.bed"
         with open(bed_path) as fh:
-            bed_lines = [l.strip() for l in fh if l.strip()]
+            bed_lines = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
         assert len(bed_lines) == 2, (
             f"Expected 2 regions for 2 distant mutations, got {len(bed_lines)}"
         )
@@ -1707,7 +1710,7 @@ class TestDiscoverySV:
         # Check BED: class should be SMALL
         bed_path = f"{out_prefix}.bed"
         with open(bed_path) as fh:
-            bed_lines = [l.strip() for l in fh if l.strip()]
+            bed_lines = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
         assert len(bed_lines) >= 1
         parts = bed_lines[0].split("\t")
         assert parts[5] == "0"   # split_reads
@@ -1958,6 +1961,15 @@ class TestDiscoverySV:
 class TestWriteBedgraph:
     """Unit tests for _write_bedgraph."""
 
+    @staticmethod
+    def _data_lines(path):
+        """Read non-header data lines from a bedgraph file."""
+        with open(path) as fh:
+            return [
+                l for l in fh.read().strip().split("\n")
+                if l and not l.startswith("#") and not l.startswith("track")
+            ]
+
     def test_basic_bedgraph(self, tmp_path):
         """Adjacent positions with the same value are merged."""
         cov = {
@@ -1965,8 +1977,7 @@ class TestWriteBedgraph:
         }
         out = str(tmp_path / "out.bedgraph")
         _write_bedgraph(cov, out)
-        with open(out) as fh:
-            lines = fh.read().strip().split("\n")
+        lines = self._data_lines(out)
         assert lines == ["chr1\t10\t13\t2", "chr1\t20\t21\t1"]
 
     def test_different_values_not_merged(self, tmp_path):
@@ -1976,8 +1987,7 @@ class TestWriteBedgraph:
         }
         out = str(tmp_path / "out.bedgraph")
         _write_bedgraph(cov, out)
-        with open(out) as fh:
-            lines = fh.read().strip().split("\n")
+        lines = self._data_lines(out)
         assert lines == ["chr1\t5\t6\t3", "chr1\t6\t7\t1"]
 
     def test_multi_chrom_sorted(self, tmp_path):
@@ -1988,26 +1998,50 @@ class TestWriteBedgraph:
         }
         out = str(tmp_path / "out.bedgraph")
         _write_bedgraph(cov, out)
-        with open(out) as fh:
-            lines = fh.read().strip().split("\n")
+        lines = self._data_lines(out)
         assert lines[0].startswith("chr1")
         assert lines[1].startswith("chr2")
 
     def test_empty_coverage(self, tmp_path):
-        """Empty coverage produces an empty file."""
+        """Empty coverage produces only the header."""
         out = str(tmp_path / "out.bedgraph")
         _write_bedgraph({}, out)
-        with open(out) as fh:
-            assert fh.read() == ""
+        lines = self._data_lines(out)
+        assert lines == []
 
     def test_single_position(self, tmp_path):
         """Single position produces a 1-bp interval."""
         cov = {"chrX": collections.Counter({42: 5})}
         out = str(tmp_path / "out.bedgraph")
         _write_bedgraph(cov, out)
-        with open(out) as fh:
-            lines = fh.read().strip().split("\n")
+        lines = self._data_lines(out)
         assert lines == ["chrX\t42\t43\t5"]
+
+    def test_header_present(self, tmp_path):
+        """bedGraph file should have a descriptive header line."""
+        cov = {"chr1": collections.Counter({10: 1})}
+        out = str(tmp_path / "out.bedgraph")
+        _write_bedgraph(cov, out)
+        with open(out) as fh:
+            first_line = fh.readline()
+        assert first_line.startswith("#track type=bedGraph")
+        assert "min_reads" in first_line
+
+    def test_min_reads_filter(self, tmp_path):
+        """Positions below min_reads threshold are filtered out."""
+        cov = {
+            "chr1": collections.Counter({10: 5, 20: 2, 30: 8}),
+        }
+        rc = {
+            "chr1": collections.Counter({10: 4, 20: 1, 30: 3}),
+        }
+        out = str(tmp_path / "out.bedgraph")
+        _write_bedgraph(cov, out, read_coverage=rc, min_reads=3)
+        lines = self._data_lines(out)
+        # Only pos 10 (4 reads) and 30 (3 reads) pass min_reads=3
+        assert len(lines) == 2
+        assert "chr1\t10\t11\t5" in lines
+        assert "chr1\t30\t31\t8" in lines
 
 
 class TestCollectKmerRefPositions:
@@ -2120,6 +2154,8 @@ class TestBedgraphDiscoveryIntegration:
             content = fh.read()
         assert content.strip(), "bedGraph should have content"
         for line in content.strip().split("\n"):
+            if line.startswith("#") or line.startswith("track"):
+                continue
             cols = line.split("\t")
             assert len(cols) == 4, f"Expected 4 columns, got {len(cols)}"
             assert cols[0] == chrom
