@@ -81,11 +81,12 @@ def generated_discovery_output():
     Returns a dict mapping output names to their file paths::
 
         {
-            "bed":     "<tmpdir>/giab_discovery.bed",
-            "metrics": "<tmpdir>/giab_discovery.metrics.json",
-            "summary": "<tmpdir>/giab_discovery.summary.txt",
-            "bam":     "<tmpdir>/giab_discovery.informative.bam",
-            "bam_bai": "<tmpdir>/giab_discovery.informative.bam.bai",
+            "bed":       "<tmpdir>/giab_discovery.bed",
+            "bedgraph":  "<tmpdir>/giab_discovery.kmer_coverage.bedgraph",
+            "metrics":   "<tmpdir>/giab_discovery.metrics.json",
+            "summary":   "<tmpdir>/giab_discovery.summary.txt",
+            "bam":       "<tmpdir>/giab_discovery.informative.bam",
+            "bam_bai":   "<tmpdir>/giab_discovery.informative.bam.bai",
         }
     """
     if not GIAB_DISCOVERY_DATA_EXISTS:
@@ -111,6 +112,7 @@ def generated_discovery_output():
 
     return {
         "bed": f"{out_prefix}.bed",
+        "bedgraph": f"{out_prefix}.kmer_coverage.bedgraph",
         "metrics": f"{out_prefix}.metrics.json",
         "summary": f"{out_prefix}.summary.txt",
         "bam": f"{out_prefix}.informative.bam",

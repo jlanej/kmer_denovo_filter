@@ -153,6 +153,36 @@ class TestDiscoveryExampleOutput:
                         "max_clip_len", "unmapped_mates", "class"):
                 assert key in region, f"Region missing key: {key}"
 
+    def test_bedgraph_exists_and_nonempty(self, generated_discovery_output):
+        """bedGraph file must be generated and contain intervals."""
+        bedgraph_path = generated_discovery_output["bedgraph"]
+        assert os.path.isfile(bedgraph_path), "bedGraph file not generated"
+        with open(bedgraph_path) as fh:
+            lines = [line for line in fh if line.strip()]
+        assert len(lines) > 0, "bedGraph file is empty"
+
+    def test_bedgraph_matches(self, generated_discovery_output):
+        """bedGraph file must match the committed example exactly."""
+        expected_path = os.path.join(
+            EXAMPLE_OUTPUT_DISCOVERY_DIR,
+            "giab_discovery.kmer_coverage.bedgraph",
+        )
+        generated_path = generated_discovery_output["bedgraph"]
+
+        with open(expected_path) as fh:
+            expected_lines = fh.read().splitlines()
+        with open(generated_path) as fh:
+            generated_lines = fh.read().splitlines()
+
+        if expected_lines != generated_lines:
+            diff = _unified_diff(
+                expected_lines, generated_lines,
+                "giab_discovery.kmer_coverage.bedgraph",
+            )
+            pytest.fail(
+                f"bedGraph file differs from expected:\n{diff}"
+            )
+
     def test_bedpe_matches(self, generated_discovery_output):
         """BEDPE file must match the committed example exactly."""
         expected_path = os.path.join(
