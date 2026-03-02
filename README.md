@@ -170,12 +170,12 @@ kmer-denovo \
 | `--ref-fasta` / `-r` | – | Reference FASTA with `.fai` index (required for CRAM; required for discovery mode unless `--ref-jf` is provided) |
 | `--kmer-size` / `-k` | 31 | K-mer size (must be odd, 3–201) |
 | `--min-baseq` | 20 | Minimum base quality for read k-mers |
-| `--min-mapq` | 20 | Minimum mapping quality for child reads |
 | `--threads` / `-t` | 4 | Number of threads for Jellyfish |
 | `--debug-kmers` | false | Enable per-variant debug output |
 | **VCF mode** | | |
 | `--vcf` | – | Input VCF with candidate variants (activates VCF mode) |
 | `--output` / `-o` | – | Output annotated VCF (required with `--vcf`) |
+| `--min-mapq` | 20 | Minimum mapping quality for child reads (VCF mode only; discovery mode scans all primary reads regardless of mapping quality) |
 | `--proband-id` | – | Sample ID of the proband in the VCF. When provided and matching a VCF sample, annotations are written as FORMAT fields; otherwise INFO fields |
 | `--informative-reads` | – | Output BAM of reads carrying child-unique k-mers (tagged with `DV`) |
 | `--metrics` | – | Output summary metrics JSON file |

@@ -135,10 +135,6 @@ def _validate_inputs(args):
         errors.append(
             f"--min-baseq must be >= 0, got {args.min_baseq}"
         )
-    if args.min_mapq < 0:
-        errors.append(
-            f"--min-mapq must be >= 0, got {args.min_mapq}"
-        )
     if args.threads < 1:
         errors.append(
             f"--threads must be >= 1, got {args.threads}"
@@ -161,6 +157,13 @@ def _validate_inputs(args):
         if min_child_count < 1:
             errors.append(
                 f"--min-child-count must be >= 1, got {min_child_count}"
+            )
+
+    # VCF-mode-specific validation
+    if args.vcf is not None:
+        if args.min_mapq < 0:
+            errors.append(
+                f"--min-mapq must be >= 0, got {args.min_mapq}"
             )
 
     if errors:
@@ -2357,7 +2360,6 @@ def run_discovery_pipeline(args):
     logger.info("  k-mer size:        %d", args.kmer_size)
     logger.info("  Min child count:   %d", args.min_child_count)
     logger.info("  Min base quality:  %d", args.min_baseq)
-    logger.info("  Min mapping qual:  %d", args.min_mapq)
     logger.info("  Min distinct kmers/read: %d", min_dk_per_read)
     logger.info("  Threads:           %d", args.threads)
     logger.info("=" * 60)
