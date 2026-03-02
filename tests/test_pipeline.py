@@ -1307,6 +1307,152 @@ class TestDiscoveryPipeline:
             filtered = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
         assert len(filtered) == 0
 
+    def test_discovery_min_distinct_kmers_per_read_filters(self, tmpdir):
+        """Reads with fewer distinct kmers than --min-distinct-kmers-per-read
+        are excluded before region clustering and bedGraph generation."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        child_seq = list(ref_seq[30:90])
+        child_seq[20] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [
+                ("read1", 30, child_seq, None),
+                ("read2", 30, child_seq, None),
+                ("read3", 30, child_seq, None),
+                ("read4", 30, child_seq, None),
+            ],
+        )
+
+        parent_seq = ref_seq[30:90]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(
+            mother_bam, ref_fa, chrom,
+            [("mread1", 30, parent_seq, None)],
+        )
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(
+            father_bam, ref_fa, chrom,
+            [("fread1", 30, parent_seq, None)],
+        )
+
+        # Run with a very high per-read threshold — should filter all reads
+        out = os.path.join(tmpdir, "disc_pread")
+        args = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--out-prefix", out, "--min-child-count", "3",
+            "--kmer-size", "5",
+            "--min-distinct-kmers-per-read", "10000",
+        ])
+        run_discovery_pipeline(args)
+        with open(f"{out}.bed") as fh:
+            filtered = [l.strip() for l in fh
+                        if l.strip() and not l.startswith("#")]
+        assert len(filtered) == 0
+
+    def test_discovery_min_distinct_kmers_per_read_default(self, tmpdir):
+        """Default --min-distinct-kmers-per-read is k/4."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        child_seq = list(ref_seq[30:90])
+        child_seq[20] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [
+                ("read1", 30, child_seq, None),
+                ("read2", 30, child_seq, None),
+                ("read3", 30, child_seq, None),
+                ("read4", 30, child_seq, None),
+            ],
+        )
+
+        parent_seq = ref_seq[30:90]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(
+            mother_bam, ref_fa, chrom,
+            [("mread1", 30, parent_seq, None)],
+        )
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(
+            father_bam, ref_fa, chrom,
+            [("fread1", 30, parent_seq, None)],
+        )
+
+        # k=5, so default min_distinct_kmers_per_read = 5//4 = 1
+        out = os.path.join(tmpdir, "disc_default")
+        args = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--out-prefix", out, "--min-child-count", "3",
+            "--kmer-size", "5",
+        ])
+        run_discovery_pipeline(args)
+
+        with open(f"{out}.metrics.json") as fh:
+            metrics = json.load(fh)
+        assert metrics["filters"]["min_distinct_kmers_per_read"] == 1
+
+    def test_discovery_bed_includes_filter_header(self, tmpdir):
+        """BED file should include a #filters header comment."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        child_seq = list(ref_seq[30:90])
+        child_seq[20] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [
+                ("read1", 30, child_seq, None),
+                ("read2", 30, child_seq, None),
+                ("read3", 30, child_seq, None),
+                ("read4", 30, child_seq, None),
+            ],
+        )
+
+        parent_seq = ref_seq[30:90]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(
+            mother_bam, ref_fa, chrom,
+            [("mread1", 30, parent_seq, None)],
+        )
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(
+            father_bam, ref_fa, chrom,
+            [("fread1", 30, parent_seq, None)],
+        )
+
+        out = os.path.join(tmpdir, "disc_fhdr")
+        args = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--out-prefix", out, "--min-child-count", "3",
+            "--kmer-size", "5",
+        ])
+        run_discovery_pipeline(args)
+
+        with open(f"{out}.bed") as fh:
+            header_lines = [l for l in fh if l.startswith("#filters:")]
+        assert len(header_lines) == 1
+        hdr = header_lines[0]
+        assert "min_distinct_kmers_per_read=" in hdr
+        assert "min_supporting_reads=" in hdr
+        assert "min_distinct_kmers=" in hdr
+
     def test_discovery_cluster_distance(self, tmpdir):
         """--cluster-distance is accepted and passed to the pipeline."""
         chrom = "chr1"

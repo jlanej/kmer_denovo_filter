@@ -106,6 +106,13 @@ def parse_args(argv=None):
              "and read coverage BED (default: 3)",
     )
     parser.add_argument(
+        "--min-distinct-kmers-per-read", type=int, default=None,
+        help="Minimum number of distinct proband-unique k-mers a read "
+             "must carry to be retained for region and bedGraph output. "
+             "Applied before --min-supporting-reads and "
+             "--min-bedgraph-reads filters. (default: k/4)",
+    )
+    parser.add_argument(
         "--parent-max-count", type=int, default=0,
         help="Maximum k-mer count in a parent before the k-mer is "
              "considered parental. K-mers with count > this value in "

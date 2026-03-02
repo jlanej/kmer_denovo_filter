@@ -52,12 +52,15 @@ The tool supports two modes:
    found in either parent. The survivors are *proband-unique* k-mers.
 
 4. **Anchor & cluster** – Scan the child BAM/CRAM for reads carrying
-   proband-unique k-mers. Cluster nearby reads (within 500 bp) into
-   candidate genomic regions.
+   proband-unique k-mers. Only reads with at least
+   `--min-distinct-kmers-per-read` (default k/4) distinct proband-unique
+   k-mers are retained. Cluster nearby reads (within
+   `--cluster-distance` bp) into candidate genomic regions. Regions are
+   then filtered by `--min-supporting-reads` and `--min-distinct-kmers`.
 
-5. **Output** – Write a BED file of candidate regions, an informative-reads
-   BAM, an SV breakpoints BEDPE, a metrics JSON file, and a human-readable
-   summary.
+5. **Output** – Write a BED file of candidate regions, k-mer coverage
+   bedGraph, read coverage BED, informative-reads BAM, SV breakpoints
+   BEDPE, a metrics JSON file, and a human-readable summary.
 
 ## Prerequisites
 
@@ -121,11 +124,13 @@ kmer-denovo \
   --threads 8
 ```
 
-This produces five output files (see [Discovery Mode Output](#discovery-mode-output)):
+This produces seven output files (see [Discovery Mode Output](#discovery-mode-output)):
 
 * `discovery_output.bed`
 * `discovery_output.informative.bam`
 * `discovery_output.sv.bedpe`
+* `discovery_output.kmer_coverage.bedgraph`
+* `discovery_output.read_coverage.bed`
 * `discovery_output.metrics.json`
 * `discovery_output.summary.txt`
 
@@ -180,8 +185,10 @@ kmer-denovo \
 | `--ref-jf` | – | Precomputed Jellyfish reference index; defaults to `[ref-fasta].k[kmer-size].jf` |
 | `--min-child-count` | 3 | Minimum k-mer occurrences in the child to be considered a candidate |
 | `--cluster-distance` | 500 | Maximum gap (bp) for merging adjacent regions |
+| `--min-distinct-kmers-per-read` | k/4 | Minimum distinct proband-unique k-mers a read must carry to be retained. Applied before region-level and bedGraph filters (see [Filtering Flow](#discovery-mode-filtering-flow)) |
 | `--min-supporting-reads` | 1 | Minimum number of supporting reads per region |
 | `--min-distinct-kmers` | 1 | Minimum number of distinct proband-unique k-mers per region |
+| `--min-bedgraph-reads` | 3 | Minimum distinct reads at a position for inclusion in the bedGraph and read coverage BED |
 | `--parent-max-count` | 0 | Maximum k-mer count in a parent before the k-mer is considered parental; k-mers with count > this value in either parent are removed |
 | `--candidate-summary` | – | Path to a VCF-mode `summary.txt` for candidate comparison. High-quality *de novos* (DKA\_DKT > 0.25, DKA > 10) are checked against discovered regions |
 | `--sv-bedpe` | – | Output BEDPE file for linked SV breakpoint pairs (default: `[out-prefix].sv.bedpe`) |
@@ -225,12 +232,14 @@ and indexed for direct visualization in IGV.
 
 ### Discovery Mode Output
 
-Discovery mode always produces five files based on `--out-prefix`:
+Discovery mode always produces seven files based on `--out-prefix`:
 
 #### BED file (`{prefix}.bed`)
 
 Tab-delimited file with candidate genomic regions. Each row represents a
-cluster of reads carrying proband-unique k-mers:
+cluster of reads carrying proband-unique k-mers. The file begins with a
+`#filters:` comment line that records the filter parameters used to
+generate the file:
 
 | Column | Description |
 |---|---|
@@ -244,6 +253,27 @@ cluster of reads carrying proband-unique k-mers:
 | max_clip_len | Maximum soft-clip length among reads in this region |
 | unmapped_mates | Number of reads whose mate is unmapped |
 | class | SV classification: `SV`, `AMBIGUOUS`, or `SMALL` |
+
+#### K-mer coverage bedGraph (`{prefix}.kmer_coverage.bedgraph`)
+
+4-column bedGraph of de novo k-mer reference coverage. For each reference
+position covered by at least `--min-bedgraph-reads` distinct informative
+reads, reports the total number of unique k-mer base overlaps across all
+reads. Adjacent positions with identical coverage are merged into
+intervals.
+
+#### Read coverage BED (`{prefix}.read_coverage.bed`)
+
+Per-position read support BED file. For each reference position meeting
+the `--min-bedgraph-reads` threshold, reports:
+
+| Column | Description |
+|---|---|
+| chrom | Chromosome |
+| start | 0-based start coordinate |
+| end | End coordinate (exclusive) |
+| read_count | Number of distinct reads touching the position with at least one de novo k-mer |
+| avg_kmers_per_read | Average number of unique k-mer overlaps per read at this position |
 
 #### Informative BAM (`{prefix}.informative.bam`)
 
@@ -265,6 +295,12 @@ Machine-readable pipeline statistics:
   "informative_reads": 350,
   "unmapped_informative_reads": 5,
   "candidate_regions": 42,
+  "filters": {
+    "min_distinct_kmers_per_read": 7,
+    "min_supporting_reads": 1,
+    "min_distinct_kmers": 1,
+    "min_bedgraph_reads": 3
+  },
   "regions": [
     {
       "chrom": "chr1",
@@ -315,6 +351,43 @@ discordant-pair evidence across discovery regions:
 | sv_type | SV type hint: `INTRA` (intra-chromosomal) or `BND` (inter-chromosomal) |
 
 When no linked breakpoints are found the file contains only the header line.
+
+### Discovery Mode Filtering Flow
+
+Discovery mode applies filters at three levels, in this order:
+
+1. **K-mer–level** (Modules 1–2):
+   * `--min-child-count` — Minimum k-mer occurrences in the child
+     BAM/CRAM (default 3). K-mers below this count are discarded.
+   * Reference subtraction — K-mers present in the reference genome are
+     removed.
+   * `--parent-max-count` — K-mers with count > this value in either
+     parent are removed (default 0, meaning any parental occurrence
+     removes the k-mer).
+
+2. **Read-level** (Module 3, anchoring):
+   * `--min-distinct-kmers-per-read` — A read must carry at least this
+     many distinct proband-unique k-mers to be considered informative.
+     The default is `k/4` (e.g. 7 for k=31).  Reads below the threshold
+     are excluded from **all** downstream outputs: regions, bedGraph,
+     read coverage BED, and the informative BAM's coverage signal.
+
+3. **Region-level** (post-clustering):
+   * `--min-supporting-reads` — Minimum number of reads in a region
+     (default 1).
+   * `--min-distinct-kmers` — Minimum number of distinct proband-unique
+     k-mers in a region (default 1).
+
+   These two filters control which regions appear in the BED file and
+   metrics JSON.
+
+4. **Position-level** (output):
+   * `--min-bedgraph-reads` — Minimum number of distinct reads at a
+     single reference position for inclusion in the bedGraph and read
+     coverage BED (default 3).
+
+The BED file header records the applied filter values so that output
+provenance is self-documenting.
 
 ## Docker
 
