@@ -8,9 +8,15 @@
 - **test_example_output.py** – Regression tests that fail when committed example
   output changes (metrics, summary, VCF annotations). Shows a unified diff on
   failure.
-- **conftest.py** – Shared fixtures, including a session-scoped
-  `generated_example_output` fixture that runs the GIAB pipeline once and
-  returns paths to all output files for reuse by multiple tests.
+- **test_example_output_discovery.py** – Regression tests for discovery-mode
+  output (BED, metrics, summary). Shows a unified diff on failure.
+- **test_integration_comparison.py** – Integration tests comparing VCF-mode
+  candidates to discovery-mode regions, verifying that high-quality de novo
+  candidates are captured within discovered genomic regions.
+- **conftest.py** – Shared fixtures, including session-scoped
+  `generated_example_output` and `generated_discovery_output` fixtures that
+  run the GIAB pipeline once and return paths to all output files for reuse
+  by multiple tests.
 
 ```bash
 pytest tests/test_cli.py tests/test_kmer_utils.py tests/test_pipeline.py -v
@@ -21,19 +27,27 @@ pytest tests/test_cli.py tests/test_kmer_utils.py tests/test_pipeline.py -v
 The CI workflow ([integration-test.yml](../.github/workflows/integration-test.yml))
 runs a full end-to-end pipeline on real data from the
 [Genome in a Bottle](https://www.nist.gov/programs-projects/genome-bottle)
-HG002 trio. It uses 20 curated candidate de novo variants across multiple
-chromosomes with BAM slices for the child (HG002), father (HG003), and
-mother (HG004).
+HG002 trio. The test data includes:
+
+1. **Child-private SNVs** – 20 SNVs present in HG002 but absent from both
+   parents' GIAB v4.2.1 benchmark VCFs, discovered across multiple chromosomes.
+2. **Curated SV-like de novo mutation candidates** – 7 structural variant-like
+   events from Sulovari et al. 2023 (PMC10006329), including deletions,
+   microsatellite expansions, and SV-like events ranging from 34 bp to ~10.6 kb.
+
+Together these yield 40 candidate variants in the VCF with BAM slices for
+the child (HG002), father (HG003), and mother (HG004).
 
 ### Example Output
 
 Up-to-date example output from the latest successful integration test on
 `main` is committed automatically to
-[`tests/example_output/`](example_output/). This directory is refreshed by
-CI on every push to `main`, so it always reflects the current state of the
-tool.
+[`tests/example_output/`](example_output/) (VCF mode) and
+[`tests/example_output_discovery/`](example_output_discovery/) (discovery
+mode). These directories are refreshed by CI on every push to `main`, so
+they always reflect the current state of the tool.
 
-The output files are:
+#### VCF-mode output files
 
 | File | Description |
 |---|---|
@@ -42,27 +56,40 @@ The output files are:
 | `metrics.json` | Summary counts (total variants, unique k-mers, etc.) |
 | `summary.txt` | Human-readable report with per-variant results |
 
+#### Discovery-mode output files
+
+| File | Description |
+|---|---|
+| `giab_discovery.bed` | Candidate regions with read/k-mer counts and SV annotations |
+| `giab_discovery.metrics.json` | Per-region detail with SV classification |
+| `giab_discovery.summary.txt` | Human-readable discovery summary with candidate comparison |
+| `giab_discovery.sv.bedpe` | Linked breakpoint pairs (BEDPE format) |
+
 ### Result Highlights
 
-The GIAB test set contains 20 candidate variants. Key results from the
+The GIAB test set contains 40 candidate variants (20 child-private SNVs +
+20 variants overlapping curated SV-like DNM regions). Key results from the
 example output:
 
-- **11 of 20** candidates are classified as likely de novo (`DKU > 0`).
-- **9 of 20** candidates show no child-unique k-mers and are marked as
+- **24 of 40** candidates are classified as likely de novo (`DKU > 0`).
+- **16 of 40** candidates show no child-unique k-mers and are marked as
   inherited.
-- The average DKU among likely de novo variants is **4.5**, indicating
+- The average DKU among likely de novo variants is **4.0**, indicating
   strong child-unique read support.
-- Parent k-mer counts (`MAX_PKC`, `AVG_PKC`) vary widely, helping
-  distinguish genuine de novo events from regions with high parental
-  background.
-- Metrics show **1,291 total child k-mers** extracted, of which **157**
-  (≈12%) were absent from both parents.
+- The SV-like insertion at chr8:125785997 (43 bp) shows strong de novo
+  signal with DKA=24 and DKA_DKT=0.30.
+- Metrics show **2,446 total child k-mers** extracted, of which **335**
+  (≈14%) were absent from both parents.
+
+Discovery mode identifies **27 candidate regions** from the same data,
+with **3 high-quality candidates** (DKA_DKT > 0.25, DKA > 10) captured
+at 100% rate.
 
 ### Keeping Output Up to Date
 
 The integration test workflow automatically commits updated output to
-`tests/example_output/` after every successful run on the `main` branch.
-This means the example output in this repository always matches the latest
-version of the tool. Workflow artifacts for individual runs are also
-available in the
+`tests/example_output/` and `tests/example_output_discovery/` after every
+successful run on the `main` branch. This means the example output in this
+repository always matches the latest version of the tool. Workflow artifacts
+for individual runs are also available in the
 [Actions tab](../../actions/workflows/integration-test.yml).

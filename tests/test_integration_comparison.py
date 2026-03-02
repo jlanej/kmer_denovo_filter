@@ -38,16 +38,17 @@ class TestParseCandidateSummary:
         summary_path = os.path.join(EXAMPLE_OUTPUT_DIR, "summary.txt")
         candidates = _parse_candidate_summary(summary_path)
 
-        # From the summary, only two variants meet both criteria:
-        #   chr11:55003995 T>C  DKA=24 DKA_DKT=0.4528
-        #   chr11:55008577 C>T  DKA=13 DKA_DKT=0.3824
-        assert len(candidates) == 2
+        # From the summary, three variants meet both criteria:
+        #   chr8:125785997 A>AGAG…  DKA=24 DKA_DKT=0.3000  (SV-like insertion)
+        #   chr11:55003995 T>C      DKA=24 DKA_DKT=0.4528
+        #   chr11:55008577 C>T      DKA=13 DKA_DKT=0.3824
+        assert len(candidates) == 3
 
         chroms = {c["chrom"] for c in candidates}
-        assert chroms == {"chr11"}
+        assert chroms == {"chr8", "chr11"}
 
         positions = {c["pos"] for c in candidates}
-        assert positions == {55003995, 55008577}
+        assert positions == {125785997, 55003995, 55008577}
 
     def test_candidate_fields(self):
         """Each candidate should have all expected fields."""
@@ -159,10 +160,10 @@ class TestIntegrationComparison:
 
         assert "candidate_comparison" in metrics
         comp = metrics["candidate_comparison"]
-        assert comp["hq_candidates"] == 2
-        assert comp["captured"] == 2
+        assert comp["hq_candidates"] == 3
+        assert comp["captured"] == 3
         assert comp["capture_rate"] == 1.0
-        assert len(comp["candidates"]) == 2
+        assert len(comp["candidates"]) == 3
 
     def test_all_hq_candidates_captured(
         self, generated_discovery_output,
