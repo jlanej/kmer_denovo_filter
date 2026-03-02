@@ -10,47 +10,41 @@ K-mer Filtering
 
 Region Counts
 ----------------------------------------
-  Candidate regions:                 27
-  Total informative reads:          299
-    (unmapped informative):           20
+  Candidate regions:                 21
+  Total informative reads:          195
+    (unmapped informative):           11
 
 Region Statistics
 ----------------------------------------
-  Reads/region   mean:   10.3   median:    7   max:   37
-  K-mers/region  mean:   28.0   median:   22   max:   79
-  Region size    mean:    716 bp   median:  724 bp   max: 1230 bp
+  Reads/region   mean:    8.8   median:    3   max:   34
+  K-mers/region  mean:   32.5   median:   30   max:   79
+  Region size    mean:    474 bp   median:  431 bp   max:  943 bp
 
 Per-Region Results
 ------------------------------------------------------------------------------------------------------------------------
   Region                                  Size  Reads  Unique K-mers  Split  Disc  MaxClip  UnmapMate      Class
   ------                                  ----  -----  -------------  -----  ----  -------  ---------      -----
-  chr10:50011260-50011537                 278bp      4              5      0     0       52          0      SMALL
-  chr10:50012052-50012428                 377bp      3             22      0     0        3          0      SMALL
-  chr10:50023695-50024902                1208bp      7             28      0     0       44          0      SMALL
-  chr11:54999700-55000801                1102bp      7             37      0     0        7          0      SMALL
-  chr11:55003557-55004560                1004bp     32             53      0     0       58          1  AMBIGUOUS
-  chr11:55006492-55007423                 932bp      9             58      0     0       26          0      SMALL
-  chr11:55008330-55009053                 724bp     32             62      0     0       27          0      SMALL
+  chr10:50012180-50012428                 249bp      1             19      0     0        0          0      SMALL
+  chr10:50023695-50024031                 337bp      3             13      0     0        4          0      SMALL
+  chr10:50024543-50024749                 207bp      1             10      0     0       44          0      SMALL
+  chr11:54999700-55000452                 753bp      4             36      0     0        7          0      SMALL
+  chr11:55003557-55004234                 678bp     26             50      0     0       54          0      SMALL
+  chr11:55006832-55007423                 592bp      5             53      0     0        0          0      SMALL
+  chr11:55008334-55008814                 481bp     23             62      0     0       14          0      SMALL
   chr12:60008502-60008907                 406bp      3             18      0     0        1          0      SMALL
-  chr14:23280026-23280906                 881bp     10             16      0     1       29          5         SV
-  chr15:35009230-35010147                 918bp      5              9      0     0       14          0      SMALL
-  chr17:53339952-53341164                1213bp     21             40      0     1      108          1  AMBIGUOUS
-  chr18:30028501-30028931                 431bp      8             13      0     0       32          0      SMALL
-  chr18:62804674-62805489                 816bp     14             42      0     0       34          0      SMALL
-  chr19:15035185-15036414                1230bp     10             24      0     0       95          1  AMBIGUOUS
-  chr19:15041207-15041997                 791bp      3              6      0     0      160          0      SMALL
+  chr17:53340222-53341164                 943bp     18             39      0     0      108          1  AMBIGUOUS
+  chr18:30028534-30028794                 261bp      3             11      0     0        1          0      SMALL
+  chr18:62804895-62805439                 545bp      7             39      0     0       27          0      SMALL
+  chr19:15035922-15036215                 294bp      3             18      0     0       52          1  AMBIGUOUS
   chr22:25046133-25046424                 292bp      3              7      0     0        0          0      SMALL
-  chr3:85552298-85552639                  342bp      4              7      0     0        9          0      SMALL
-  chr5:97089076-97089510                  435bp     22             30      0     0       50          0      SMALL
-  chr7:142785588-142786223                636bp      9             66      0     1       94          2         SV
+  chr5:97089091-97089510                  420bp     22             30      0     0       50          0      SMALL
+  chr7:142785588-142786223                636bp      7             66      0     0       94          1  AMBIGUOUS
   chr7:142788519-142789264                746bp      3             37      0     0       59          1  AMBIGUOUS
   chr7:142792552-142792982                431bp      2              9      0     0        0          1  AMBIGUOUS
-  chr7:142796830-142797423                594bp     13             79      0     1       98          0  AMBIGUOUS
-  chr8:40002916-40003477                  562bp      4             15      0     0       46          0      SMALL
-  chr8:40008046-40008215                  170bp      3              1      0     0      113          0      SMALL
-  chr8:40036856-40037411                  556bp      6              7      0     0       55          0      SMALL
-  chr8:70042206-70043420                 1215bp      5              8      0     0       54          0      SMALL
-  chr8:125785443-125786483               1041bp     37             56      0     0       78          0      SMALL
+  chr7:142796830-142797423                594bp     14             79      0     2       98          0         SV
+  chr8:40002916-40003116                  201bp      1             12      0     0       46          0      SMALL
+  chr8:70042838-70043032                  195bp      1             21      0     0       55          0      SMALL
+  chr8:125785801-125786483                683bp     34             53      0     0       54          0      SMALL
 Candidate Comparison (DKA_DKT > 0.25, DKA > 10)
 --------------------------------------------------------------------------------
   High-quality candidates:            3
@@ -58,23 +52,23 @@ Candidate Comparison (DKA_DKT > 0.25, DKA > 10)
 
   Candidate                        DKA   DKA_DKT                               Region
   ---------                        ---   -------                               ------
-  chr8:125785997 A>AGAGTTACAATGAGTGTTACTCTGAAGGAGGATGGACTTTAATG    24    0.3875             chr8:125785443-125786483
-  chr11:55003995 T>C                24    0.4528              chr11:55003557-55004560
-  chr11:55008577 C>T                13    0.3824              chr11:55008330-55009053
+  chr8:125785997 A>AGAGTTACAATGAGTGTTACTCTGAAGGAGGATGGACTTTAATG    24    0.3875             chr8:125785801-125786483
+  chr11:55003995 T>C                24    0.4528              chr11:55003557-55004234
+  chr11:55008577 C>T                13    0.3824              chr11:55008334-55008814
 
 Curated DNM Region Evaluation (Sulovari et al. 2023)
 --------------------------------------------------------------------------------
   Curated DNM loci:                   7
-  Detected by discovery:              7 / 7 (100.0%)
+  Detected by discovery:              5 / 7 (71.4%)
 
   Locus                                    Event     Size  Reads  Kmers  Signal  MaxClip      Class         Status
   -----                                    -----     ----  -----  -----  ------  -------      -----         ------
-  chr17:53340465                        deletion    107bp     21     40  0.0330      108  AMBIGUOUS       DETECTED
-  chr14:23280711        microsatellite_expansion        –     10     16  0.0182       29         SV       DETECTED
-  chr3:85552367                          sv_like     64bp      4      7  0.0205        9      SMALL       DETECTED
-  chr5:97089276                          sv_like     43bp     22     30  0.0690       50      SMALL       DETECTED
-  chr8:125785998                         sv_like     43bp     37     56  0.0538       78      SMALL       DETECTED
-  chr18:62805217                         sv_like     34bp     14     42  0.0515       34      SMALL       DETECTED
-  chr7:142786222                        deletion  10607bp     14    112  0.0100       94         SV       DETECTED
+  chr17:53340465                        deletion    107bp     18     39  0.0414      108  AMBIGUOUS       DETECTED
+  chr14:23280711        microsatellite_expansion        –      0      0  0.0000        0       NONE   NOT_DETECTED
+  chr3:85552367                          sv_like     64bp      0      0  0.0000        0       NONE   NOT_DETECTED
+  chr5:97089276                          sv_like     43bp     22     30  0.0714       50      SMALL       DETECTED
+  chr8:125785998                         sv_like     43bp     34     53  0.0776       54      SMALL       DETECTED
+  chr18:62805217                         sv_like     34bp      7     39  0.0716       27      SMALL       DETECTED
+  chr7:142786222                        deletion  10607bp     12    112  0.0100       94  AMBIGUOUS       DETECTED
 
 ============================================================

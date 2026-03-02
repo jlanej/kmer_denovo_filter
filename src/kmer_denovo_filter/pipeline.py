@@ -960,13 +960,17 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
 
 _worker_automaton = None
 _worker_kmer_size = None
+_worker_min_distinct_kmers_per_read = 1
 
 
-def _init_scan_worker(proband_unique_kmers, kmer_size):
+def _init_scan_worker(proband_unique_kmers, kmer_size,
+                      min_distinct_kmers_per_read=1):
     """Initializer for per-contig scan workers; builds a shared automaton."""
     global _worker_automaton, _worker_kmer_size
+    global _worker_min_distinct_kmers_per_read
     _worker_automaton = build_kmer_automaton(proband_unique_kmers)
     _worker_kmer_size = kmer_size
+    _worker_min_distinct_kmers_per_read = min_distinct_kmers_per_read
 
 
 def _collect_kmer_ref_positions(read, kmer_hit_indices, kmer_size):
@@ -1016,6 +1020,7 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
     """
     automaton = _worker_automaton
     kmer_size = _worker_kmer_size
+    min_dk_per_read = _worker_min_distinct_kmers_per_read
     bam = pysam.AlignmentFile(
         child_bam, reference_filename=ref_fasta if ref_fasta else None,
     )
@@ -1056,6 +1061,11 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
             for _end_idx, canonical_kmer in automaton.iter(seq):
                 unique_in_read.add(canonical_kmer)
                 kmer_hit_indices.add(_end_idx - kmer_size + 1)
+
+        # Per-read filter: require a minimum number of distinct kmers
+        if len(unique_in_read) < min_dk_per_read:
+            unique_in_read = set()
+            kmer_hit_indices = set()
 
         dedup_key = (read.query_name, read.is_supplementary)
         if unique_in_read and dedup_key not in reads_seen:
@@ -1108,7 +1118,8 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
 
 
 def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
-                        kmer_size, merge_distance=500, threads=1):
+                        kmer_size, merge_distance=500, threads=1,
+                        min_distinct_kmers_per_read=1):
     """Module 3: Find reads containing proband-unique k-mers and cluster regions.
 
     Scans **all** primary, non-duplicate child reads — including unmapped and
@@ -1117,6 +1128,12 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     aligner's confidence should not gate discovery.  Mapped reads with
     proband-unique k-mers are clustered into genomic windows; unmapped
     informative reads are tracked separately.
+
+    A per-read filter is applied early: reads with fewer than
+    *min_distinct_kmers_per_read* distinct proband-unique k-mers are
+    discarded before region clustering and coverage tracking.  This
+    filter runs **before** the region-level ``--min-supporting-reads``
+    and ``--min-bedgraph-reads`` filters.
 
     An Aho-Corasick automaton is built from the proband-unique k-mers
     (both forward and reverse-complement forms) so that each read is
@@ -1132,6 +1149,9 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         merge_distance: Maximum gap for merging adjacent regions.
         threads: Number of parallel workers for chromosome-level
             scanning (default 1 = single-threaded).
+        min_distinct_kmers_per_read: Minimum number of distinct
+            proband-unique k-mers a read must carry to be retained
+            (default 1).
 
     Returns:
         regions: List of (chrom, start, end) tuples (0-based, half-open BED).
@@ -1178,7 +1198,8 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=n_workers,
             initializer=_init_scan_worker,
-            initargs=(proband_unique_kmers, kmer_size),
+            initargs=(proband_unique_kmers, kmer_size,
+                      min_distinct_kmers_per_read),
         ) as executor:
             futures = {
                 executor.submit(_scan_contig_for_hits, *t): t[2]
@@ -1256,6 +1277,11 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                 for _end_idx, canonical_kmer in automaton.iter(seq):
                     unique_in_read.add(canonical_kmer)
                     kmer_hit_indices.add(_end_idx - kmer_size + 1)
+
+            # Per-read filter: require a minimum number of distinct kmers
+            if len(unique_in_read) < min_distinct_kmers_per_read:
+                unique_in_read = set()
+                kmer_hit_indices = set()
 
             dedup_key = (read.query_name, read.is_supplementary)
             if unique_in_read and dedup_key not in reads_seen:
@@ -1369,9 +1395,23 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
 
 
 def _write_bed(regions, region_reads, region_kmers, bed_path,
-               region_annotations=None):
-    """Write clustered regions to a BED file with read/k-mer counts and SV annotations."""
+               region_annotations=None, filters=None):
+    """Write clustered regions to a BED file with read/k-mer counts and SV annotations.
+
+    Args:
+        regions: List of (chrom, start, end) region tuples.
+        region_reads: Dict mapping region tuple to set of read names.
+        region_kmers: Dict mapping region tuple to set of k-mer strings.
+        bed_path: Output BED file path.
+        region_annotations: Optional dict of SV annotations per region.
+        filters: Optional dict of applied filter parameters to record
+            in the file header (e.g. min_supporting_reads,
+            min_distinct_kmers, min_distinct_kmers_per_read).
+    """
     with open(bed_path, "w") as fh:
+        if filters:
+            parts = " ".join(f"{k}={v}" for k, v in sorted(filters.items()))
+            fh.write(f"#filters: {parts}\n")
         fh.write(
             "#chrom\tstart\tend\treads\tunique_kmers"
             "\tsplit_reads\tdiscordant_pairs"
@@ -2291,6 +2331,9 @@ def run_discovery_pipeline(args):
     bedgraph_path = f"{out_prefix}.kmer_coverage.bedgraph"
     read_cov_bed_path = f"{out_prefix}.read_coverage.bed"
     min_bedgraph_reads = getattr(args, "min_bedgraph_reads", 3)
+    min_dk_per_read = getattr(args, "min_distinct_kmers_per_read", None)
+    if min_dk_per_read is None:
+        min_dk_per_read = max(1, args.kmer_size // 4)
 
     # ── Configuration summary ──────────────────────────────────────
     logger.info("=" * 60)
@@ -2315,6 +2358,7 @@ def run_discovery_pipeline(args):
     logger.info("  Min child count:   %d", args.min_child_count)
     logger.info("  Min base quality:  %d", args.min_baseq)
     logger.info("  Min mapping qual:  %d", args.min_mapq)
+    logger.info("  Min distinct kmers/read: %d", min_dk_per_read)
     logger.info("  Threads:           %d", args.threads)
     logger.info("=" * 60)
 
@@ -2442,6 +2486,7 @@ def run_discovery_pipeline(args):
             args.child, args.ref_fasta, proband_unique_kmers,
             args.kmer_size, merge_distance=args.cluster_distance,
             threads=args.threads,
+            min_distinct_kmers_per_read=min_dk_per_read,
         )
     )
     logger.info(
@@ -2481,8 +2526,14 @@ def run_discovery_pipeline(args):
     )
     _classify_regions(regions, region_annotations, sv_links)
 
+    bed_filters = {
+        "min_distinct_kmers_per_read": min_dk_per_read,
+        "min_supporting_reads": min_reads,
+        "min_distinct_kmers": min_kmers,
+    }
     _write_bed(regions, region_reads, region_kmers, bed_path,
-               region_annotations=region_annotations)
+               region_annotations=region_annotations,
+               filters=bed_filters)
 
     _write_bedgraph(kmer_coverage, bedgraph_path,
                     read_coverage=read_coverage,
@@ -2524,6 +2575,12 @@ def run_discovery_pipeline(args):
         "informative_reads": total_informative,
         "unmapped_informative_reads": unmapped_informative,
         "candidate_regions": len(regions),
+        "filters": {
+            "min_distinct_kmers_per_read": min_dk_per_read,
+            "min_supporting_reads": min_reads,
+            "min_distinct_kmers": min_kmers,
+            "min_bedgraph_reads": min_bedgraph_reads,
+        },
         "regions": [
             {
                 "chrom": chrom,

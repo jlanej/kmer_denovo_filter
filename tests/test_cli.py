@@ -200,3 +200,13 @@ class TestParseArgs:
         assert args.min_supporting_reads == 4
         assert args.min_distinct_kmers == 3
         assert args.parent_max_count == 1
+
+    def test_min_distinct_kmers_per_read_default(self):
+        args = parse_args(self.REQUIRED_ARGS)
+        assert args.min_distinct_kmers_per_read is None
+
+    def test_min_distinct_kmers_per_read_custom(self):
+        args = parse_args(
+            self.REQUIRED_ARGS + ["--min-distinct-kmers-per-read", "5"]
+        )
+        assert args.min_distinct_kmers_per_read == 5
