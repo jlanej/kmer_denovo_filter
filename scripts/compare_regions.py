@@ -54,10 +54,19 @@ def load_bedgraph(path):
 
 
 def load_discovery_bed(path):
-    """Return a dict mapping chrom -> list of (start, end) tuples.
+    """Return a dict mapping chrom -> list of region dicts.
 
+    Each region dict has keys: start, end, reads, unique_kmers, split_reads,
+    discordant_pairs, max_clip_len, unmapped_mates, class.
     Positions are 0-based, half-open [start, end).
     """
+
+    def _int(val, default=0):
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return default
+
     regions = collections.defaultdict(list)
     with open(path) as fh:
         for line in fh:
@@ -65,8 +74,17 @@ def load_discovery_bed(path):
             if not line or line.startswith("#"):
                 continue
             parts = line.split("\t")
-            chrom, start, end = parts[0], int(parts[1]), int(parts[2])
-            regions[chrom].append((start, end))
+            regions[parts[0]].append({
+                "start": int(parts[1]),
+                "end": int(parts[2]),
+                "reads": _int(parts[3] if len(parts) > 3 else None),
+                "unique_kmers": _int(parts[4] if len(parts) > 4 else None),
+                "split_reads": _int(parts[5] if len(parts) > 5 else None),
+                "discordant_pairs": _int(parts[6] if len(parts) > 6 else None),
+                "max_clip_len": _int(parts[7] if len(parts) > 7 else None),
+                "unmapped_mates": _int(parts[8] if len(parts) > 8 else None),
+                "class": parts[9].strip() if len(parts) > 9 else "UNKNOWN",
+            })
     return dict(regions)
 
 
@@ -117,11 +135,11 @@ def _has_bedgraph_signal(chrom, pos0, bedgraph, window=0):
 
 
 def _overlapping_discovery_regions(chrom, pos0, discovery, window=0):
-    """Return list of discovery (start, end) tuples that overlap pos0 ± window."""
+    """Return list of discovery region dicts that overlap pos0 ± window."""
     regions = discovery.get(chrom, [])
     q_start = pos0 - window
     q_end = pos0 + window + 1
-    return [(s, e) for s, e in regions if s < q_end and e > q_start]
+    return [r for r in regions if r["start"] < q_end and r["end"] > q_start]
 
 
 def _vcf_variants_in_region(chrom, reg_start, reg_end, variants_by_chrom):
@@ -171,21 +189,21 @@ def compare(bedgraph, discovery, variants, window=0):
         elif has_signal and not overlaps:
             vcf_only.append({"variant": v})
         else:
-            no_signal.append({"variant": v, "has_discovery": bool(overlaps)})
+            no_signal.append({
+                "variant": v,
+                "has_discovery": bool(overlaps),
+                "discovery_regions": overlaps,
+            })
 
     # Find discovery regions with no VCF variant inside
     discovery_only = []
     for chrom, regions in sorted(discovery.items()):
-        for reg_start, reg_end in regions:
+        for region in regions:
             inside = _vcf_variants_in_region(
-                chrom, reg_start, reg_end, variants_by_chrom,
+                chrom, region["start"], region["end"], variants_by_chrom,
             )
             if not inside:
-                discovery_only.append({
-                    "chrom": chrom,
-                    "start": reg_start,
-                    "end": reg_end,
-                })
+                discovery_only.append({"chrom": chrom, **region})
 
     return {
         "concordant": concordant,
@@ -201,6 +219,16 @@ def compare(bedgraph, discovery, variants, window=0):
 
 def _fmt_variant(v):
     return f"{v['chrom']}:{v['pos1']} {v['ref']}>{v['alt']}"
+
+
+def _fmt_region_stats(region):
+    """Return a compact stats string for a discovery region."""
+    return (
+        f"reads={region['reads']}"
+        f"  unique_kmers={region['unique_kmers']}"
+        f"  split_reads={region['split_reads']}"
+        f"  class={region['class']}"
+    )
 
 
 def format_summary(result, window=0):
@@ -223,14 +251,14 @@ def format_summary(result, window=0):
     lines.append("-" * 60)
     for item in concordant:
         v = item["variant"]
-        regions_str = ", ".join(
-            f"{v['chrom']}:{s}-{e}" for s, e in item["regions"]
-        )
-        lines.append(
-            f"  {_fmt_variant(v)}"
-            f"  DKU={v['dku']}  DKA={v['dka']}"
-            f"  region={regions_str}"
-        )
+        for region in item["regions"]:
+            region_coord = f"{v['chrom']}:{region['start']}-{region['end']}"
+            lines.append(
+                f"  {_fmt_variant(v)}"
+                f"  DKU={v['dku']}  DKA={v['dka']}"
+                f"  region={region_coord}"
+                f"  {_fmt_region_stats(region)}"
+            )
     if not concordant:
         lines.append("  (none)")
     lines.append("")
@@ -257,11 +285,20 @@ def format_summary(result, window=0):
     lines.append("-" * 60)
     for item in no_signal:
         v = item["variant"]
-        disc = "  +discovery" if item["has_discovery"] else ""
-        lines.append(
-            f"  {_fmt_variant(v)}"
-            f"  DKU={v['dku']}  DKA={v['dka']}{disc}"
-        )
+        if item["has_discovery"]:
+            for region in item["discovery_regions"]:
+                region_coord = f"{v['chrom']}:{region['start']}-{region['end']}"
+                lines.append(
+                    f"  {_fmt_variant(v)}"
+                    f"  DKU={v['dku']}  DKA={v['dka']}"
+                    f"  +discovery={region_coord}"
+                    f"  {_fmt_region_stats(region)}"
+                )
+        else:
+            lines.append(
+                f"  {_fmt_variant(v)}"
+                f"  DKU={v['dku']}  DKA={v['dka']}"
+            )
     if not no_signal:
         lines.append("  (none)")
     lines.append("")
@@ -273,8 +310,9 @@ def format_summary(result, window=0):
     lines.append("-" * 60)
     for item in disc_only:
         lines.append(
-            f"  {item['chrom']}:{item['start']}-{item['end']}  "
-            f"({item['end'] - item['start']} bp)"
+            f"  {item['chrom']}:{item['start']}-{item['end']}"
+            f"  ({item['end'] - item['start']} bp)"
+            f"  {_fmt_region_stats(item)}"
         )
     if not disc_only:
         lines.append("  (none)")

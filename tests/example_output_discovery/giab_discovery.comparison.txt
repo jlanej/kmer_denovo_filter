@@ -6,11 +6,11 @@
 CONCORDANT  (5 variants)
   VCF variant has k-mer signal AND overlaps a discovery region
 ------------------------------------------------------------
-  chr11:55003995 T>C  DKU=24  DKA=24  region=chr11:55003556-55004560
-  chr11:55007083 G>T  DKU=2  DKA=2  region=chr11:55006491-55007423
-  chr11:55007104 G>T  DKU=2  DKA=2  region=chr11:55006491-55007423
-  chr11:55008577 C>T  DKU=13  DKA=13  region=chr11:55008329-55009053
-  chr18:30028717 G>T  DKU=0  DKA=0  region=chr18:30028500-30028931
+  chr11:55003995 T>C  DKU=24  DKA=24  region=chr11:55003556-55004560  reads=32  unique_kmers=53  split_reads=0  class=AMBIGUOUS
+  chr11:55007083 G>T  DKU=2  DKA=2  region=chr11:55006491-55007423  reads=9  unique_kmers=58  split_reads=0  class=SMALL
+  chr11:55007104 G>T  DKU=2  DKA=2  region=chr11:55006491-55007423  reads=9  unique_kmers=58  split_reads=0  class=SMALL
+  chr11:55008577 C>T  DKU=13  DKA=13  region=chr11:55008329-55009053  reads=32  unique_kmers=62  split_reads=0  class=SMALL
+  chr18:30028717 G>T  DKU=0  DKA=0  region=chr18:30028500-30028931  reads=8  unique_kmers=13  split_reads=0  class=SMALL
 
 VCF_ONLY  (0 variants)
   VCF variant has k-mer signal but no overlapping discovery region
@@ -20,39 +20,39 @@ VCF_ONLY  (0 variants)
 NO_SIGNAL  (17 variants)
   VCF variant has no bedGraph k-mer signal at its position
 ------------------------------------------------------------
-  chr8:40003391 A>T  DKU=1  DKA=1  +discovery
+  chr8:40003391 A>T  DKU=1  DKA=1  +discovery=chr8:40002915-40003477  reads=4  unique_kmers=15  split_reads=0  class=SMALL
   chr8:40008009 A>G  DKU=0  DKA=0
-  chr8:40037154 A>C  DKU=0  DKA=0  +discovery
+  chr8:40037154 A>C  DKU=0  DKA=0  +discovery=chr8:40036855-40037411  reads=6  unique_kmers=7  split_reads=0  class=SMALL
   chr8:70039608 C>T  DKU=0  DKA=0
-  chr8:70042671 C>G  DKU=1  DKA=0  +discovery
-  chr8:125785997 A>AGAGTTACAATGAGTGTTACTCTGAAGGAGGATGGACTTTAATG  DKU=31  DKA=24  +discovery
+  chr8:70042671 C>G  DKU=1  DKA=0  +discovery=chr8:70042205-70043420  reads=5  unique_kmers=8  split_reads=0  class=SMALL
+  chr8:125785997 A>AGAGTTACAATGAGTGTTACTCTGAAGGAGGATGGACTTTAATG  DKU=31  DKA=24  +discovery=chr8:125785442-125786483  reads=37  unique_kmers=56  split_reads=0  class=SMALL
   chr10:50011697 T>C  DKU=1  DKA=1
   chr10:50012575 A>G  DKU=1  DKA=1
-  chr10:50024332 C>T  DKU=0  DKA=0  +discovery
-  chr11:55000408 C>T  DKU=0  DKA=0  +discovery
+  chr10:50024332 C>T  DKU=0  DKA=0  +discovery=chr10:50023694-50024902  reads=7  unique_kmers=28  split_reads=0  class=SMALL
+  chr11:55000408 C>T  DKU=0  DKA=0  +discovery=chr11:54999699-55000801  reads=7  unique_kmers=37  split_reads=0  class=SMALL
   chr12:60008175 A>C  DKU=0  DKA=0
-  chr15:35009535 C>T  DKU=1  DKA=1  +discovery
-  chr18:62805216 A>ATAATATACACTGCATAGGTTATACATATACAGTG  DKU=0  DKA=0  +discovery
+  chr15:35009535 C>T  DKU=1  DKA=1  +discovery=chr15:35009229-35010147  reads=5  unique_kmers=9  split_reads=0  class=SMALL
+  chr18:62805216 A>ATAATATACACTGCATAGGTTATACATATACAGTG  DKU=0  DKA=0  +discovery=chr18:62804673-62805489  reads=14  unique_kmers=42  split_reads=0  class=SMALL
   chr19:15018720 G>A  DKU=0  DKA=0
-  chr19:15035863 G>T  DKU=0  DKA=0  +discovery
-  chr19:15041681 C>T  DKU=1  DKA=1  +discovery
-  chr22:25046402 T>C  DKU=2  DKA=1  +discovery
+  chr19:15035863 G>T  DKU=0  DKA=0  +discovery=chr19:15035184-15036414  reads=10  unique_kmers=24  split_reads=0  class=AMBIGUOUS
+  chr19:15041681 C>T  DKU=1  DKA=1  +discovery=chr19:15041206-15041997  reads=3  unique_kmers=6  split_reads=0  class=SMALL
+  chr22:25046402 T>C  DKU=2  DKA=1  +discovery=chr22:25046132-25046424  reads=3  unique_kmers=7  split_reads=0  class=SMALL
 
 DISCOVERY_ONLY  (12 regions)
   Discovery region has no overlapping VCF variant
 ------------------------------------------------------------
-  chr10:50011259-50011537  (278 bp)
-  chr10:50012051-50012428  (377 bp)
-  chr12:60008501-60008907  (406 bp)
-  chr14:23280025-23280906  (881 bp)
-  chr17:53339951-53341164  (1213 bp)
-  chr3:85552297-85552639  (342 bp)
-  chr5:97089075-97089510  (435 bp)
-  chr7:142785587-142786223  (636 bp)
-  chr7:142788518-142789264  (746 bp)
-  chr7:142792551-142792982  (431 bp)
-  chr7:142796829-142797423  (594 bp)
-  chr8:40008045-40008215  (170 bp)
+  chr10:50011259-50011537  (278 bp)  reads=4  unique_kmers=5  split_reads=0  class=SMALL
+  chr10:50012051-50012428  (377 bp)  reads=3  unique_kmers=22  split_reads=0  class=SMALL
+  chr12:60008501-60008907  (406 bp)  reads=3  unique_kmers=18  split_reads=0  class=SMALL
+  chr14:23280025-23280906  (881 bp)  reads=10  unique_kmers=16  split_reads=0  class=SV
+  chr17:53339951-53341164  (1213 bp)  reads=21  unique_kmers=40  split_reads=0  class=AMBIGUOUS
+  chr3:85552297-85552639  (342 bp)  reads=4  unique_kmers=7  split_reads=0  class=SMALL
+  chr5:97089075-97089510  (435 bp)  reads=22  unique_kmers=30  split_reads=0  class=SMALL
+  chr7:142785587-142786223  (636 bp)  reads=9  unique_kmers=66  split_reads=0  class=SV
+  chr7:142788518-142789264  (746 bp)  reads=3  unique_kmers=37  split_reads=0  class=AMBIGUOUS
+  chr7:142792551-142792982  (431 bp)  reads=2  unique_kmers=9  split_reads=0  class=AMBIGUOUS
+  chr7:142796829-142797423  (594 bp)  reads=13  unique_kmers=79  split_reads=0  class=AMBIGUOUS
+  chr8:40008045-40008215  (170 bp)  reads=3  unique_kmers=1  split_reads=0  class=SMALL
 
 ============================================================
   Summary

@@ -57,7 +57,7 @@ def _write_bed_file(path, regions):
     """Write a minimal BED file from [(chrom, start, end)] tuples."""
     with open(path, "w") as fh:
         for chrom, start, end in regions:
-            fh.write(f"{chrom}\t{start}\t{end}\t.\t.\t.\t.\t.\t.\t.\n")
+            fh.write(f"{chrom}\t{start}\t{end}\t0\t0\t0\t0\t0\t0\tSMALL\n")
 
 
 def _write_vcf_gz(path, variants):
@@ -149,8 +149,11 @@ class TestLoadDiscoveryBed:
             ("chr2", 500, 600),
         ])
         result = load_discovery_bed(str(bed))
-        assert (100, 200) in result["chr1"]
-        assert (500, 600) in result["chr2"]
+        assert len(result["chr1"]) == 1
+        assert result["chr1"][0]["start"] == 100
+        assert result["chr1"][0]["end"] == 200
+        assert result["chr2"][0]["start"] == 500
+        assert result["chr2"][0]["end"] == 600
 
     def test_empty_file(self, tmp_path):
         bed = tmp_path / "empty.bed"
@@ -160,9 +163,28 @@ class TestLoadDiscoveryBed:
 
     def test_comment_lines_skipped(self, tmp_path):
         bed = tmp_path / "commented.bed"
-        bed.write_text("#header\nchr1\t0\t100\t.\t.\t.\t.\t.\t.\t.\n")
+        bed.write_text("#header\nchr1\t0\t100\t4\t5\t0\t0\t52\t0\tSMALL\n")
         result = load_discovery_bed(str(bed))
-        assert result["chr1"] == [(0, 100)]
+        assert len(result["chr1"]) == 1
+        r = result["chr1"][0]
+        assert r["start"] == 0
+        assert r["end"] == 100
+        assert r["reads"] == 4
+        assert r["unique_kmers"] == 5
+        assert r["class"] == "SMALL"
+
+    def test_all_columns_loaded(self, tmp_path):
+        bed = tmp_path / "full.bed"
+        bed.write_text("chr1\t1000\t2000\t7\t28\t3\t1\t55\t2\tSV\n")
+        result = load_discovery_bed(str(bed))
+        r = result["chr1"][0]
+        assert r["reads"] == 7
+        assert r["unique_kmers"] == 28
+        assert r["split_reads"] == 3
+        assert r["discordant_pairs"] == 1
+        assert r["max_clip_len"] == 55
+        assert r["unmapped_mates"] == 2
+        assert r["class"] == "SV"
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +233,13 @@ class TestCompare:
         """Dict from [(chrom, start, end)]."""
         disc = {}
         for chrom, start, end in regions:
-            disc.setdefault(chrom, []).append((start, end))
+            disc.setdefault(chrom, []).append({
+                "start": start, "end": end,
+                "reads": 0, "unique_kmers": 0,
+                "split_reads": 0, "discordant_pairs": 0,
+                "max_clip_len": 0, "unmapped_mates": 0,
+                "class": "SMALL",
+            })
         return disc
 
     def _make_variants(self, records):
@@ -264,9 +292,10 @@ class TestCompare:
 
         result = compare(bg, disc, variants)
         assert len(result["discovery_only"]) == 1
-        assert result["discovery_only"][0] == {
-            "chrom": "chr1", "start": 500, "end": 600,
-        }
+        item = result["discovery_only"][0]
+        assert item["chrom"] == "chr1"
+        assert item["start"] == 500
+        assert item["end"] == 600
 
     def test_window_expands_overlap(self):
         """A window parameter extends the overlap check around the VCF position."""
@@ -342,7 +371,13 @@ class TestFormatSummary:
                 "chrom": "chr1", "pos1": 101, "ref": "A", "alt": "T",
                 "dku": 5, "dka": 4,
             },
-            "regions": [(50, 200)],
+            "regions": [{
+                "start": 50, "end": 200,
+                "reads": 3, "unique_kmers": 7,
+                "split_reads": 0, "discordant_pairs": 0,
+                "max_clip_len": 0, "unmapped_mates": 0,
+                "class": "SMALL",
+            }],
         })
         summary = format_summary(result)
         assert "chr1:101 A>T" in summary
@@ -350,9 +385,13 @@ class TestFormatSummary:
 
     def test_discovery_only_region_appears(self):
         result = self._minimal_result()
-        result["discovery_only"].append(
-            {"chrom": "chr2", "start": 500, "end": 800},
-        )
+        result["discovery_only"].append({
+            "chrom": "chr2", "start": 500, "end": 800,
+            "reads": 4, "unique_kmers": 10,
+            "split_reads": 0, "discordant_pairs": 0,
+            "max_clip_len": 0, "unmapped_mates": 0,
+            "class": "SMALL",
+        })
         summary = format_summary(result)
         assert "chr2:500-800" in summary
 
@@ -367,11 +406,21 @@ class TestFormatSummary:
                 "chrom": "chr1", "pos1": 100, "ref": "A", "alt": "T",
                 "dku": 1, "dka": 1,
             },
-            "regions": [(50, 200)],
+            "regions": [{
+                "start": 50, "end": 200,
+                "reads": 0, "unique_kmers": 0,
+                "split_reads": 0, "discordant_pairs": 0,
+                "max_clip_len": 0, "unmapped_mates": 0,
+                "class": "SMALL",
+            }],
         })
-        result["discovery_only"].append(
-            {"chrom": "chr2", "start": 0, "end": 100},
-        )
+        result["discovery_only"].append({
+            "chrom": "chr2", "start": 0, "end": 100,
+            "reads": 0, "unique_kmers": 0,
+            "split_reads": 0, "discordant_pairs": 0,
+            "max_clip_len": 0, "unmapped_mates": 0,
+            "class": "SMALL",
+        })
         summary = format_summary(result)
         assert "Total VCF variants:            1" in summary
         assert "Concordant (signal + region):  1" in summary
