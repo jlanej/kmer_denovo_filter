@@ -202,3 +202,24 @@ class TestDiscoveryExampleOutput:
             pytest.fail(
                 f"BEDPE file differs from expected:\n{diff}"
             )
+
+    def test_comparison_matches(self, generated_comparison_output):
+        """compare_regions output must match the committed example exactly."""
+        expected_path = os.path.join(
+            EXAMPLE_OUTPUT_DISCOVERY_DIR, "giab_discovery.comparison.txt",
+        )
+        generated_path = generated_comparison_output["comparison"]
+
+        with open(expected_path) as fh:
+            expected_lines = fh.read().splitlines()
+        with open(generated_path) as fh:
+            generated_lines = fh.read().splitlines()
+
+        if expected_lines != generated_lines:
+            diff = _unified_diff(
+                expected_lines, generated_lines,
+                "giab_discovery.comparison.txt",
+            )
+            pytest.fail(
+                f"Comparison summary differs from expected:\n{diff}"
+            )

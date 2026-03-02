@@ -1,0 +1,65 @@
+============================================================
+  bedGraph / Discovery / VCF Region Comparison
+============================================================
+  Search window: exact position overlap
+
+CONCORDANT  (5 variants)
+  VCF variant has k-mer signal AND overlaps a discovery region
+------------------------------------------------------------
+  chr11:55003995 T>C  DKU=24  DKA=24  region=chr11:55003556-55004560
+  chr11:55007083 G>T  DKU=2  DKA=2  region=chr11:55006491-55007423
+  chr11:55007104 G>T  DKU=2  DKA=2  region=chr11:55006491-55007423
+  chr11:55008577 C>T  DKU=13  DKA=13  region=chr11:55008329-55009053
+  chr18:30028717 G>T  DKU=0  DKA=0  region=chr18:30028500-30028931
+
+VCF_ONLY  (0 variants)
+  VCF variant has k-mer signal but no overlapping discovery region
+------------------------------------------------------------
+  (none)
+
+NO_SIGNAL  (17 variants)
+  VCF variant has no bedGraph k-mer signal at its position
+------------------------------------------------------------
+  chr8:40003391 A>T  DKU=1  DKA=1  +discovery
+  chr8:40008009 A>G  DKU=0  DKA=0
+  chr8:40037154 A>C  DKU=0  DKA=0  +discovery
+  chr8:70039608 C>T  DKU=0  DKA=0
+  chr8:70042671 C>G  DKU=1  DKA=0  +discovery
+  chr8:125785997 A>AGAGTTACAATGAGTGTTACTCTGAAGGAGGATGGACTTTAATG  DKU=31  DKA=24  +discovery
+  chr10:50011697 T>C  DKU=1  DKA=1
+  chr10:50012575 A>G  DKU=1  DKA=1
+  chr10:50024332 C>T  DKU=0  DKA=0  +discovery
+  chr11:55000408 C>T  DKU=0  DKA=0  +discovery
+  chr12:60008175 A>C  DKU=0  DKA=0
+  chr15:35009535 C>T  DKU=1  DKA=1  +discovery
+  chr18:62805216 A>ATAATATACACTGCATAGGTTATACATATACAGTG  DKU=0  DKA=0  +discovery
+  chr19:15018720 G>A  DKU=0  DKA=0
+  chr19:15035863 G>T  DKU=0  DKA=0  +discovery
+  chr19:15041681 C>T  DKU=1  DKA=1  +discovery
+  chr22:25046402 T>C  DKU=2  DKA=1  +discovery
+
+DISCOVERY_ONLY  (12 regions)
+  Discovery region has no overlapping VCF variant
+------------------------------------------------------------
+  chr10:50011259-50011537  (278 bp)
+  chr10:50012051-50012428  (377 bp)
+  chr12:60008501-60008907  (406 bp)
+  chr14:23280025-23280906  (881 bp)
+  chr17:53339951-53341164  (1213 bp)
+  chr3:85552297-85552639  (342 bp)
+  chr5:97089075-97089510  (435 bp)
+  chr7:142785587-142786223  (636 bp)
+  chr7:142788518-142789264  (746 bp)
+  chr7:142792551-142792982  (431 bp)
+  chr7:142796829-142797423  (594 bp)
+  chr8:40008045-40008215  (170 bp)
+
+============================================================
+  Summary
+============================================================
+  Total VCF variants:            22
+  Concordant (signal + region):  5
+  VCF-only (signal, no region):  0
+  No k-mer signal:               17
+  Discovery-only regions:        12
+============================================================
