@@ -1207,12 +1207,12 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                 for key, meta in sv_meta.items():
                     if key not in read_sv_meta:
                         read_sv_meta[key] = meta
-                # Merge k-mer coverage
+                # Merge k-mer coverage (update is faster than += for Counters)
                 for chrom, cov in worker_cov.items():
-                    kmer_coverage[chrom] += cov
+                    kmer_coverage[chrom].update(cov)
                 # Merge read coverage
                 for chrom, cov in worker_read_cov.items():
-                    read_coverage[chrom] += cov
+                    read_coverage[chrom].update(cov)
                 # Track all seen keys for cross-contig dedup
                 reads_seen.update(seen)
 
@@ -1404,6 +1404,9 @@ def _write_bedgraph(kmer_coverage, bedgraph_path, read_coverage=None,
     only positions supported by at least *min_reads* distinct reads are
     included, which dramatically reduces output size at WGS scale.
 
+    Positions are sorted once per chromosome and filtered inline to
+    avoid intermediate dict copies at WGS scale.
+
     Args:
         kmer_coverage: Dict mapping chrom to Counter of reference
             positions with coverage counts (total k-mer base overlaps).
@@ -1428,34 +1431,41 @@ def _write_bedgraph(kmer_coverage, bedgraph_path, read_coverage=None,
             positions = kmer_coverage[chrom]
             if not positions:
                 continue
-            # Filter by minimum read support
-            if read_coverage is not None:
-                rc = read_coverage.get(chrom, {})
-                filtered = {
-                    pos: val for pos, val in positions.items()
-                    if rc.get(pos, 0) >= min_reads
-                }
-                total_filtered += len(positions) - len(filtered)
-            else:
-                filtered = dict(positions)
-            if not filtered:
-                continue
-            sorted_pos = sorted(filtered)
-            run_start = sorted_pos[0]
-            run_val = filtered[run_start]
-            run_end = run_start + 1
-            for pos in sorted_pos[1:]:
-                val = filtered[pos]
-                if pos == run_end and val == run_val:
+            rc = read_coverage.get(chrom, {}) if read_coverage else None
+            sorted_pos = sorted(positions)
+            run_start = None
+            run_val = None
+            run_end = None
+            for pos in sorted_pos:
+                if rc is not None and rc.get(pos, 0) < min_reads:
+                    total_filtered += 1
+                    if run_start is not None:
+                        fh.write(
+                            f"{chrom}\t{run_start}\t{run_end}\t{run_val}\n"
+                        )
+                        total_intervals += 1
+                        run_start = None
+                    continue
+                val = positions[pos]
+                if run_start is None:
+                    run_start = pos
+                    run_val = val
+                    run_end = pos + 1
+                elif pos == run_end and val == run_val:
                     run_end = pos + 1
                 else:
-                    fh.write(f"{chrom}\t{run_start}\t{run_end}\t{run_val}\n")
+                    fh.write(
+                        f"{chrom}\t{run_start}\t{run_end}\t{run_val}\n"
+                    )
                     total_intervals += 1
                     run_start = pos
                     run_val = val
                     run_end = pos + 1
-            fh.write(f"{chrom}\t{run_start}\t{run_end}\t{run_val}\n")
-            total_intervals += 1
+            if run_start is not None:
+                fh.write(
+                    f"{chrom}\t{run_start}\t{run_end}\t{run_val}\n"
+                )
+                total_intervals += 1
     if total_filtered:
         logger.info(
             "bedGraph file written: %s (%d intervals, %d positions "
