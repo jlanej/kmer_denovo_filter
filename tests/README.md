@@ -29,13 +29,16 @@ runs a full end-to-end pipeline on real data from the
 [Genome in a Bottle](https://www.nist.gov/programs-projects/genome-bottle)
 HG002 trio. The test data includes:
 
-1. **Child-private SNVs** – 20 SNVs present in HG002 but absent from both
+1. **Child-private SNVs** – SNVs present in HG002 but absent from both
    parents' GIAB v4.2.1 benchmark VCFs, discovered across multiple chromosomes.
 2. **Curated SV-like de novo mutation candidates** – 7 structural variant-like
    events from Sulovari et al. 2023 (PMC10006329), including deletions,
    microsatellite expansions, and SV-like events ranging from 34 bp to ~10.6 kb.
+   BAM regions are always extracted for these loci; any HG002 benchmark VCF
+   variants overlapping these regions are verified as child-private against
+   parental VCFs before inclusion in the candidates VCF.
 
-Together these yield 40 candidate variants in the VCF with BAM slices for
+Together these yield 22 candidate variants in the VCF with BAM slices for
 the child (HG002), father (HG003), and mother (HG004).
 
 ### Example Output
@@ -67,19 +70,19 @@ they always reflect the current state of the tool.
 
 ### Result Highlights
 
-The GIAB test set contains 40 candidate variants (20 child-private SNVs +
-20 variants overlapping curated SV-like DNM regions). Key results from the
-example output:
+The GIAB test set contains 22 candidate variants (child-private SNVs plus
+verified de novo variants from curated SV-like DNM regions). Key results
+from the example output:
 
-- **24 of 40** candidates are classified as likely de novo (`DKU > 0`).
-- **16 of 40** candidates show no child-unique k-mers and are marked as
+- **12 of 22** candidates are classified as likely de novo (`DKU > 0`).
+- **10 of 22** candidates show no child-unique k-mers and are marked as
   inherited.
-- The average DKU among likely de novo variants is **4.0**, indicating
+- The average DKU among likely de novo variants is **6.7**, indicating
   strong child-unique read support.
 - The SV-like insertion at chr8:125785997 (43 bp) shows strong de novo
   signal with DKA=24 and DKA_DKT=0.30.
-- Metrics show **2,446 total child k-mers** extracted, of which **335**
-  (≈14%) were absent from both parents.
+- Metrics show **1,484 total child k-mers** extracted, of which **190**
+  (≈13%) were absent from both parents.
 
 Discovery mode identifies **27 candidate regions** from the same data,
 with **3 high-quality candidates** (DKA_DKT > 0.25, DKA > 10) captured

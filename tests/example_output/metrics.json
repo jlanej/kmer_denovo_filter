@@ -1,7 +1,7 @@
 {
-  "total_variants": 40,
-  "total_child_kmers": 2446,
-  "parent_found_kmers": 2111,
-  "child_unique_kmers": 335,
-  "variants_with_unique_reads": 24
+  "total_variants": 22,
+  "total_child_kmers": 1484,
+  "parent_found_kmers": 1294,
+  "child_unique_kmers": 190,
+  "variants_with_unique_reads": 12
 }
