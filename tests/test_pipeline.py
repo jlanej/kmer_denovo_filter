@@ -1965,7 +1965,8 @@ class TestWriteBedgraph:
         }
         out = str(tmp_path / "out.bedgraph")
         _write_bedgraph(cov, out)
-        lines = open(out).read().strip().split("\n")
+        with open(out) as fh:
+            lines = fh.read().strip().split("\n")
         assert lines == ["chr1\t10\t13\t2", "chr1\t20\t21\t1"]
 
     def test_different_values_not_merged(self, tmp_path):
@@ -1975,7 +1976,8 @@ class TestWriteBedgraph:
         }
         out = str(tmp_path / "out.bedgraph")
         _write_bedgraph(cov, out)
-        lines = open(out).read().strip().split("\n")
+        with open(out) as fh:
+            lines = fh.read().strip().split("\n")
         assert lines == ["chr1\t5\t6\t3", "chr1\t6\t7\t1"]
 
     def test_multi_chrom_sorted(self, tmp_path):
@@ -1986,7 +1988,8 @@ class TestWriteBedgraph:
         }
         out = str(tmp_path / "out.bedgraph")
         _write_bedgraph(cov, out)
-        lines = open(out).read().strip().split("\n")
+        with open(out) as fh:
+            lines = fh.read().strip().split("\n")
         assert lines[0].startswith("chr1")
         assert lines[1].startswith("chr2")
 
@@ -1994,14 +1997,16 @@ class TestWriteBedgraph:
         """Empty coverage produces an empty file."""
         out = str(tmp_path / "out.bedgraph")
         _write_bedgraph({}, out)
-        assert open(out).read() == ""
+        with open(out) as fh:
+            assert fh.read() == ""
 
     def test_single_position(self, tmp_path):
         """Single position produces a 1-bp interval."""
         cov = {"chrX": collections.Counter({42: 5})}
         out = str(tmp_path / "out.bedgraph")
         _write_bedgraph(cov, out)
-        lines = open(out).read().strip().split("\n")
+        with open(out) as fh:
+            lines = fh.read().strip().split("\n")
         assert lines == ["chrX\t42\t43\t5"]
 
 
@@ -2111,7 +2116,8 @@ class TestBedgraphDiscoveryIntegration:
 
         bedgraph = f"{out_prefix}.kmer_coverage.bedgraph"
         assert os.path.exists(bedgraph), "bedGraph file not created"
-        content = open(bedgraph).read()
+        with open(bedgraph) as fh:
+            content = fh.read()
         assert content.strip(), "bedGraph should have content"
         for line in content.strip().split("\n"):
             cols = line.split("\t")
