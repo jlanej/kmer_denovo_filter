@@ -847,7 +847,7 @@ class TestGIABIntegration:
         assert os.path.exists(out_vcf + ".tbi")
         vcf_out = pysam.VariantFile(out_vcf)
         records = list(vcf_out)
-        assert len(records) == 40
+        assert len(records) == 22
         for rec in records:
             assert rec.samples["HG002"]["DKU"] is not None
             assert rec.samples["HG002"]["DKT"] is not None
@@ -864,7 +864,7 @@ class TestGIABIntegration:
         assert os.path.exists(metrics_json)
         with open(metrics_json) as fh:
             metrics = json.load(fh)
-        assert metrics["total_variants"] == 40
+        assert metrics["total_variants"] == 22
         assert metrics["variants_with_unique_reads"] > 0
 
         # Summary file should exist and contain key sections

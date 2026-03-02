@@ -4,8 +4,10 @@ These tests verify that high-quality de novo candidates identified via
 the VCF-based pipeline (DKA_DKT > 0.25, DKA > 10) are captured within
 the genomic regions discovered by the VCF-free discovery pipeline.
 
-As variant genotyping is refined for the discovery pipeline, these
-comparisons can be extended to verify that true variation is captured.
+Additionally, the curated de novo mutation (DNM) regions from Sulovari
+et al. 2023 (PMC10006329) are evaluated against the discovery output to
+verify that all known SV-like DNMs are nominated and characterised by
+the VCF-free pipeline.
 """
 
 import json
@@ -14,7 +16,9 @@ import os
 import pytest
 
 from kmer_denovo_filter.pipeline import (
+    SULOVARI_DNM_REGIONS,
     _compare_candidates_to_regions,
+    _evaluate_dnm_regions,
     _parse_candidate_summary,
 )
 
@@ -198,3 +202,291 @@ class TestIntegrationComparison:
                 assert cand["region"] in region_labels, (
                     f"Region {cand['region']} not found in BED regions"
                 )
+
+
+class TestEvaluateDNMRegions:
+    """Unit tests for _evaluate_dnm_regions()."""
+
+    def test_all_detected_with_real_data(self):
+        """All curated DNM regions should be detected in discovery output."""
+        metrics_path = os.path.join(
+            EXAMPLE_OUTPUT_DISCOVERY_DIR, "giab_discovery.metrics.json",
+        )
+        with open(metrics_path) as fh:
+            metrics = json.load(fh)
+
+        bed_path = os.path.join(
+            EXAMPLE_OUTPUT_DISCOVERY_DIR, "giab_discovery.bed",
+        )
+        regions = []
+        with open(bed_path) as fh:
+            for line in fh:
+                parts = line.strip().split("\t")
+                regions.append((parts[0], int(parts[1]), int(parts[2])))
+
+        results = _evaluate_dnm_regions(regions, metrics["regions"])
+        assert len(results) == 7
+        for r in results:
+            assert r["detected"], (
+                f"DNM locus {r['locus']} ({r['event_type']}) "
+                f"not detected by discovery"
+            )
+            assert r["assessment"] == "DETECTED"
+            assert r["total_reads"] > 0
+            assert r["total_unique_kmers"] > 0
+
+    def test_region_overlap_point_event(self):
+        """A point-event DNM inside a region should be detected."""
+        dnm = [("chr1", 100, None, "sv_like")]
+        regions = [("chr1", 50, 200)]
+        detail = [{"chrom": "chr1", "start": 50, "end": 200, "size": 150,
+                    "reads": 5, "unique_kmers": 10, "split_reads": 0,
+                    "discordant_pairs": 0, "max_clip_len": 20,
+                    "unmapped_mates": 0, "class": "SMALL"}]
+        results = _evaluate_dnm_regions(regions, detail, dnm_regions=dnm)
+        assert results[0]["detected"] is True
+        assert results[0]["kmer_signal"] > 0
+
+    def test_no_overlap(self):
+        """A DNM with no overlapping discovery region → NOT_DETECTED."""
+        dnm = [("chr1", 5000, 50, "deletion")]
+        regions = [("chr1", 50, 200)]
+        detail = [{"chrom": "chr1", "start": 50, "end": 200, "size": 150,
+                    "reads": 5, "unique_kmers": 10, "split_reads": 0,
+                    "discordant_pairs": 0, "max_clip_len": 20,
+                    "unmapped_mates": 0, "class": "SMALL"}]
+        results = _evaluate_dnm_regions(regions, detail, dnm_regions=dnm)
+        assert results[0]["detected"] is False
+        assert results[0]["assessment"] == "NOT_DETECTED"
+        assert results[0]["kmer_signal"] == 0.0
+
+    def test_adjacent_not_overlapping(self):
+        """A DNM at region end boundary (half-open) → NOT_DETECTED."""
+        # Region [50, 200) and DNM at 200 → adjacent, not overlapping
+        dnm = [("chr1", 200, None, "sv_like")]
+        regions = [("chr1", 50, 200)]
+        detail = [{"chrom": "chr1", "start": 50, "end": 200, "size": 150,
+                    "reads": 5, "unique_kmers": 10, "split_reads": 0,
+                    "discordant_pairs": 0, "max_clip_len": 20,
+                    "unmapped_mates": 0, "class": "SMALL"}]
+        results = _evaluate_dnm_regions(regions, detail, dnm_regions=dnm)
+        assert results[0]["detected"] is False
+
+    def test_multi_region_overlap(self):
+        """A large deletion spanning multiple regions aggregates evidence."""
+        dnm = [("chr1", 100, 500, "deletion")]
+        regions = [("chr1", 50, 200), ("chr1", 300, 500)]
+        detail = [
+            {"chrom": "chr1", "start": 50, "end": 200, "size": 150,
+             "reads": 5, "unique_kmers": 10, "split_reads": 1,
+             "discordant_pairs": 0, "max_clip_len": 40,
+             "unmapped_mates": 2, "class": "SV"},
+            {"chrom": "chr1", "start": 300, "end": 500, "size": 200,
+             "reads": 3, "unique_kmers": 8, "split_reads": 0,
+             "discordant_pairs": 1, "max_clip_len": 30,
+             "unmapped_mates": 1, "class": "AMBIGUOUS"},
+        ]
+        results = _evaluate_dnm_regions(regions, detail, dnm_regions=dnm)
+        assert results[0]["detected"] is True
+        assert len(results[0]["discovery_regions"]) == 2
+        assert results[0]["total_reads"] == 8
+        assert results[0]["total_unique_kmers"] == 18
+        assert results[0]["sv_class"] == "SV"
+
+    def test_sv_class_priority(self):
+        """Most severe SV class should be reported."""
+        dnm = [("chr1", 100, 400, "deletion")]
+        regions = [("chr1", 50, 200), ("chr1", 300, 450)]
+        detail = [
+            {"chrom": "chr1", "start": 50, "end": 200, "size": 150,
+             "reads": 5, "unique_kmers": 10, "split_reads": 0,
+             "discordant_pairs": 0, "max_clip_len": 0,
+             "unmapped_mates": 0, "class": "SMALL"},
+            {"chrom": "chr1", "start": 300, "end": 450, "size": 150,
+             "reads": 3, "unique_kmers": 8, "split_reads": 0,
+             "discordant_pairs": 0, "max_clip_len": 0,
+             "unmapped_mates": 1, "class": "AMBIGUOUS"},
+        ]
+        results = _evaluate_dnm_regions(regions, detail, dnm_regions=dnm)
+        assert results[0]["sv_class"] == "AMBIGUOUS"
+
+    def test_result_fields(self):
+        """Each evaluation result should have all expected fields."""
+        metrics_path = os.path.join(
+            EXAMPLE_OUTPUT_DISCOVERY_DIR, "giab_discovery.metrics.json",
+        )
+        with open(metrics_path) as fh:
+            metrics = json.load(fh)
+
+        bed_path = os.path.join(
+            EXAMPLE_OUTPUT_DISCOVERY_DIR, "giab_discovery.bed",
+        )
+        regions = []
+        with open(bed_path) as fh:
+            for line in fh:
+                parts = line.strip().split("\t")
+                regions.append((parts[0], int(parts[1]), int(parts[2])))
+
+        results = _evaluate_dnm_regions(regions, metrics["regions"])
+        expected_fields = {
+            "locus", "event_type", "event_size", "detected",
+            "discovery_regions", "total_reads", "total_unique_kmers",
+            "max_clip_len", "unmapped_mates", "discordant_pairs",
+            "split_reads", "sv_class", "kmer_signal", "assessment",
+        }
+        for r in results:
+            assert set(r.keys()) == expected_fields
+
+    def test_chr7_large_deletion_multi_region(self):
+        """chr7 TRB locus 10.6kb deletion should span multiple regions."""
+        metrics_path = os.path.join(
+            EXAMPLE_OUTPUT_DISCOVERY_DIR, "giab_discovery.metrics.json",
+        )
+        with open(metrics_path) as fh:
+            metrics = json.load(fh)
+
+        bed_path = os.path.join(
+            EXAMPLE_OUTPUT_DISCOVERY_DIR, "giab_discovery.bed",
+        )
+        regions = []
+        with open(bed_path) as fh:
+            for line in fh:
+                parts = line.strip().split("\t")
+                regions.append((parts[0], int(parts[1]), int(parts[2])))
+
+        results = _evaluate_dnm_regions(regions, metrics["regions"])
+        chr7_del = [r for r in results if r["locus"] == "chr7:142786222"]
+        assert len(chr7_del) == 1
+        result = chr7_del[0]
+        assert result["detected"] is True
+        assert len(result["discovery_regions"]) >= 2
+        assert result["sv_class"] == "SV"
+        assert result["total_unique_kmers"] > 50
+
+    def test_kmer_signal_per_locus(self):
+        """Each detected locus should have positive k-mer signal density."""
+        metrics_path = os.path.join(
+            EXAMPLE_OUTPUT_DISCOVERY_DIR, "giab_discovery.metrics.json",
+        )
+        with open(metrics_path) as fh:
+            metrics = json.load(fh)
+
+        bed_path = os.path.join(
+            EXAMPLE_OUTPUT_DISCOVERY_DIR, "giab_discovery.bed",
+        )
+        regions = []
+        with open(bed_path) as fh:
+            for line in fh:
+                parts = line.strip().split("\t")
+                regions.append((parts[0], int(parts[1]), int(parts[2])))
+
+        results = _evaluate_dnm_regions(regions, metrics["regions"])
+        for r in results:
+            if r["detected"]:
+                assert r["kmer_signal"] > 0, (
+                    f"{r['locus']} detected but kmer_signal is 0"
+                )
+
+
+@pytest.mark.skipif(
+    not GIAB_DISCOVERY_DATA_EXISTS,
+    reason="GIAB discovery test data not available",
+)
+class TestDNMRegionIntegration:
+    """Integration tests for curated DNM region evaluation.
+
+    These tests use the full generated discovery output to verify that
+    all seven Sulovari et al. 2023 curated DNM regions are nominated
+    by the VCF-free discovery pipeline.
+    """
+
+    def test_metrics_contains_dnm_evaluation(
+        self, generated_discovery_output,
+    ):
+        """Discovery metrics should include dnm_evaluation."""
+        with open(generated_discovery_output["metrics"]) as fh:
+            metrics = json.load(fh)
+
+        assert "dnm_evaluation" in metrics
+        dnm_eval = metrics["dnm_evaluation"]
+        assert dnm_eval["total_loci"] == 7
+        assert dnm_eval["detected"] == 7
+        assert dnm_eval["detection_rate"] == 1.0
+        assert len(dnm_eval["loci"]) == 7
+
+    def test_summary_contains_dnm_evaluation(
+        self, generated_discovery_output,
+    ):
+        """Discovery summary should include the DNM evaluation section."""
+        with open(generated_discovery_output["summary"]) as fh:
+            text = fh.read()
+
+        assert "Curated DNM Region Evaluation" in text
+        assert "Sulovari et al. 2023" in text
+        assert "Detected by discovery" in text
+        assert "7 / 7 (100.0%)" in text
+
+    def test_all_dnm_loci_detected(
+        self, generated_discovery_output,
+    ):
+        """All 7 curated DNM loci must be detected."""
+        with open(generated_discovery_output["metrics"]) as fh:
+            metrics = json.load(fh)
+
+        for locus in metrics["dnm_evaluation"]["loci"]:
+            assert locus["detected"], (
+                f"Curated DNM {locus['locus']} ({locus['event_type']}) "
+                f"not detected"
+            )
+            assert locus["total_reads"] > 0
+            assert locus["total_unique_kmers"] > 0
+
+    def test_dnm_discovery_regions_are_valid(
+        self, generated_discovery_output,
+    ):
+        """Each DNM region label should correspond to a real BED region."""
+        with open(generated_discovery_output["metrics"]) as fh:
+            metrics = json.load(fh)
+
+        region_labels = set()
+        for r in metrics["regions"]:
+            label = f"{r['chrom']}:{r['start'] + 1}-{r['end']}"
+            region_labels.add(label)
+
+        for locus in metrics["dnm_evaluation"]["loci"]:
+            for dr_label in locus["discovery_regions"]:
+                assert dr_label in region_labels, (
+                    f"DNM region {dr_label} for {locus['locus']} "
+                    f"not found in BED regions"
+                )
+
+    def test_chr17_deletion_evidence(
+        self, generated_discovery_output,
+    ):
+        """chr17:53340465 107bp deletion should have strong k-mer signal."""
+        with open(generated_discovery_output["metrics"]) as fh:
+            metrics = json.load(fh)
+
+        loci_by_name = {
+            l["locus"]: l for l in metrics["dnm_evaluation"]["loci"]
+        }
+        locus = loci_by_name["chr17:53340465"]
+        assert locus["event_type"] == "deletion"
+        assert locus["total_reads"] >= 10
+        assert locus["total_unique_kmers"] >= 20
+        assert locus["max_clip_len"] >= 100
+
+    def test_chr8_sv_like_strong_signal(
+        self, generated_discovery_output,
+    ):
+        """chr8:125785998 43bp SV-like event has strongest k-mer support."""
+        with open(generated_discovery_output["metrics"]) as fh:
+            metrics = json.load(fh)
+
+        loci_by_name = {
+            l["locus"]: l for l in metrics["dnm_evaluation"]["loci"]
+        }
+        locus = loci_by_name["chr8:125785998"]
+        assert locus["total_reads"] >= 30
+        assert locus["total_unique_kmers"] >= 40
+        assert locus["kmer_signal"] >= 0.04
