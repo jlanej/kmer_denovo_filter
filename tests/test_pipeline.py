@@ -1452,6 +1452,8 @@ class TestDiscoveryPipeline:
         assert "min_distinct_kmers_per_read=" in hdr
         assert "min_supporting_reads=" in hdr
         assert "min_distinct_kmers=" in hdr
+
+    def test_discovery_cluster_distance(self, tmpdir):
         """--cluster-distance is accepted and passed to the pipeline."""
         chrom = "chr1"
         ref_fa = os.path.join(tmpdir, "ref.fa")
