@@ -824,7 +824,7 @@ class TestGIABIntegration:
         return str(tmp_path)
 
     def test_giab_denovo_pipeline(self, tmpdir):
-        """Run the full pipeline on GIAB child-private SNVs without a ref."""
+        """Run the full pipeline on GIAB candidates (SNVs + SV-like DNMs)."""
         out_vcf = os.path.join(tmpdir, "annotated.vcf.gz")
         metrics_json = os.path.join(tmpdir, "metrics.json")
         summary_txt = os.path.join(tmpdir, "summary.txt")
@@ -847,7 +847,7 @@ class TestGIABIntegration:
         assert os.path.exists(out_vcf + ".tbi")
         vcf_out = pysam.VariantFile(out_vcf)
         records = list(vcf_out)
-        assert len(records) == 20
+        assert len(records) == 22
         for rec in records:
             assert rec.samples["HG002"]["DKU"] is not None
             assert rec.samples["HG002"]["DKT"] is not None
@@ -864,7 +864,7 @@ class TestGIABIntegration:
         assert os.path.exists(metrics_json)
         with open(metrics_json) as fh:
             metrics = json.load(fh)
-        assert metrics["total_variants"] == 20
+        assert metrics["total_variants"] == 22
         assert metrics["variants_with_unique_reads"] > 0
 
         # Summary file should exist and contain key sections
