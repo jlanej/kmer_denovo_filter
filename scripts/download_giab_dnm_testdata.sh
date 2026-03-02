@@ -40,8 +40,9 @@
 #      curated SV-like DNM regions (custom padding per event).
 #   5. Extract BAM slices for all regions from the public GIAB Illumina
 #      2×250 bp WGS BAMs (remote HTTPS via htslib).
-#   6. Scan the HG002 benchmark VCF in each curated SV-like DNM region
-#      and include any variants found in the candidate VCF.
+#   6. Scan the HG002 benchmark VCF in each curated SV-like DNM region,
+#      verify child-private status against parental VCFs, and include
+#      only confirmed de novo variants in the candidate VCF.
 #   7. Write a candidate VCF containing the selected child-private SNVs
 #      plus any variants overlapping curated SV-like DNM regions.
 #
@@ -388,11 +389,15 @@ extract_bam_regions "${HG003_BAM}" "HG003_father" "${OUTPUT_DIR}/HG003_father.ba
 extract_bam_regions "${HG004_BAM}" "HG004_mother" "${OUTPUT_DIR}/HG004_mother.bam"
 
 # ---------------------------------------------------------------------------
-# Step 4 – Scan HG002 VCF in curated SV-like DNM regions
+# Step 4 – Scan HG002 VCF in curated SV-like DNM regions & verify de novo
 # ---------------------------------------------------------------------------
 log "Step 4: Scanning HG002 benchmark VCF in curated SV-like DNM regions ..."
+log "  Checking parental VCFs to confirm de novo status"
 
-SV_VCF_FOUND=0
+SV_VCF_TOTAL=0
+SV_VCF_DENOVO=0
+SV_VCF_INHERITED=0
+
 for entry in "${SV_DNM_REGIONS[@]}"; do
     IFS=':' read -r sv_chrom sv_pos sv_size sv_lpad sv_rpad sv_desc <<< "${entry}"
     sv_start=$((sv_pos - sv_lpad))
@@ -401,17 +406,61 @@ for entry in "${SV_DNM_REGIONS[@]}"; do
     sv_region="${sv_chrom}:${sv_start}-${sv_end}"
 
     log "  Querying ${sv_region} (${sv_desc}) ..."
-    sv_hits=$(bcftools view -H -r "${sv_region}" "${HG002_VCF}" 2>/dev/null \
-        | tee -a "${WORK_DIR}/sv_dnm_vcflines.tsv" | wc -l | tr -d ' ')
-    if [[ "${sv_hits}" -gt 0 ]]; then
-        log "    Found ${sv_hits} variant(s) in HG002 benchmark VCF"
-        SV_VCF_FOUND=$((SV_VCF_FOUND + sv_hits))
-    else
+
+    # Fetch HG002 variants in this region
+    bcftools view -H -r "${sv_region}" "${HG002_VCF}" 2>/dev/null \
+        > "${WORK_DIR}/sv_hg002_window.tsv" || true
+    sv_child_n=$(wc -l < "${WORK_DIR}/sv_hg002_window.tsv" | tr -d ' ')
+
+    if [[ "${sv_child_n}" -eq 0 ]]; then
         log "    No variants in HG002 benchmark VCF for this region"
+        continue
     fi
+
+    log "    HG002: ${sv_child_n} variant(s)"
+
+    # Fetch parental variant positions in this region for comparison
+    bcftools view -H -r "${sv_region}" "${HG003_VCF}" 2>/dev/null \
+        | awk -F'\t' '{print $1"\t"$2}' > "${WORK_DIR}/sv_hg003_positions.tsv" || true
+    bcftools view -H -r "${sv_region}" "${HG004_VCF}" 2>/dev/null \
+        | awk -F'\t' '{print $1"\t"$2}' > "${WORK_DIR}/sv_hg004_positions.tsv" || true
+
+    sv_father_n=$(wc -l < "${WORK_DIR}/sv_hg003_positions.tsv" | tr -d ' ')
+    sv_mother_n=$(wc -l < "${WORK_DIR}/sv_hg004_positions.tsv" | tr -d ' ')
+    log "    HG003: ${sv_father_n}, HG004: ${sv_mother_n}"
+
+    # Check each HG002 variant for absence in both parents
+    while IFS=$'\t' read -r chrom pos rest; do
+        SV_VCF_TOTAL=$((SV_VCF_TOTAL + 1))
+
+        in_father=0; in_mother=0
+        if grep -q "^${chrom}	${pos}$" "${WORK_DIR}/sv_hg003_positions.tsv" 2>/dev/null; then
+            in_father=1
+        fi
+        if grep -q "^${chrom}	${pos}$" "${WORK_DIR}/sv_hg004_positions.tsv" 2>/dev/null; then
+            in_mother=1
+        fi
+
+        if [[ ${in_father} -eq 0 && ${in_mother} -eq 0 ]]; then
+            log "    CHILD-PRIVATE: ${chrom}:${pos}"
+            printf "%s\t%s\t%s\n" "${chrom}" "${pos}" "${rest}" \
+                >> "${WORK_DIR}/sv_dnm_vcflines.tsv"
+            SV_VCF_DENOVO=$((SV_VCF_DENOVO + 1))
+        else
+            parent_label=""
+            [[ ${in_father} -eq 1 ]] && parent_label="father"
+            [[ ${in_mother} -eq 1 ]] && parent_label="${parent_label:+${parent_label}+}mother"
+            log "    INHERITED (${parent_label}): ${chrom}:${pos} — excluded from candidates VCF"
+            SV_VCF_INHERITED=$((SV_VCF_INHERITED + 1))
+        fi
+    done < "${WORK_DIR}/sv_hg002_window.tsv"
 done
 
-log "  Total: ${SV_VCF_FOUND} variant(s) found across curated SV-like DNM regions"
+log "  SV-like DNM region VCF scan summary:"
+log "    Total HG002 variants found : ${SV_VCF_TOTAL}"
+log "    Child-private (de novo)     : ${SV_VCF_DENOVO}  → added to candidates VCF"
+log "    Inherited (excluded)        : ${SV_VCF_INHERITED}"
+log "  Note: BAM regions are extracted for ALL curated SV-like DNM loci regardless"
 
 # ---------------------------------------------------------------------------
 # Step 5 – Create candidate VCF from GIAB benchmark records
@@ -469,9 +518,12 @@ mutation filtering workflows.
 
 ### 2. Curated SV-like de novo mutation candidates
 
-BAM regions are also extracted around SV-like de novo mutations reported
-in **Sulovari et al. 2023** (PMID: 36894594, PMC10006329).  These are
-always included regardless of whether they appear in the benchmark VCF.
+BAM regions are always extracted around SV-like de novo mutations reported
+in **Sulovari et al. 2023** (PMID: 36894594, PMC10006329), regardless of
+whether they appear in the benchmark VCF.  This ensures read-level data is
+available for tuning discovery methods.  Any HG002 benchmark VCF variants
+overlapping these regions are also checked against the parental VCFs; only
+confirmed child-private variants are included in the candidates VCF.
 
 | Locus              | Event type                     | Size (bp) | Padding           |
 |--------------------|--------------------------------|-----------|--------------------|
@@ -503,8 +555,9 @@ always included regardless of whether they appear in the benchmark VCF.
   (queried via HTTPS random access – never downloaded in full)
 - **Variant discovery**: SNVs streamed from HG002 GIAB v4.2.1 benchmark VCF
   across small chromosomal windows, filtered for absence in both parents
-- **SV-like DNMs**: Curated regions from Sulovari et al. 2023 (PMC10006329),
-  extracted from BAMs regardless of VCF content
+- **SV-like DNMs**: Curated regions from Sulovari et al. 2023 (PMC10006329);
+  BAM slices extracted regardless of VCF content, but VCF candidates verified
+  for child-private status against parental benchmark VCFs
 - **Verification**: Each SNV position verified against HG003 and HG004 GIAB
   v4.2.1 benchmark VCFs over HTTPS
 
@@ -513,8 +566,8 @@ always included regardless of whether they appear in the benchmark VCF.
 - `HG002_child.bam` / `.bai` – Child reads around variant sites
 - `HG003_father.bam` / `.bai` – Father reads around variant sites
 - `HG004_mother.bam` / `.bai` – Mother reads around variant sites
-- `candidates.vcf.gz` / `.tbi` – VCF with child-private SNVs and any HG002
-  benchmark variants overlapping curated SV-like DNM regions
+- `candidates.vcf.gz` / `.tbi` – VCF with child-private SNVs and verified
+  de novo variants from curated SV-like DNM regions
 
 ## Usage with kmer-denovo
 

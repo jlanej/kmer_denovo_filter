@@ -15,9 +15,12 @@ mutation filtering workflows.
 
 ### 2. Curated SV-like de novo mutation candidates
 
-BAM regions are also extracted around SV-like de novo mutations reported
-in **Sulovari et al. 2023** (PMID: 36894594, PMC10006329).  These are
-always included regardless of whether they appear in the benchmark VCF.
+BAM regions are always extracted around SV-like de novo mutations reported
+in **Sulovari et al. 2023** (PMID: 36894594, PMC10006329), regardless of
+whether they appear in the benchmark VCF.  This ensures read-level data is
+available for tuning discovery methods.  Any HG002 benchmark VCF variants
+overlapping these regions are also checked against the parental VCFs; only
+confirmed child-private variants are included in the candidates VCF.
 
 | Locus              | Event type                     | Size (bp) | Padding           |
 |--------------------|--------------------------------|-----------|--------------------|
@@ -49,8 +52,9 @@ always included regardless of whether they appear in the benchmark VCF.
   (queried via HTTPS random access – never downloaded in full)
 - **Variant discovery**: SNVs streamed from HG002 GIAB v4.2.1 benchmark VCF
   across small chromosomal windows, filtered for absence in both parents
-- **SV-like DNMs**: Curated regions from Sulovari et al. 2023 (PMC10006329),
-  extracted from BAMs regardless of VCF content
+- **SV-like DNMs**: Curated regions from Sulovari et al. 2023 (PMC10006329);
+  BAM slices extracted regardless of VCF content, but VCF candidates verified
+  for child-private status against parental benchmark VCFs
 - **Verification**: Each SNV position verified against HG003 and HG004 GIAB
   v4.2.1 benchmark VCFs over HTTPS
 
@@ -59,8 +63,8 @@ always included regardless of whether they appear in the benchmark VCF.
 - `HG002_child.bam` / `.bai` – Child reads around variant sites
 - `HG003_father.bam` / `.bai` – Father reads around variant sites
 - `HG004_mother.bam` / `.bai` – Mother reads around variant sites
-- `candidates.vcf.gz` / `.tbi` – VCF with child-private SNVs and any HG002
-  benchmark variants overlapping curated SV-like DNM regions
+- `candidates.vcf.gz` / `.tbi` – VCF with child-private SNVs and verified
+  de novo variants from curated SV-like DNM regions
 
 ## Usage with kmer-denovo
 
