@@ -62,7 +62,8 @@ jobs:
             --ref-jf  tests/data/giab/mini_ref.fa.k31.jf \
             --out-prefix integration_output_discovery/giab_discovery \
             --min-child-count 3 \
-            --kmer-size 31
+            --kmer-size 31 \
+            --candidate-summary integration_output/summary.txt
 
       - name: Display discovery-mode summary
         run: cat integration_output_discovery/giab_discovery.summary.txt
