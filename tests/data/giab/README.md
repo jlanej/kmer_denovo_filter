@@ -1,12 +1,39 @@
 # GIAB HG002 Trio – Child-Private Variant Test Data
 
-Small BAM slices around child-private SNVs from the GIAB Ashkenazi trio,
-for integration testing of `kmer_denovo_filter`.
+Small BAM slices around child-private SNVs and curated SV-like de novo
+mutation candidates from the GIAB Ashkenazi trio, for integration testing
+of `kmer_denovo_filter`.
+
+## Variant sources
+
+### 1. Discovered child-private SNVs
 
 Child-private variants are SNVs present in the HG002 (child) GIAB v4.2.1
 benchmark VCF but absent from both HG003 (father) and HG004 (mother)
 benchmark VCFs.  These serve as realistic candidates for testing de novo
 mutation filtering workflows.
+
+### 2. Curated SV-like de novo mutation candidates
+
+BAM regions are also extracted around SV-like de novo mutations reported
+in **Sulovari et al. 2023** (PMID: 36894594, PMC10006329).  These are
+always included regardless of whether they appear in the benchmark VCF.
+
+| Locus              | Event type                     | Size (bp) | Padding           |
+|--------------------|--------------------------------|-----------|--------------------|
+| chr17:53340465     | Deletion                       | 107       | ±500 bp            |
+| chr14:23280711     | Microsatellite repeat expansion| –         | ±500 bp            |
+| chr3:85552367      | SV-like event                  | 64        | ±500 bp            |
+| chr5:97089276      | SV-like event                  | 43        | ±500 bp            |
+| chr8:125785998     | SV-like event                  | 43        | ±500 bp            |
+| chr18:62805217     | SV-like event                  | 34        | ±500 bp            |
+| chr7:142786222     | Deletion (TRB locus, lower-confidence) | 10,607 | −1 kb / +11 kb |
+
+**Reference:**
+> Sulovari A, Li R, Audano PA, et al. "Human-specific tandem repeat
+> expansion and deletion variants show widespread signatures of
+> positive selection." *Science*, 2023; 380(6645):eabn6358.
+> https://pmc.ncbi.nlm.nih.gov/articles/PMC10006329/
 
 ## Samples
 
@@ -22,7 +49,9 @@ mutation filtering workflows.
   (queried via HTTPS random access – never downloaded in full)
 - **Variant discovery**: SNVs streamed from HG002 GIAB v4.2.1 benchmark VCF
   across small chromosomal windows, filtered for absence in both parents
-- **Verification**: Each position verified against HG003 and HG004 GIAB
+- **SV-like DNMs**: Curated regions from Sulovari et al. 2023 (PMC10006329),
+  extracted from BAMs regardless of VCF content
+- **Verification**: Each SNV position verified against HG003 and HG004 GIAB
   v4.2.1 benchmark VCFs over HTTPS
 
 ## Files
@@ -30,14 +59,10 @@ mutation filtering workflows.
 - `HG002_child.bam` / `.bai` – Child reads around variant sites
 - `HG003_father.bam` / `.bai` – Father reads around variant sites
 - `HG004_mother.bam` / `.bai` – Mother reads around variant sites
-- `candidates.vcf.gz` / `.tbi` – VCF with child-private SNVs
-- `mini_ref.fa` / `.fai` – Mini reference FASTA built from BAM reads with
-  no mismatches (NM:i:0, CIGAR all-M), for discovery-mode testing
-- `mini_ref.fa.k31.jf` – Precomputed Jellyfish k-mer index of mini reference
+- `candidates.vcf.gz` / `.tbi` – VCF with child-private SNVs and any HG002
+  benchmark variants overlapping curated SV-like DNM regions
 
 ## Usage with kmer-denovo
-
-### VCF mode (candidate VCF required)
 
 ```bash
 kmer-denovo \
@@ -46,33 +71,4 @@ kmer-denovo \
     --mother  tests/data/giab/HG004_mother.bam  \
     --vcf     tests/data/giab/candidates.vcf.gz  \
     --output  output.vcf
-```
-
-### Discovery mode (no VCF needed)
-
-```bash
-kmer-denovo \
-    --child   tests/data/giab/HG002_child.bam   \
-    --father  tests/data/giab/HG003_father.bam  \
-    --mother  tests/data/giab/HG004_mother.bam  \
-    --ref-fasta tests/data/giab/mini_ref.fa      \
-    --ref-jf  tests/data/giab/mini_ref.fa.k31.jf \
-    --out-prefix discovery_output \
-    --min-child-count 3 --kmer-size 31
-```
-
-## Building the mini reference
-
-The mini reference can be regenerated from the BAMs:
-
-```bash
-python scripts/build_mini_ref.py \
-    -b tests/data/giab/HG002_child.bam \
-    -b tests/data/giab/HG003_father.bam \
-    -b tests/data/giab/HG004_mother.bam \
-    -o tests/data/giab/mini_ref.fa
-
-jellyfish count -m 31 -s 10M -t 4 -C \
-    tests/data/giab/mini_ref.fa \
-    -o tests/data/giab/mini_ref.fa.k31.jf
 ```
