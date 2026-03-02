@@ -63,13 +63,15 @@ def parse_args(argv=None):
         help="Minimum base quality for read k-mers (default: 20)",
     )
     parser.add_argument(
-        "--min-mapq", type=int, default=20,
-        help="Minimum mapping quality for child reads (default: 20)",
-    )
-    parser.add_argument(
         "--informative-reads", default=None,
         help="Output BAM with reads carrying informative (child-unique) "
              "k-mers for IGV visualization",
+    )
+    parser.add_argument(
+        "--min-mapq", type=int, default=20,
+        help="Minimum mapping quality for child reads in VCF mode (default: 20). "
+             "Not applied in discovery mode, which scans all primary reads "
+             "regardless of mapping quality.",
     )
     parser.add_argument(
         "--proband-id", default=None,
