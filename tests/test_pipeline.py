@@ -1,5 +1,6 @@
 """Integration test for the full pipeline using synthetic data."""
 
+import collections
 import json
 import logging
 import os
@@ -11,9 +12,11 @@ import pytest
 from kmer_denovo_filter.cli import parse_args
 from kmer_denovo_filter.pipeline import (
     _classify_regions,
+    _collect_kmer_ref_positions,
     _format_elapsed,
     _format_file_size,
     _validate_inputs,
+    _write_bedgraph,
     _write_bedpe,
     run_discovery_pipeline,
     run_pipeline,
@@ -1947,3 +1950,178 @@ class TestDiscoverySV:
         ])
         run_discovery_pipeline(args)
         assert os.path.exists(custom_bedpe)
+
+
+# ── bedGraph output tests ──────────────────────────────────────────────
+
+
+class TestWriteBedgraph:
+    """Unit tests for _write_bedgraph."""
+
+    def test_basic_bedgraph(self, tmp_path):
+        """Adjacent positions with the same value are merged."""
+        cov = {
+            "chr1": collections.Counter({10: 2, 11: 2, 12: 2, 20: 1}),
+        }
+        out = str(tmp_path / "out.bedgraph")
+        _write_bedgraph(cov, out)
+        with open(out) as fh:
+            lines = fh.read().strip().split("\n")
+        assert lines == ["chr1\t10\t13\t2", "chr1\t20\t21\t1"]
+
+    def test_different_values_not_merged(self, tmp_path):
+        """Adjacent positions with different values stay separate."""
+        cov = {
+            "chr1": collections.Counter({5: 3, 6: 1}),
+        }
+        out = str(tmp_path / "out.bedgraph")
+        _write_bedgraph(cov, out)
+        with open(out) as fh:
+            lines = fh.read().strip().split("\n")
+        assert lines == ["chr1\t5\t6\t3", "chr1\t6\t7\t1"]
+
+    def test_multi_chrom_sorted(self, tmp_path):
+        """Chromosomes are written in sorted order."""
+        cov = {
+            "chr2": collections.Counter({100: 1}),
+            "chr1": collections.Counter({50: 2}),
+        }
+        out = str(tmp_path / "out.bedgraph")
+        _write_bedgraph(cov, out)
+        with open(out) as fh:
+            lines = fh.read().strip().split("\n")
+        assert lines[0].startswith("chr1")
+        assert lines[1].startswith("chr2")
+
+    def test_empty_coverage(self, tmp_path):
+        """Empty coverage produces an empty file."""
+        out = str(tmp_path / "out.bedgraph")
+        _write_bedgraph({}, out)
+        with open(out) as fh:
+            assert fh.read() == ""
+
+    def test_single_position(self, tmp_path):
+        """Single position produces a 1-bp interval."""
+        cov = {"chrX": collections.Counter({42: 5})}
+        out = str(tmp_path / "out.bedgraph")
+        _write_bedgraph(cov, out)
+        with open(out) as fh:
+            lines = fh.read().strip().split("\n")
+        assert lines == ["chrX\t42\t43\t5"]
+
+
+class TestCollectKmerRefPositions:
+    """Unit tests for _collect_kmer_ref_positions."""
+
+    def test_simple_alignment(self, tmp_path):
+        """All-match alignment maps k-mer positions directly."""
+        bam_path = str(tmp_path / "test.bam")
+        header = pysam.AlignmentHeader.from_references(["chr1"], [300])
+        with pysam.AlignmentFile(bam_path, "wb", header=header) as bam:
+            seg = pysam.AlignedSegment()
+            seg.query_name = "read1"
+            seg.query_sequence = "ACGTACGT"
+            seg.flag = 0
+            seg.reference_id = 0
+            seg.reference_start = 100
+            seg.mapping_quality = 60
+            seg.cigar = [(0, 8)]  # 8M
+            seg.query_qualities = pysam.qualitystring_to_array("I" * 8)
+            bam.write(seg)
+
+        with pysam.AlignmentFile(bam_path, "rb",
+                                 check_sq=False) as bam:
+            read = next(bam.fetch(until_eof=True))
+            # k-mer of size 3 starting at query pos 2 → covers qpos 2,3,4
+            cov = _collect_kmer_ref_positions(read, {2}, 3)
+            # ref positions should be 102, 103, 104
+            assert cov[102] == 1
+            assert cov[103] == 1
+            assert cov[104] == 1
+            assert len(cov) == 3
+
+    def test_insertion_skips_ref(self, tmp_path):
+        """Query positions in insertions have no ref mapping."""
+        bam_path = str(tmp_path / "test.bam")
+        header = pysam.AlignmentHeader.from_references(["chr1"], [300])
+        with pysam.AlignmentFile(bam_path, "wb", header=header) as bam:
+            seg = pysam.AlignedSegment()
+            seg.query_name = "read1"
+            seg.query_sequence = "ACGTACGT"
+            seg.flag = 0
+            seg.reference_id = 0
+            seg.reference_start = 100
+            seg.mapping_quality = 60
+            # 3M 2I 3M → qpos 3,4 are insertions (no ref pos)
+            seg.cigar = [(0, 3), (1, 2), (0, 3)]
+            seg.query_qualities = pysam.qualitystring_to_array("I" * 8)
+            bam.write(seg)
+
+        with pysam.AlignmentFile(bam_path, "rb",
+                                 check_sq=False) as bam:
+            read = next(bam.fetch(until_eof=True))
+            # k-mer of size 4 starting at query pos 2 → qpos 2,3,4,5
+            # qpos 2→ref102, 3→None(ins), 4→None(ins), 5→ref103
+            cov = _collect_kmer_ref_positions(read, {2}, 4)
+            assert cov[102] == 1
+            assert cov[103] == 1
+            assert 3 not in cov  # ins positions skipped
+            assert len(cov) == 2
+
+
+class TestBedgraphDiscoveryIntegration:
+    """Integration test: bedGraph is produced by discovery pipeline."""
+
+    def test_bedgraph_written(self, tmp_path):
+        chrom = "chr1"
+        ref_fa = str(tmp_path / "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, length=200)
+
+        # Child has a de novo mutation at position 50
+        child_seq = list(ref_seq[30:90])
+        child_seq[20] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = str(tmp_path / "child.bam")
+        _create_bam(child_bam, ref_fa, chrom, [
+            ("read1", 30, child_seq, None),
+            ("read2", 30, child_seq, None),
+            ("read3", 30, child_seq, None),
+            ("read4", 30, child_seq, None),
+        ])
+
+        parent_seq = ref_seq[30:90]
+        mother_bam = str(tmp_path / "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom, [
+            ("mread1", 30, parent_seq, None),
+            ("mread2", 30, parent_seq, None),
+            ("mread3", 30, parent_seq, None),
+        ])
+
+        father_bam = str(tmp_path / "father.bam")
+        _create_bam(father_bam, ref_fa, chrom, [
+            ("fread1", 30, parent_seq, None),
+            ("fread2", 30, parent_seq, None),
+            ("fread3", 30, parent_seq, None),
+        ])
+
+        out_prefix = str(tmp_path / "disco")
+        args = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--out-prefix", out_prefix, "--min-child-count", "3",
+            "--kmer-size", "5",
+        ])
+        run_discovery_pipeline(args)
+
+        bedgraph = f"{out_prefix}.kmer_coverage.bedgraph"
+        assert os.path.exists(bedgraph), "bedGraph file not created"
+        with open(bedgraph) as fh:
+            content = fh.read()
+        assert content.strip(), "bedGraph should have content"
+        for line in content.strip().split("\n"):
+            cols = line.split("\t")
+            assert len(cols) == 4, f"Expected 4 columns, got {len(cols)}"
+            assert cols[0] == chrom
+            assert int(cols[1]) < int(cols[2])  # start < end
+            assert int(cols[3]) > 0  # positive coverage

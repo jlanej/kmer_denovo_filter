@@ -959,12 +959,37 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
 # ── Multiprocessing helpers for _anchor_and_cluster ────────────────────
 
 _worker_automaton = None
+_worker_kmer_size = None
 
 
-def _init_scan_worker(proband_unique_kmers):
+def _init_scan_worker(proband_unique_kmers, kmer_size):
     """Initializer for per-contig scan workers; builds a shared automaton."""
-    global _worker_automaton
+    global _worker_automaton, _worker_kmer_size
     _worker_automaton = build_kmer_automaton(proband_unique_kmers)
+    _worker_kmer_size = kmer_size
+
+
+def _collect_kmer_ref_positions(read, kmer_hit_indices, kmer_size):
+    """Map query-level k-mer hit positions to reference coordinates.
+
+    Args:
+        read: A pysam.AlignedSegment (must be mapped).
+        kmer_hit_indices: Set of query start indices where novel k-mers
+            were found.
+        kmer_size: Length of k-mers.
+
+    Returns:
+        Counter keyed by reference position with coverage counts.
+    """
+    cov = collections.Counter()
+    aligned_pairs = read.get_aligned_pairs(matches_only=True)
+    query_to_ref = {qpos: rpos for qpos, rpos in aligned_pairs}
+    for start_idx in kmer_hit_indices:
+        for qpos in range(start_idx, start_idx + kmer_size):
+            rpos = query_to_ref.get(qpos)
+            if rpos is not None:
+                cov[rpos] += 1
+    return cov
 
 
 def _scan_contig_for_hits(child_bam, ref_fasta, contig):
@@ -974,14 +999,18 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
 
     Returns:
         (read_hits, reads_seen, unmapped_informative, total_reads_scanned,
-         read_sv_meta)
+         read_sv_meta, kmer_coverage)
 
     ``read_sv_meta`` is a dict keyed by ``(query_name, is_supplementary)``
     with per-read SV metadata (has_sa, sa_str, is_paired, is_proper_pair,
     mate_is_unmapped, max_clip) collected for each informative read so
     that annotation and linking can be done without re-scanning the BAM.
+
+    ``kmer_coverage`` is a dict mapping chrom to a Counter of reference
+    positions overlapped by novel k-mers.
     """
     automaton = _worker_automaton
+    kmer_size = _worker_kmer_size
     bam = pysam.AlignmentFile(
         child_bam, reference_filename=ref_fasta if ref_fasta else None,
     )
@@ -989,6 +1018,7 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
     read_hits = []
     reads_seen = set()
     read_sv_meta = {}
+    kmer_coverage = collections.defaultdict(collections.Counter)
     unmapped_informative = 0
     total_reads_scanned = 0
 
@@ -998,7 +1028,7 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
         except (ValueError, KeyError):
             bam.close()
             return (read_hits, reads_seen, unmapped_informative,
-                    total_reads_scanned, read_sv_meta)
+                    total_reads_scanned, read_sv_meta, kmer_coverage)
     else:
         iterator = bam.fetch(contig=contig)
 
@@ -1014,9 +1044,11 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
             continue
 
         unique_in_read = set()
+        kmer_hit_indices = set()
         if automaton is not None:
             for _end_idx, canonical_kmer in automaton.iter(seq):
                 unique_in_read.add(canonical_kmer)
+                kmer_hit_indices.add(_end_idx - kmer_size + 1)
 
         dedup_key = (read.query_name, read.is_supplementary)
         if unique_in_read and dedup_key not in reads_seen:
@@ -1032,6 +1064,13 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
                     unique_in_read,
                     read.is_supplementary,
                 ))
+                # Map novel k-mer query positions to reference coords
+                if kmer_size is not None:
+                    chrom = read.reference_name
+                    cov = _collect_kmer_ref_positions(
+                        read, kmer_hit_indices, kmer_size,
+                    )
+                    kmer_coverage[chrom] += cov
 
             # Collect SV metadata for this informative read
             max_clip = 0
@@ -1054,7 +1093,7 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
 
     bam.close()
     return (read_hits, reads_seen, unmapped_informative,
-            total_reads_scanned, read_sv_meta)
+            total_reads_scanned, read_sv_meta, kmer_coverage)
 
 
 def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
@@ -1094,6 +1133,8 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
             proband-unique k-mers.
         read_sv_meta: Dict mapping (query_name, is_supplementary) to
             per-read SV metadata dict.
+        kmer_coverage: Dict mapping chrom to Counter of reference
+            positions overlapped by novel k-mers.
     """
     anchor_start = time.monotonic()
 
@@ -1115,13 +1156,14 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         read_hits = []
         reads_seen = set()
         read_sv_meta = {}
+        kmer_coverage = collections.defaultdict(collections.Counter)
         unmapped_informative = 0
         total_reads_scanned = 0
 
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=n_workers,
             initializer=_init_scan_worker,
-            initargs=(proband_unique_kmers,),
+            initargs=(proband_unique_kmers, kmer_size),
         ) as executor:
             futures = {
                 executor.submit(_scan_contig_for_hits, *t): t[2]
@@ -1130,7 +1172,8 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
             for future in concurrent.futures.as_completed(futures):
                 contig = futures[future]
                 try:
-                    hits, seen, unmapped, scanned, sv_meta = future.result()
+                    (hits, seen, unmapped, scanned,
+                     sv_meta, worker_cov) = future.result()
                 except Exception:
                     logger.error(
                         "Worker failed for contig=%s", contig,
@@ -1148,6 +1191,9 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                 for key, meta in sv_meta.items():
                     if key not in read_sv_meta:
                         read_sv_meta[key] = meta
+                # Merge k-mer coverage
+                for chrom, cov in worker_cov.items():
+                    kmer_coverage[chrom] += cov
                 # Track all seen keys for cross-contig dedup
                 reads_seen.update(seen)
 
@@ -1169,6 +1215,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         read_hits = []
         reads_seen = set()
         read_sv_meta = {}
+        kmer_coverage = collections.defaultdict(collections.Counter)
         unmapped_informative = 0
         total_reads_scanned = 0
 
@@ -1184,9 +1231,11 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                 continue
 
             unique_in_read = set()
+            kmer_hit_indices = set()
             if automaton is not None:
                 for _end_idx, canonical_kmer in automaton.iter(seq):
                     unique_in_read.add(canonical_kmer)
+                    kmer_hit_indices.add(_end_idx - kmer_size + 1)
 
             dedup_key = (read.query_name, read.is_supplementary)
             if unique_in_read and dedup_key not in reads_seen:
@@ -1202,6 +1251,12 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                         unique_in_read,
                         read.is_supplementary,
                     ))
+                    # Map novel k-mer query positions to reference coords
+                    chrom = read.reference_name
+                    cov = _collect_kmer_ref_positions(
+                        read, kmer_hit_indices, kmer_size,
+                    )
+                    kmer_coverage[chrom] += cov
 
                 # Collect SV metadata for this informative read
                 max_clip = 0
@@ -1242,7 +1297,8 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     )
 
     if not read_hits:
-        return [], {}, total_informative, {}, unmapped_informative, read_sv_meta
+        return ([], {}, total_informative, {}, unmapped_informative,
+                read_sv_meta, kmer_coverage)
 
     # Sort by chrom, start
     read_hits.sort(key=lambda x: (x[0], x[1]))
@@ -1284,7 +1340,8 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         len(read_hits), len(regions),
     )
 
-    return regions, region_reads, total_informative, region_kmers, unmapped_informative, read_sv_meta
+    return (regions, region_reads, total_informative, region_kmers,
+            unmapped_informative, read_sv_meta, kmer_coverage)
 
 
 def _write_bed(regions, region_reads, region_kmers, bed_path,
@@ -1307,6 +1364,45 @@ def _write_bed(regions, region_reads, region_kmers, bed_path,
                 f"\t{max_clip_len}\t{unmapped_mates}\t{region_class}\n"
             )
     logger.info("BED file written: %s (%d regions)", bed_path, len(regions))
+
+
+def _write_bedgraph(kmer_coverage, bedgraph_path):
+    """Write a 4-column bedGraph of novel k-mer reference coverage.
+
+    Adjacent positions with identical coverage are merged into single
+    intervals to minimise file size.
+
+    Args:
+        kmer_coverage: Dict mapping chrom to Counter of reference
+            positions with coverage counts.
+        bedgraph_path: Output file path.
+    """
+    total_intervals = 0
+    with open(bedgraph_path, "w") as fh:
+        for chrom in sorted(kmer_coverage):
+            positions = kmer_coverage[chrom]
+            if not positions:
+                continue
+            sorted_pos = sorted(positions)
+            run_start = sorted_pos[0]
+            run_val = positions[run_start]
+            run_end = run_start + 1
+            for pos in sorted_pos[1:]:
+                val = positions[pos]
+                if pos == run_end and val == run_val:
+                    run_end = pos + 1
+                else:
+                    fh.write(f"{chrom}\t{run_start}\t{run_end}\t{run_val}\n")
+                    total_intervals += 1
+                    run_start = pos
+                    run_val = val
+                    run_end = pos + 1
+            fh.write(f"{chrom}\t{run_start}\t{run_end}\t{run_val}\n")
+            total_intervals += 1
+    logger.info(
+        "bedGraph file written: %s (%d intervals)",
+        bedgraph_path, total_intervals,
+    )
 
 
 def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta):
@@ -2048,6 +2144,7 @@ def run_discovery_pipeline(args):
     metrics_path = f"{out_prefix}.metrics.json"
     summary_path = f"{out_prefix}.summary.txt"
     bedpe_path = getattr(args, "sv_bedpe", None) or f"{out_prefix}.sv.bedpe"
+    bedgraph_path = f"{out_prefix}.kmer_coverage.bedgraph"
 
     # ── Configuration summary ──────────────────────────────────────
     logger.info("=" * 60)
@@ -2193,7 +2290,7 @@ def run_discovery_pipeline(args):
         len(proband_unique_kmers),
     )
     (regions, region_reads, total_informative, region_kmers,
-     unmapped_informative, read_sv_meta) = (
+     unmapped_informative, read_sv_meta, kmer_coverage) = (
         _anchor_and_cluster(
             args.child, args.ref_fasta, proband_unique_kmers,
             args.kmer_size, merge_distance=args.cluster_distance,
@@ -2239,6 +2336,8 @@ def run_discovery_pipeline(args):
 
     _write_bed(regions, region_reads, region_kmers, bed_path,
                region_annotations=region_annotations)
+
+    _write_bedgraph(kmer_coverage, bedgraph_path)
 
     _write_bedpe(sv_links, bedpe_path)
 
@@ -2363,6 +2462,7 @@ def run_discovery_pipeline(args):
     logger.info("  Discovery pipeline complete!")
     logger.info("=" * 60)
     logger.info("  Candidate regions: %s", bed_path)
+    logger.info("  K-mer coverage:    %s", bedgraph_path)
     logger.info("  Informative BAM:   %s", info_bam_path)
     logger.info("  SV breakpoints:    %s", bedpe_path)
     logger.info("  Metrics:           %s", metrics_path)
