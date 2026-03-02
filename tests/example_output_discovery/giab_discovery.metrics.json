@@ -386,5 +386,140 @@
         "region": "chr11:55008330-55009053"
       }
     ]
+  },
+  "dnm_evaluation": {
+    "total_loci": 7,
+    "detected": 7,
+    "detection_rate": 1.0,
+    "loci": [
+      {
+        "locus": "chr17:53340465",
+        "event_type": "deletion",
+        "event_size": 107,
+        "detected": true,
+        "discovery_regions": [
+          "chr17:53339952-53341164"
+        ],
+        "total_reads": 21,
+        "total_unique_kmers": 40,
+        "max_clip_len": 108,
+        "unmapped_mates": 1,
+        "discordant_pairs": 1,
+        "split_reads": 0,
+        "sv_class": "AMBIGUOUS",
+        "kmer_signal": 0.033,
+        "assessment": "DETECTED"
+      },
+      {
+        "locus": "chr14:23280711",
+        "event_type": "microsatellite_expansion",
+        "event_size": null,
+        "detected": true,
+        "discovery_regions": [
+          "chr14:23280026-23280906"
+        ],
+        "total_reads": 10,
+        "total_unique_kmers": 16,
+        "max_clip_len": 29,
+        "unmapped_mates": 5,
+        "discordant_pairs": 1,
+        "split_reads": 0,
+        "sv_class": "SV",
+        "kmer_signal": 0.0182,
+        "assessment": "DETECTED"
+      },
+      {
+        "locus": "chr3:85552367",
+        "event_type": "sv_like",
+        "event_size": 64,
+        "detected": true,
+        "discovery_regions": [
+          "chr3:85552298-85552639"
+        ],
+        "total_reads": 4,
+        "total_unique_kmers": 7,
+        "max_clip_len": 9,
+        "unmapped_mates": 0,
+        "discordant_pairs": 0,
+        "split_reads": 0,
+        "sv_class": "SMALL",
+        "kmer_signal": 0.0205,
+        "assessment": "DETECTED"
+      },
+      {
+        "locus": "chr5:97089276",
+        "event_type": "sv_like",
+        "event_size": 43,
+        "detected": true,
+        "discovery_regions": [
+          "chr5:97089076-97089510"
+        ],
+        "total_reads": 22,
+        "total_unique_kmers": 30,
+        "max_clip_len": 50,
+        "unmapped_mates": 0,
+        "discordant_pairs": 0,
+        "split_reads": 0,
+        "sv_class": "SMALL",
+        "kmer_signal": 0.069,
+        "assessment": "DETECTED"
+      },
+      {
+        "locus": "chr8:125785998",
+        "event_type": "sv_like",
+        "event_size": 43,
+        "detected": true,
+        "discovery_regions": [
+          "chr8:125785443-125786483"
+        ],
+        "total_reads": 37,
+        "total_unique_kmers": 56,
+        "max_clip_len": 78,
+        "unmapped_mates": 0,
+        "discordant_pairs": 0,
+        "split_reads": 0,
+        "sv_class": "SMALL",
+        "kmer_signal": 0.0538,
+        "assessment": "DETECTED"
+      },
+      {
+        "locus": "chr18:62805217",
+        "event_type": "sv_like",
+        "event_size": 34,
+        "detected": true,
+        "discovery_regions": [
+          "chr18:62804674-62805489"
+        ],
+        "total_reads": 14,
+        "total_unique_kmers": 42,
+        "max_clip_len": 34,
+        "unmapped_mates": 0,
+        "discordant_pairs": 0,
+        "split_reads": 0,
+        "sv_class": "SMALL",
+        "kmer_signal": 0.0515,
+        "assessment": "DETECTED"
+      },
+      {
+        "locus": "chr7:142786222",
+        "event_type": "deletion",
+        "event_size": 10607,
+        "detected": true,
+        "discovery_regions": [
+          "chr7:142785588-142786223",
+          "chr7:142788519-142789264",
+          "chr7:142792552-142792982"
+        ],
+        "total_reads": 14,
+        "total_unique_kmers": 112,
+        "max_clip_len": 94,
+        "unmapped_mates": 4,
+        "discordant_pairs": 1,
+        "split_reads": 0,
+        "sv_class": "SV",
+        "kmer_signal": 0.01,
+        "assessment": "DETECTED"
+      }
+    ]
   }
 }

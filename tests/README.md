@@ -12,7 +12,8 @@
   output (BED, metrics, summary). Shows a unified diff on failure.
 - **test_integration_comparison.py** – Integration tests comparing VCF-mode
   candidates to discovery-mode regions, verifying that high-quality de novo
-  candidates are captured within discovered genomic regions.
+  candidates are captured within discovered genomic regions.  Also evaluates
+  all 7 curated Sulovari et al. 2023 DNM SV regions against discovery output.
 - **conftest.py** – Shared fixtures, including session-scoped
   `generated_example_output` and `generated_discovery_output` fixtures that
   run the GIAB pipeline once and return paths to all output files for reuse
@@ -87,6 +88,38 @@ from the example output:
 Discovery mode identifies **27 candidate regions** from the same data,
 with **3 high-quality candidates** (DKA_DKT > 0.25, DKA > 10) captured
 at 100% rate.
+
+### Curated DNM Region Evaluation
+
+The discovery pipeline automatically evaluates its regions against the 7
+curated de novo SV loci from Sulovari et al. 2023 (PMC10006329).  All 7
+are detected (100% sensitivity) with the following evidence profile:
+
+| Locus | Event | Size | Reads | K-mers | Signal | MaxClip | Class |
+|---|---|---|---|---|---|---|---|
+| chr17:53340465 | Deletion | 107 bp | 21 | 40 | 0.0330 | 108 | AMBIGUOUS |
+| chr14:23280711 | Microsatellite expansion | – | 10 | 16 | 0.0182 | 29 | SV |
+| chr3:85552367 | SV-like event | 64 bp | 4 | 7 | 0.0205 | 9 | SMALL |
+| chr5:97089276 | SV-like event | 43 bp | 22 | 30 | 0.0690 | 50 | SMALL |
+| chr8:125785998 | SV-like event | 43 bp | 37 | 56 | 0.0538 | 78 | SMALL |
+| chr18:62805217 | SV-like event | 34 bp | 14 | 42 | 0.0515 | 34 | SMALL |
+| chr7:142786222 | Deletion (TRB) | 10,607 bp | 14 | 112 | 0.0100 | 94 | SV |
+
+**Observations:**
+- The chr5 and chr8 loci show the strongest k-mer signal (≥0.05 k-mers/bp),
+  consistent with insertion events that create novel sequence not present in
+  the reference or parents.
+- The chr17 107 bp deletion is classified as AMBIGUOUS with a 108 bp max clip
+  length matching the expected event size, confirming breakpoint-spanning reads.
+- The chr14 microsatellite expansion is correctly classified as SV based on
+  5 unmapped mates and 1 discordant pair, consistent with reads failing to
+  align across an expanded repeat.
+- The chr7 TRB locus 10.6 kb deletion is captured by 3 separate discovery
+  regions with SV classification, reflecting the expected breakpoint pattern
+  for a large deletion.
+- The chr18 34 bp event (DKU=0, inherited in VCF mode) still shows 42
+  proband-unique k-mers in discovery mode, illustrating that k-mer-based
+  discovery can surface variants missed by VCF-guided annotation.
 
 ### Keeping Output Up to Date
 

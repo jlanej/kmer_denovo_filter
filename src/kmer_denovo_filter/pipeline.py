@@ -1605,10 +1605,160 @@ def _compare_candidates_to_regions(candidates, regions):
     return results
 
 
+# ── Curated DNM region definitions (Sulovari et al. 2023) ──────────
+
+#: Curated de novo mutation regions from Sulovari et al. 2023
+#: (PMID: 36894594, PMC10006329).  Each tuple:
+#: (chrom, position, size_bp_or_None, event_type)
+SULOVARI_DNM_REGIONS = [
+    ("chr17", 53340465, 107, "deletion"),
+    ("chr14", 23280711, None, "microsatellite_expansion"),
+    ("chr3", 85552367, 64, "sv_like"),
+    ("chr5", 97089276, 43, "sv_like"),
+    ("chr8", 125785998, 43, "sv_like"),
+    ("chr18", 62805217, 34, "sv_like"),
+    ("chr7", 142786222, 10607, "deletion"),
+]
+
+
+def _evaluate_dnm_regions(discovery_regions, region_detail,
+                          dnm_regions=None):
+    """Evaluate how well VCF-free discovery captures curated DNM regions.
+
+    For each curated de novo mutation region from Sulovari et al. 2023,
+    determines whether it was nominated by the discovery pipeline and
+    collects quantitative k-mer and SV-signal evidence from the
+    overlapping discovery region(s).
+
+    The evaluation provides a simple genotype-like assessment per region:
+
+    - **DETECTED**: ≥1 discovery region overlaps the curated locus with
+      informative reads carrying proband-unique k-mers.
+    - **NOT_DETECTED**: No overlapping discovery region found.
+
+    For detected regions, a *k-mer signal score* summarises evidence
+    strength as ``unique_kmers / region_size_bp``.  Higher density
+    indicates more child-specific sequence variation concentrated in the
+    region, consistent with a de novo SV.
+
+    Args:
+        discovery_regions: List of (chrom, start, end) tuples (0-based,
+            half-open) from the discovery BED.
+        region_detail: List of dicts with per-region metrics (the
+            ``regions`` array from the discovery metrics JSON).
+        dnm_regions: Optional list of (chrom, pos, size_or_None,
+            event_type) tuples.  Defaults to ``SULOVARI_DNM_REGIONS``.
+
+    Returns:
+        List of dicts, one per curated region, with keys:
+
+        - locus (str): ``chrom:pos``
+        - event_type (str): Event type label.
+        - event_size (int or None): Expected event size in bp.
+        - detected (bool): Whether ≥1 discovery region overlaps.
+        - discovery_regions (list of str): Matching region labels.
+        - total_reads (int): Sum of informative reads across matches.
+        - total_unique_kmers (int): Sum of proband-unique k-mers.
+        - max_clip_len (int): Max soft-clip length across matches.
+        - unmapped_mates (int): Sum of unmapped-mate counts.
+        - discordant_pairs (int): Sum of discordant-pair counts.
+        - split_reads (int): Sum of split-read counts.
+        - sv_class (str): Most severe SV class across matches.
+        - kmer_signal (float): ``total_unique_kmers / span_bp``.
+        - assessment (str): ``DETECTED`` or ``NOT_DETECTED``.
+    """
+    if dnm_regions is None:
+        dnm_regions = SULOVARI_DNM_REGIONS
+
+    # Build an index from region tuple → detail dict
+    detail_by_key = {}
+    for rd in region_detail:
+        key = (rd["chrom"], rd["start"], rd["end"])
+        detail_by_key[key] = rd
+
+    results = []
+    for chrom, pos, size, event_type in dnm_regions:
+        dnm_start = pos
+        dnm_end = pos + (size if size else 1)  # point if no size
+
+        # Find overlapping discovery regions
+        matches = []
+        for dr_key in discovery_regions:
+            dr_chrom, dr_start, dr_end = dr_key
+            if dr_chrom != chrom:
+                continue
+            # Overlap check (both 0-based half-open)
+            if dr_start < dnm_end and dnm_start <= dr_end:
+                matches.append(dr_key)
+
+        detected = len(matches) > 0
+
+        # Aggregate evidence across matching regions
+        total_reads = 0
+        total_kmers = 0
+        max_clip = 0
+        total_unmapped = 0
+        total_discordant = 0
+        total_split = 0
+        region_labels = []
+        sv_classes = []
+        span_start = dnm_start
+        span_end = dnm_end
+
+        for m_key in matches:
+            rd = detail_by_key.get(m_key, {})
+            total_reads += rd.get("reads", 0)
+            total_kmers += rd.get("unique_kmers", 0)
+            clip = rd.get("max_clip_len", 0)
+            if clip > max_clip:
+                max_clip = clip
+            total_unmapped += rd.get("unmapped_mates", 0)
+            total_discordant += rd.get("discordant_pairs", 0)
+            total_split += rd.get("split_reads", 0)
+            sv_classes.append(rd.get("class", "SMALL"))
+            label = f"{m_key[0]}:{m_key[1] + 1}-{m_key[2]}"
+            region_labels.append(label)
+            # Expand span to cover all matching regions
+            if m_key[1] < span_start:
+                span_start = m_key[1]
+            if m_key[2] > span_end:
+                span_end = m_key[2]
+
+        span_bp = max(span_end - span_start, 1)
+        kmer_signal = total_kmers / span_bp if detected else 0.0
+
+        # Most severe SV class
+        class_priority = {"SV": 3, "AMBIGUOUS": 2, "SMALL": 1}
+        sv_class = max(sv_classes, key=lambda c: class_priority.get(c, 0)) \
+            if sv_classes else "NONE"
+
+        assessment = "DETECTED" if detected else "NOT_DETECTED"
+
+        results.append({
+            "locus": f"{chrom}:{pos}",
+            "event_type": event_type,
+            "event_size": size,
+            "detected": detected,
+            "discovery_regions": region_labels,
+            "total_reads": total_reads,
+            "total_unique_kmers": total_kmers,
+            "max_clip_len": max_clip,
+            "unmapped_mates": total_unmapped,
+            "discordant_pairs": total_discordant,
+            "split_reads": total_split,
+            "sv_class": sv_class,
+            "kmer_signal": round(kmer_signal, 4),
+            "assessment": assessment,
+        })
+
+    return results
+
+
 def _write_discovery_summary(summary_path, regions, region_reads,
                              region_kmers, metrics,
                              candidate_comparison=None,
-                             region_annotations=None):
+                             region_annotations=None,
+                             dnm_evaluation=None):
     """Write a human-readable summary for the discovery pipeline.
 
     Analogous to ``_write_summary()`` in VCF mode, but reports
@@ -1625,6 +1775,8 @@ def _write_discovery_summary(summary_path, regions, region_reads,
             ``_compare_candidates_to_regions()``.
         region_annotations: Optional dict mapping region tuple to SV
             annotation dict.
+        dnm_evaluation: Optional list of dicts from
+            ``_evaluate_dnm_regions()``.
     """
     n_regions = metrics["candidate_regions"]
     n_reads_total = metrics["informative_reads"]
@@ -1741,6 +1893,46 @@ def _write_discovery_summary(summary_path, regions, region_reads,
             lines.append(
                 f"  {var_label:<30s}  {c['dka']:>4d}  {c['dka_dkt']:>8.4f}"
                 f"  {region_label:>35s}"
+            )
+        lines.append("")
+
+    if dnm_evaluation:
+        n_total = len(dnm_evaluation)
+        n_detected = sum(1 for e in dnm_evaluation if e["detected"])
+        pct = (n_detected / n_total * 100) if n_total else 0.0
+        lines.append(
+            "Curated DNM Region Evaluation (Sulovari et al. 2023)"
+        )
+        lines.append("-" * 80)
+        lines.append(f"  Curated DNM loci:            {n_total:>8}")
+        lines.append(
+            f"  Detected by discovery:       {n_detected:>8}"
+            f" / {n_total} ({pct:.1f}%)"
+        )
+        lines.append("")
+        lines.append(
+            f"  {'Locus':<20s} {'Event':>25s} {'Size':>8s}"
+            f" {'Reads':>6s} {'Kmers':>6s} {'Signal':>7s}"
+            f" {'MaxClip':>8s} {'Class':>10s} {'Status':>14s}"
+        )
+        lines.append(
+            f"  {'-----':<20s} {'-----':>25s} {'----':>8s}"
+            f" {'-----':>6s} {'-----':>6s} {'------':>7s}"
+            f" {'-------':>8s} {'-----':>10s} {'------':>14s}"
+        )
+        for e in dnm_evaluation:
+            size_str = (f"{e['event_size']}bp"
+                        if e["event_size"] else "–")
+            lines.append(
+                f"  {e['locus']:<20s}"
+                f" {e['event_type']:>25s}"
+                f" {size_str:>8s}"
+                f" {e['total_reads']:>6d}"
+                f" {e['total_unique_kmers']:>6d}"
+                f" {e['kmer_signal']:>7.4f}"
+                f" {e['max_clip_len']:>8d}"
+                f" {e['sv_class']:>10s}"
+                f" {e['assessment']:>14s}"
             )
         lines.append("")
 
@@ -2128,6 +2320,25 @@ def run_discovery_pipeline(args):
                 for c in candidate_comparison
             ],
         }
+
+    # ── Curated DNM region evaluation ─────────────────────────────
+    dnm_evaluation = _evaluate_dnm_regions(
+        regions, metrics["regions"],
+    )
+    n_dnm_detected = sum(1 for e in dnm_evaluation if e["detected"])
+    logger.info(
+        "[Module 4] Curated DNM evaluation: %d / %d detected",
+        n_dnm_detected, len(dnm_evaluation),
+    )
+    metrics["dnm_evaluation"] = {
+        "total_loci": len(dnm_evaluation),
+        "detected": n_dnm_detected,
+        "detection_rate": (
+            n_dnm_detected / len(dnm_evaluation)
+        ) if dnm_evaluation else 0.0,
+        "loci": dnm_evaluation,
+    }
+
     with open(metrics_path, "w") as fh:
         json.dump(metrics, fh, indent=2)
     logger.info("[Module 4] Metrics written to: %s", metrics_path)
@@ -2137,6 +2348,7 @@ def run_discovery_pipeline(args):
         summary_path, regions, region_reads, region_kmers, metrics,
         candidate_comparison=candidate_comparison,
         region_annotations=region_annotations,
+        dnm_evaluation=dnm_evaluation,
     )
     logger.info("\n%s", summary_text)
 

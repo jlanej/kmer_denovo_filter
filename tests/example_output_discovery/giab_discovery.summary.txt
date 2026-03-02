@@ -62,4 +62,19 @@ Candidate Comparison (DKA_DKT > 0.25, DKA > 10)
   chr11:55003995 T>C                24    0.4528              chr11:55003557-55004560
   chr11:55008577 C>T                13    0.3824              chr11:55008330-55009053
 
+Curated DNM Region Evaluation (Sulovari et al. 2023)
+--------------------------------------------------------------------------------
+  Curated DNM loci:                   7
+  Detected by discovery:              7 / 7 (100.0%)
+
+  Locus                                    Event     Size  Reads  Kmers  Signal  MaxClip      Class         Status
+  -----                                    -----     ----  -----  -----  ------  -------      -----         ------
+  chr17:53340465                        deletion    107bp     21     40  0.0330      108  AMBIGUOUS       DETECTED
+  chr14:23280711        microsatellite_expansion        –     10     16  0.0182       29         SV       DETECTED
+  chr3:85552367                          sv_like     64bp      4      7  0.0205        9      SMALL       DETECTED
+  chr5:97089276                          sv_like     43bp     22     30  0.0690       50      SMALL       DETECTED
+  chr8:125785998                         sv_like     43bp     37     56  0.0538       78      SMALL       DETECTED
+  chr18:62805217                         sv_like     34bp     14     42  0.0515       34      SMALL       DETECTED
+  chr7:142786222                        deletion  10607bp     14    112  0.0100       94         SV       DETECTED
+
 ============================================================
