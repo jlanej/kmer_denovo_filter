@@ -378,21 +378,22 @@ def _scan_parent_jellyfish(
         jf_size = _format_file_size(jf_output)
         logger.info("  Dumping jellyfish results (%s index)…", jf_size)
         dump_cmd = ["jellyfish", "dump", "-c", "-L", "1", jf_output]
-        p_dump = subprocess.Popen(
-            dump_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True,
-        )
-        for line in p_dump.stdout:
-            line = line.rstrip("\n")
-            if line:
-                parts = line.split()
-                found_kmers[parts[0]] = int(parts[1])
-        dump_stderr = p_dump.stderr.read()
-        p_dump.wait()
-        if p_dump.returncode != 0:
-            raise RuntimeError(
-                f"jellyfish dump (parent) failed: {dump_stderr}"
+        with tempfile.TemporaryFile(mode="w+") as stderr_f:
+            p_dump = subprocess.Popen(
+                dump_cmd, stdout=subprocess.PIPE, stderr=stderr_f,
+                text=True,
             )
+            for line in p_dump.stdout:
+                line = line.rstrip("\n")
+                if line:
+                    parts = line.split()
+                    found_kmers[parts[0]] = int(parts[1])
+            p_dump.wait()
+            if p_dump.returncode != 0:
+                stderr_f.seek(0)
+                raise RuntimeError(
+                    f"jellyfish dump (parent) failed: {stderr_f.read()}"
+                )
 
         # Remove the parent jellyfish index to free disk/cache.
         os.remove(jf_output)
@@ -869,22 +870,23 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
     ]
     child_candidates_fa = os.path.join(tmpdir, "child_candidates.fa")
     n_candidates = 0
-    p_dump = subprocess.Popen(
-        dump_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
-    with open(child_candidates_fa, "w") as fh:
-        for line in p_dump.stdout:
-            line = line.rstrip("\n")
-            if line:
-                kmer = line.split()[0]
-                fh.write(f">{n_candidates}\n{kmer}\n")
-                n_candidates += 1
-    dump_stderr = p_dump.stderr.read()
-    p_dump.wait()
-    if p_dump.returncode != 0:
-        raise RuntimeError(
-            f"jellyfish dump (child) failed: {dump_stderr}"
+    with tempfile.TemporaryFile(mode="w+") as stderr_f:
+        p_dump = subprocess.Popen(
+            dump_cmd, stdout=subprocess.PIPE, stderr=stderr_f, text=True,
         )
+        with open(child_candidates_fa, "w") as fh:
+            for line in p_dump.stdout:
+                line = line.rstrip("\n")
+                if line:
+                    kmer = line.split()[0]
+                    fh.write(f">{n_candidates}\n{kmer}\n")
+                    n_candidates += 1
+        p_dump.wait()
+        if p_dump.returncode != 0:
+            stderr_f.seek(0)
+            raise RuntimeError(
+                f"jellyfish dump (child) failed: {stderr_f.read()}"
+            )
 
     # Remove the child jellyfish index immediately – it is no longer
     # needed and can be very large (100+ GB for WGS).
@@ -917,27 +919,28 @@ def _subtract_reference_kmers(ref_jf, child_candidates_fa, tmpdir):
     query_cmd = [
         "jellyfish", "query", ref_jf, "-s", child_candidates_fa,
     ]
-    p_query = subprocess.Popen(
-        query_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-    )
 
     child_non_ref_fa = os.path.join(tmpdir, "child_non_ref_kmers.fa")
     n_non_ref = 0
-    with open(child_non_ref_fa, "w") as fh:
-        for line in p_query.stdout:
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            parts = line.split()
-            if len(parts) >= 2 and parts[1] == "0":
-                fh.write(f">{n_non_ref}\n{parts[0]}\n")
-                n_non_ref += 1
-    query_stderr = p_query.stderr.read()
-    p_query.wait()
-    if p_query.returncode != 0:
-        raise RuntimeError(
-            f"jellyfish query (ref subtraction) failed: {query_stderr}"
+    with tempfile.TemporaryFile(mode="w+") as stderr_f:
+        p_query = subprocess.Popen(
+            query_cmd, stdout=subprocess.PIPE, stderr=stderr_f, text=True,
         )
+        with open(child_non_ref_fa, "w") as fh:
+            for line in p_query.stdout:
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == "0":
+                    fh.write(f">{n_non_ref}\n{parts[0]}\n")
+                    n_non_ref += 1
+        p_query.wait()
+        if p_query.returncode != 0:
+            stderr_f.seek(0)
+            raise RuntimeError(
+                f"jellyfish query (ref subtraction) failed: {stderr_f.read()}"
+            )
 
     # Remove the candidates FASTA – the non-ref subset is now on disk.
     if os.path.exists(child_candidates_fa):
