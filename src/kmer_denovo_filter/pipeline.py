@@ -59,20 +59,104 @@ def _format_file_size(path):
 
 
 def _log_memory(label=""):
-    """Log current and peak process memory usage (Linux only)."""
+    """Log current and peak process memory usage.
+
+    Works on Linux (``/proc/self/status``) and macOS/BSD
+    (``resource.getrusage``).  Falls back silently when neither source
+    is available.
+    """
     try:
         info = {}
-        with open("/proc/self/status") as f:
-            for line in f:
-                if line.startswith("VmRSS:"):
-                    info["RSS"] = int(line.split()[1]) / (1024 * 1024)
-                elif line.startswith("VmPeak:"):
-                    info["Peak"] = int(line.split()[1]) / (1024 * 1024)
+        # Linux: read from /proc
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        info["RSS"] = int(line.split()[1]) / (1024 * 1024)
+                    elif line.startswith("VmPeak:"):
+                        info["Peak"] = int(line.split()[1]) / (1024 * 1024)
+        except FileNotFoundError:
+            pass
+        # Fallback: resource module (works on macOS & Linux)
+        if not info:
+            import resource
+            rusage = resource.getrusage(resource.RUSAGE_SELF)
+            # macOS reports maxrss in bytes; Linux in KB
+            import platform
+            divisor = (1024 * 1024) if platform.system() == "Darwin" else (1024 * 1024)
+            rss_gb = rusage.ru_maxrss / divisor
+            if platform.system() == "Darwin":
+                rss_gb = rusage.ru_maxrss / (1024 * 1024 * 1024)
+            info["Peak_RSS"] = rss_gb
         if info:
-            parts = [f"{k}={v:.1f} GB" for k, v in sorted(info.items())]
+            parts = [f"{k}={v:.2f} GB" for k, v in sorted(info.items())]
             logger.info("  [Memory] %s — %s", label, ", ".join(parts))
     except Exception:
         pass
+
+
+def _log_subprocess_memory(proc, label=""):
+    """Log memory usage of a subprocess (Linux only).
+
+    Reads ``VmRSS`` from ``/proc/{pid}/status`` for the given
+    :class:`subprocess.Popen` object.  Silently skipped on non-Linux
+    or when the process has already exited.
+    """
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        rss_kb = 0
+        with open(f"/proc/{proc.pid}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    rss_kb = int(line.split()[1])
+                    break
+        if rss_kb:
+            logger.info(
+                "  [SubprocessMem] %s (pid=%d) — RSS=%.2f GB",
+                label, proc.pid, rss_kb / (1024 * 1024),
+            )
+    except Exception:
+        pass
+
+
+def _estimate_jf_hash_size(bam_path, kmer_size, default="1G"):
+    """Estimate a reasonable ``-s`` hash size for Jellyfish count.
+
+    Uses the BAM file size as a rough proxy for the number of k-mers
+    (approximately ``file_size / 4`` for compressed BAM → approximate
+    bases, divided by reasonable overhead).  The result is capped to
+    keep initial memory reasonable.
+
+    Returns a string suitable for Jellyfish's ``-s`` argument
+    (e.g. ``"2G"``, ``"500M"``).
+    """
+    try:
+        file_size = os.path.getsize(bam_path)
+    except OSError:
+        return default
+
+    # Rough heuristic: BAM compresses ~3:1, so uncompressed bases ≈
+    # file_size * 3.  Distinct k-mers are typically much less than
+    # total bases.  Jellyfish hash entry is ~(k+8) bytes.
+    # Aim for hash that can hold ~75% of distinct k-mers without
+    # resizing while staying within memory budget.
+    #
+    # Conservative estimate: 1 entry per 10 uncompressed bases,
+    # capped between 100M and 4G.
+    estimated_bases = file_size * 3
+    estimated_distinct = estimated_bases // 10
+    entry_bytes = kmer_size + 8
+    hash_bytes = estimated_distinct * entry_bytes
+
+    # Cap between 100M and 4G entries (not bytes)
+    min_entries = 100_000_000   # 100M
+    max_entries = 4_000_000_000  # 4G
+    entries = max(min_entries, min(estimated_distinct, max_entries))
+
+    if entries >= 1_000_000_000:
+        return f"{entries // 1_000_000_000}G"
+    return f"{entries // 1_000_000}M"
 
 
 def _validate_inputs(args):
@@ -375,6 +459,9 @@ def _scan_parent_jellyfish(
                 "  … still scanning (%s elapsed, jf index: %s)",
                 _format_elapsed(elapsed), jf_size,
             )
+            _log_memory("parent scanning")
+            _log_subprocess_memory(p_jellyfish, "jellyfish-count")
+            _log_subprocess_memory(p_samtools, "samtools-fasta")
             last_log = now
 
     p_samtools.communicate()
@@ -795,11 +882,13 @@ def _ensure_ref_jf(ref_fasta, kmer_size, threads, ref_jf=None):
         "Building reference Jellyfish index: %s (k=%d, threads=%d)",
         ref_jf, kmer_size, threads,
     )
+    ref_hash_size = _estimate_jf_hash_size(ref_fasta, kmer_size, default="3G")
+    logger.info("  Reference JF hash size: %s", ref_hash_size)
     build_start = time.monotonic()
     cmd = [
         "jellyfish", "count",
         "-m", str(kmer_size),
-        "-s", "3G",
+        "-s", ref_hash_size,
         "-t", str(threads),
         "-C",
         ref_fasta,
@@ -818,8 +907,58 @@ def _ensure_ref_jf(ref_fasta, kmer_size, threads, ref_jf=None):
     return ref_jf
 
 
+def _find_jf_files(base_path):
+    """Find all Jellyfish output files for a given base path.
+
+    When Jellyfish's hash table overflows, it produces numbered files
+    (``base.jf_0``, ``base.jf_1``, …) rather than a single ``base.jf``.
+    Returns a sorted list of existing ``.jf`` / ``.jf_N`` files.
+    """
+    import glob
+    files = []
+    if os.path.exists(base_path):
+        files.append(base_path)
+    files.extend(sorted(glob.glob(base_path + "_[0-9]*")))
+    return files
+
+
+def _merge_jf_files(jf_files, merged_path, threads=4):
+    """Merge multiple Jellyfish chunk files into one.
+
+    When Jellyfish count produces multiple output files (hash overflow),
+    they must be merged before querying.  Uses ``jellyfish merge`` which
+    streams chunks and requires memory proportional to one chunk at a
+    time.
+    """
+    if len(jf_files) <= 1:
+        return jf_files[0] if jf_files else None
+
+    logger.info(
+        "Merging %d Jellyfish chunks into %s…",
+        len(jf_files), merged_path,
+    )
+    merge_start = time.monotonic()
+    cmd = ["jellyfish", "merge", "-o", merged_path] + jf_files
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"jellyfish merge failed: {result.stderr}")
+
+    # Remove chunk files to free disk
+    for f in jf_files:
+        if f != merged_path and os.path.exists(f):
+            os.remove(f)
+
+    logger.info(
+        "Jellyfish merge complete (%s, merged: %s)",
+        _format_elapsed(time.monotonic() - merge_start),
+        _format_file_size(merged_path),
+    )
+    return merged_path
+
+
 def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
-                                   min_child_count, threads, tmpdir):
+                                   min_child_count, threads, tmpdir,
+                                   jf_hash_size=None):
     """Module 1: Extract all child k-mers and filter by minimum count.
 
     Child k-mers are counted with ``jellyfish count -C`` (canonical mode)
@@ -827,10 +966,17 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
     ensures that ``jellyfish query`` during reference subtraction compares
     k-mers in the same canonical orientation.
 
+    The hash size for Jellyfish is estimated dynamically from the BAM
+    file size (unless overridden via *jf_hash_size*) to avoid hash
+    overflow that can produce multi-hundred-GB monolithic index files.
+
+    When Jellyfish produces multiple chunk files (hash overflow), they
+    are merged in a streaming fashion before dumping.
+
     The ``jellyfish dump`` output is streamed line-by-line so the full
-    dump text is never held in memory.  The child Jellyfish index is
-    removed immediately after the dump to free disk space and OS page
-    cache — at WGS scale this file can exceed 100 GB.
+    dump text is never held in memory.  Each Jellyfish chunk file is
+    removed as soon as it has been processed to free disk space and OS
+    page cache.
 
     Returns:
         child_candidates_fa: path to FASTA of candidate child k-mers
@@ -840,7 +986,12 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
     child_jf = os.path.join(tmpdir, "child.jf")
 
     # Step 1: Count all child k-mers
-    logger.info("Extracting child k-mers from BAM (k=%d)…", kmer_size)
+    if jf_hash_size is None:
+        jf_hash_size = _estimate_jf_hash_size(child_bam, kmer_size, default="1G")
+    logger.info(
+        "Extracting child k-mers from BAM (k=%d, jf hash size=%s)…",
+        kmer_size, jf_hash_size,
+    )
     samtools_cmd = ["samtools", "fasta", "-F", "0xD00", "-@", "2", child_bam]
     if ref_fasta:
         samtools_cmd.extend(["--reference", ref_fasta])
@@ -848,7 +999,7 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
     jellyfish_cmd = [
         "jellyfish", "count",
         "-m", str(kmer_size),
-        "-s", "1G",
+        "-s", jf_hash_size,
         "-t", str(threads),
         "-C",
         "-o", child_jf,
@@ -873,15 +1024,27 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
             break
         except subprocess.TimeoutExpired:
             elapsed = time.monotonic() - extract_start
-            jf_size = (
-                _format_file_size(child_jf)
-                if os.path.exists(child_jf) else "pending"
-            )
+            jf_files = _find_jf_files(child_jf)
+            if jf_files:
+                total_size = sum(
+                    os.path.getsize(f) for f in jf_files
+                    if os.path.exists(f)
+                )
+                jf_size = _format_file_size.__wrapped__(total_size) \
+                    if hasattr(_format_file_size, '__wrapped__') \
+                    else f"{total_size / (1024**3):.1f} GB"
+                n_chunks = len(jf_files)
+            else:
+                jf_size = "pending"
+                n_chunks = 0
             logger.info(
-                "  … child k-mer counting (%s elapsed, jf index: %s)",
-                _format_elapsed(elapsed), jf_size,
+                "  … child k-mer counting (%s elapsed, jf index: %s, "
+                "chunks: %d)",
+                _format_elapsed(elapsed), jf_size, n_chunks,
             )
             _log_memory("child k-mer counting")
+            _log_subprocess_memory(p_jellyfish, "jellyfish-count")
+            _log_subprocess_memory(p_samtools, "samtools-fasta")
 
     jf_stderr = p_jellyfish.stderr.read() if p_jellyfish.stderr else b""
     p_samtools.communicate()
@@ -891,19 +1054,44 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
             f"jellyfish count (child) failed: "
             f"{jf_stderr.decode() if jf_stderr else ''}"
         )
+
+    # Check for multi-file output (hash overflow)
+    jf_files = _find_jf_files(child_jf)
+    total_jf_size = sum(
+        os.path.getsize(f) for f in jf_files if os.path.exists(f)
+    )
     logger.info(
-        "Child k-mer counting complete (%s, index: %s)",
+        "Child k-mer counting complete (%s, index: %.1f GB, files: %d)",
         _format_elapsed(time.monotonic() - extract_start),
-        _format_file_size(child_jf),
+        total_jf_size / (1024**3), len(jf_files),
     )
     _log_memory("after child k-mer counting")
 
+    # Merge chunk files if Jellyfish produced multiple outputs
+    if len(jf_files) > 1:
+        merged_jf = os.path.join(tmpdir, "child_merged.jf")
+        child_jf_final = _merge_jf_files(jf_files, merged_jf, threads)
+    elif jf_files:
+        child_jf_final = jf_files[0]
+    else:
+        logger.warning("No Jellyfish output files found")
+        child_candidates_fa = os.path.join(tmpdir, "child_candidates.fa")
+        with open(child_candidates_fa, "w"):
+            pass
+        return child_candidates_fa, 0
+
     # Step 2: Dump k-mers with count >= min_child_count (streamed to
     # avoid holding the full dump text in memory).
+    logger.info(
+        "Dumping child k-mers with count >= %d from %s (%s)…",
+        min_child_count, child_jf_final,
+        _format_file_size(child_jf_final),
+    )
+    dump_start = time.monotonic()
     dump_cmd = [
         "jellyfish", "dump", "-c",
         "-L", str(min_child_count),
-        child_jf,
+        child_jf_final,
     ]
     child_candidates_fa = os.path.join(tmpdir, "child_candidates.fa")
     n_candidates = 0
@@ -911,6 +1099,8 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
         p_dump = subprocess.Popen(
             dump_cmd, stdout=subprocess.PIPE, stderr=stderr_f, text=True,
         )
+        # Monitor dump subprocess memory during streaming
+        last_dump_log = dump_start
         with open(child_candidates_fa, "w") as fh:
             for line in p_dump.stdout:
                 line = line.rstrip("\n")
@@ -918,6 +1108,17 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
                     kmer = line.split()[0]
                     fh.write(f">{n_candidates}\n{kmer}\n")
                     n_candidates += 1
+                    if n_candidates % 5_000_000 == 0:
+                        now = time.monotonic()
+                        if now - last_dump_log >= 30:
+                            logger.info(
+                                "  … dumped %d k-mers so far (%s)",
+                                n_candidates,
+                                _format_elapsed(now - dump_start),
+                            )
+                            _log_subprocess_memory(p_dump, "jellyfish-dump")
+                            _log_memory("during child dump")
+                            last_dump_log = now
         p_dump.wait()
         if p_dump.returncode != 0:
             stderr_f.seek(0)
@@ -925,11 +1126,21 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
                 f"jellyfish dump (child) failed: {stderr_f.read()}"
             )
 
+    logger.info(
+        "Child k-mer dump complete (%s, %d candidates, FASTA: %s)",
+        _format_elapsed(time.monotonic() - dump_start),
+        n_candidates, _format_file_size(child_candidates_fa),
+    )
+
     # Remove the child jellyfish index immediately – it is no longer
     # needed and can be very large (100+ GB for WGS).
-    if os.path.exists(child_jf):
-        os.remove(child_jf)
-        logger.info("Removed child Jellyfish index to free disk/cache")
+    for f in _find_jf_files(child_jf):
+        if os.path.exists(f):
+            os.remove(f)
+    if child_jf_final != child_jf and os.path.exists(child_jf_final):
+        os.remove(child_jf_final)
+    logger.info("Removed child Jellyfish index to free disk/cache")
+    _log_memory("after child index removal")
 
     logger.info(
         "Child candidate k-mers (count >= %d): %d",
@@ -1064,6 +1275,8 @@ def _count_parent_jellyfish(parent_bam, ref_fasta, kmer_fasta, kmer_size,
                 label, _format_elapsed(elapsed), jf_size,
             )
             _log_memory(f"{label} counting")
+            _log_subprocess_memory(p_jellyfish, f"jellyfish-count ({label})")
+            _log_subprocess_memory(p_samtools, f"samtools-fasta ({label})")
 
     p_samtools.communicate()
     jf_stderr = p_jellyfish.stderr.read()
@@ -1096,14 +1309,16 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
     reduced FASTA used as the ``--if`` filter for the father scan, which
     further reduces jellyfish memory.
 
+    Returns a tuple of:
+        proband_unique: Set of canonical k-mer strings absent from both
+            parents (proband-unique k-mers).
+        proband_unique_fa: Path to FASTA file of proband-unique k-mers
+            (for passing to worker processes without serialising the set).
+
     Args:
         parent_max_count: Maximum k-mer count allowed in a parent before
             the k-mer is considered parental.  K-mers with count >
             parent_max_count in either parent are removed.
-
-    Returns:
-        Set of canonical k-mer strings that are absent from both parents
-        (proband-unique k-mers).
     """
     # Count input k-mers (stream — no need to load into memory)
     n_input = 0
@@ -1113,7 +1328,7 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
                 n_input += 1
 
     if n_input == 0:
-        return set()
+        return set(), None
 
     logger.info(
         "Filtering %d non-reference k-mers against parents…", n_input,
@@ -1166,7 +1381,7 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
     _log_memory("after mother filtering")
 
     if n_surviving == 0:
-        return set()
+        return set(), None
 
     # ── Father scan (uses reduced k-mer set from mother filter) ────
     father_jf = _count_parent_jellyfish(
@@ -1174,9 +1389,11 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
         os.path.join(tmpdir, "father"), threads, label="Father",
     )
 
-    # Stream-filter: keep k-mers with count <= parent_max_count
+    # Stream-filter: write surviving k-mers to FASTA *and* collect set
+    proband_unique_fa = os.path.join(tmpdir, "proband_unique.fa")
     proband_unique = set()
     n_removed_father = 0
+    n_proband = 0
     query_cmd = [
         "jellyfish", "query", father_jf, "-s", after_mother_fa,
     ]
@@ -1184,15 +1401,19 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
         p_query = subprocess.Popen(
             query_cmd, stdout=subprocess.PIPE, stderr=stderr_f, text=True,
         )
-        for line in p_query.stdout:
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            parts = line.split()
-            if len(parts) >= 2 and int(parts[1]) <= parent_max_count:
-                proband_unique.add(parts[0])
-            else:
-                n_removed_father += 1
+        with open(proband_unique_fa, "w") as fh:
+            for line in p_query.stdout:
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) >= 2 and int(parts[1]) <= parent_max_count:
+                    kmer = parts[0]
+                    proband_unique.add(kmer)
+                    fh.write(f">{n_proband}\n{kmer}\n")
+                    n_proband += 1
+                else:
+                    n_removed_father += 1
         p_query.wait()
         if p_query.returncode != 0:
             stderr_f.seek(0)
@@ -1216,8 +1437,12 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
         "Proband-unique k-mers (absent from both parents): %d / %d",
         len(proband_unique), n_input,
     )
+    logger.info(
+        "Proband-unique FASTA: %s (%s)",
+        proband_unique_fa, _format_file_size(proband_unique_fa),
+    )
     _log_memory("after parent filtering")
-    return proband_unique
+    return proband_unique, proband_unique_fa
 
 
 # ── Multiprocessing helpers for _anchor_and_cluster ────────────────────
@@ -1227,12 +1452,39 @@ _worker_kmer_size = None
 _worker_min_distinct_kmers_per_read = 1
 
 
-def _init_scan_worker(proband_unique_kmers, kmer_size,
+def _load_kmers_from_fasta(fasta_path):
+    """Load k-mer strings from a FASTA file.
+
+    Reads the file line-by-line, yielding only sequence lines (not
+    header lines starting with ``>``).  This avoids building a large
+    intermediate list.
+    """
+    kmers = set()
+    with open(fasta_path) as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if line and not line.startswith(">"):
+                kmers.add(line)
+    return kmers
+
+
+def _init_scan_worker(proband_unique_kmers_or_path, kmer_size,
                       min_distinct_kmers_per_read=1):
-    """Initializer for per-contig scan workers; builds a shared automaton."""
+    """Initializer for per-contig scan workers; builds a shared automaton.
+
+    Accepts either a set of k-mer strings or a path to a FASTA file.
+    When a file path is given, the k-mers are loaded from disk in each
+    worker, avoiding pickle serialization of large sets through
+    ProcessPoolExecutor.
+    """
     global _worker_automaton, _worker_kmer_size
     global _worker_min_distinct_kmers_per_read
-    _worker_automaton = build_kmer_automaton(proband_unique_kmers)
+    if isinstance(proband_unique_kmers_or_path, str):
+        # File path — load k-mers from FASTA
+        kmers = _load_kmers_from_fasta(proband_unique_kmers_or_path)
+    else:
+        kmers = proband_unique_kmers_or_path
+    _worker_automaton = build_kmer_automaton(kmers)
     _worker_kmer_size = kmer_size
     _worker_min_distinct_kmers_per_read = min_distinct_kmers_per_read
 
@@ -1383,7 +1635,8 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
 
 def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                         kmer_size, merge_distance=500, threads=1,
-                        min_distinct_kmers_per_read=1):
+                        min_distinct_kmers_per_read=1,
+                        proband_unique_fa=None):
     """Module 3: Find reads containing proband-unique k-mers and cluster regions.
 
     Scans **all** primary, non-duplicate child reads — including unmapped and
@@ -1405,6 +1658,11 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     canonicalization.  When *threads* > 1 the BAM is scanned in
     parallel by chromosome using a :class:`ProcessPoolExecutor`.
 
+    When *proband_unique_fa* is provided (path to a FASTA file of
+    proband-unique k-mers), worker processes load k-mers from disk
+    rather than receiving them via pickle serialization, which avoids
+    duplicating the full k-mer set N times in memory.
+
     Args:
         child_bam: Path to child BAM file.
         ref_fasta: Path to reference FASTA (or None).
@@ -1416,6 +1674,10 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         min_distinct_kmers_per_read: Minimum number of distinct
             proband-unique k-mers a read must carry to be retained
             (default 1).
+        proband_unique_fa: Optional path to FASTA file of proband-unique
+            k-mers.  When provided and *threads* > 1, workers load
+            k-mers from this file instead of receiving the set via
+            pickle.
 
     Returns:
         regions: List of (chrom, start, end) tuples (0-based, half-open BED).
@@ -1436,6 +1698,10 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     """
     anchor_start = time.monotonic()
 
+    # Decide what to pass to worker init: file path if available,
+    # otherwise the set (only for small sets or single-threaded mode).
+    worker_init_arg = proband_unique_fa if proband_unique_fa else proband_unique_kmers
+
     if threads > 1:
         # ── Parallel scanning by chromosome ────────────────────────
         bam = pysam.AlignmentFile(
@@ -1449,7 +1715,16 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         tasks = [(child_bam, ref_fasta, c) for c in contigs]
         tasks.append((child_bam, ref_fasta, None))
 
-        n_workers = min(threads, len(tasks))
+        # Limit workers to avoid N × automaton memory blowup.
+        # Each worker holds an Aho-Corasick automaton (~2× k-mer set size).
+        # Cap at min(threads, 8) to keep peak memory reasonable.
+        n_workers = min(threads, len(tasks), 8)
+        logger.info(
+            "  Parallel anchoring: %d contigs, %d workers "
+            "(capped from %d threads), init=%s",
+            len(contigs), n_workers, threads,
+            "file" if isinstance(worker_init_arg, str) else "set",
+        )
 
         read_hits = []
         reads_seen = set()
@@ -1462,7 +1737,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=n_workers,
             initializer=_init_scan_worker,
-            initargs=(proband_unique_kmers, kmer_size,
+            initargs=(worker_init_arg, kmer_size,
                       min_distinct_kmers_per_read),
         ) as executor:
             futures = {
@@ -2598,6 +2873,7 @@ def run_discovery_pipeline(args):
     min_dk_per_read = getattr(args, "min_distinct_kmers_per_read", None)
     if min_dk_per_read is None:
         min_dk_per_read = max(1, args.kmer_size // 4)
+    jf_hash_size = getattr(args, "jf_hash_size", None)
 
     # ── Configuration summary ──────────────────────────────────────
     logger.info("=" * 60)
@@ -2622,8 +2898,10 @@ def run_discovery_pipeline(args):
     logger.info("  Min child count:   %d", args.min_child_count)
     logger.info("  Min base quality:  %d", args.min_baseq)
     logger.info("  Min distinct kmers/read: %d", min_dk_per_read)
+    logger.info("  JF hash size:      %s", jf_hash_size or "(auto)")
     logger.info("  Threads:           %d", args.threads)
     logger.info("=" * 60)
+    _log_memory("pipeline start")
 
     with tempfile.TemporaryDirectory(prefix="kmer_denovo_disc_") as tmpdir:
 
@@ -2646,6 +2924,7 @@ def run_discovery_pipeline(args):
         child_candidates_fa, n_candidates = _extract_child_kmers_discovery(
             args.child, args.ref_fasta, args.kmer_size,
             args.min_child_count, args.threads, tmpdir,
+            jf_hash_size=jf_hash_size,
         )
 
         if n_candidates == 0:
@@ -2704,7 +2983,7 @@ def run_discovery_pipeline(args):
         # ── Module 2: Parent Filtering ─────────────────────────────
         step_start = time.monotonic()
         logger.info("[Module 2] Parent filtering")
-        proband_unique_kmers = _filter_parents_discovery(
+        proband_unique_kmers, proband_unique_fa = _filter_parents_discovery(
             args.mother, args.father, args.ref_fasta,
             child_non_ref_fa, args.kmer_size, args.threads, tmpdir,
             parent_max_count=args.parent_max_count,
@@ -2739,27 +3018,45 @@ def run_discovery_pipeline(args):
             )
             return
 
-    # ── Module 3: Anchoring & Region Clustering ────────────────────
-    step_start = time.monotonic()
-    logger.info(
-        "[Module 3] Anchoring %d proband-unique k-mers to child reads",
-        len(proband_unique_kmers),
-    )
-    (regions, region_reads, total_informative, region_kmers,
-     unmapped_informative, read_sv_meta, kmer_coverage,
-     read_coverage) = (
-        _anchor_and_cluster(
-            args.child, args.ref_fasta, proband_unique_kmers,
-            args.kmer_size, merge_distance=args.cluster_distance,
-            threads=args.threads,
-            min_distinct_kmers_per_read=min_dk_per_read,
+        # Copy proband_unique_fa to a persistent location outside tmpdir
+        # so it survives tmpdir cleanup (used by _write_informative_reads_discovery).
+        persistent_fa = f"{out_prefix}.proband_unique.fa"
+        if proband_unique_fa and os.path.exists(proband_unique_fa):
+            shutil.copy2(proband_unique_fa, persistent_fa)
+            logger.info(
+                "Proband-unique FASTA copied to %s (%s)",
+                persistent_fa, _format_file_size(persistent_fa),
+            )
+        else:
+            persistent_fa = None
+
+        # ── Module 3: Anchoring & Region Clustering ────────────────
+        step_start = time.monotonic()
+        logger.info(
+            "[Module 3] Anchoring %d proband-unique k-mers to child reads",
+            len(proband_unique_kmers),
         )
-    )
-    logger.info(
-        "[Module 3] Complete (%s)",
-        _format_elapsed(time.monotonic() - step_start),
-    )
-    _log_memory("after Module 3")
+        _log_memory("before Module 3")
+        (regions, region_reads, total_informative, region_kmers,
+         unmapped_informative, read_sv_meta, kmer_coverage,
+         read_coverage) = (
+            _anchor_and_cluster(
+                args.child, args.ref_fasta, proband_unique_kmers,
+                args.kmer_size, merge_distance=args.cluster_distance,
+                threads=args.threads,
+                min_distinct_kmers_per_read=min_dk_per_read,
+                proband_unique_fa=proband_unique_fa,
+            )
+        )
+        logger.info(
+            "[Module 3] Complete (%s)",
+            _format_elapsed(time.monotonic() - step_start),
+        )
+        _log_memory("after Module 3")
+
+    # ── tmpdir cleaned up — all temp files removed ──────────────────
+    logger.info("Temporary directory cleaned up")
+    _log_memory("after tmpdir cleanup")
 
     # ── Region filtering ───────────────────────────────────────────
     min_reads = args.min_supporting_reads
@@ -2810,6 +3107,17 @@ def run_discovery_pipeline(args):
                              read_cov_bed_path,
                              min_reads=min_bedgraph_reads)
 
+    # Free coverage data after writing — can be large at WGS scale
+    logger.info(
+        "  Coverage data: kmer_coverage=%d chroms, read_coverage=%d chroms",
+        len(kmer_coverage), len(read_coverage),
+    )
+    total_positions = sum(len(v) for v in kmer_coverage.values())
+    logger.info("  Total tracked positions: %d", total_positions)
+    del kmer_coverage
+    del read_coverage
+    _log_memory("after freeing coverage data")
+
     _write_bedpe(sv_links, bedpe_path)
 
     logger.info("[Module 4] Writing informative reads BAM: %s", info_bam_path)
@@ -2817,6 +3125,15 @@ def run_discovery_pipeline(args):
         args.child, args.ref_fasta, proband_unique_kmers,
         args.kmer_size, info_bam_path,
     )
+
+    # Free the in-memory k-mer set after writing the BAM
+    n_proband_unique = len(proband_unique_kmers)
+    del proband_unique_kmers
+    _log_memory("after freeing proband_unique_kmers")
+
+    # Clean up persistent FASTA
+    if persistent_fa and os.path.exists(persistent_fa):
+        os.remove(persistent_fa)
 
     # ── Optional candidate comparison ──────────────────────────────
     candidate_comparison = None
@@ -2838,7 +3155,7 @@ def run_discovery_pipeline(args):
         "mode": "discovery",
         "child_candidate_kmers": n_candidates,
         "non_ref_kmers": n_non_ref,
-        "proband_unique_kmers": len(proband_unique_kmers),
+        "proband_unique_kmers": n_proband_unique,
         "informative_reads": total_informative,
         "unmapped_informative_reads": unmapped_informative,
         "candidate_regions": len(regions),

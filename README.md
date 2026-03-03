@@ -196,6 +196,7 @@ kmer-denovo \
 | `--parent-max-count` | 0 | Maximum k-mer count in a parent before the k-mer is considered parental; k-mers with count > this value in either parent are removed |
 | `--candidate-summary` | – | Path to a VCF-mode `summary.txt` for candidate comparison. High-quality *de novos* (DKA\_DKT > 0.25, DKA > 10) are checked against discovered regions |
 | `--sv-bedpe` | – | Output BEDPE file for linked SV breakpoint pairs (default: `[out-prefix].sv.bedpe`) |
+| `--jf-hash-size` | auto | Initial hash size for `jellyfish count` (e.g. `2G`, `500M`). Estimated from the child BAM file size by default. A larger value avoids hash overflow (which creates multi-file indexes requiring more memory to merge/dump) |
 
 ### VCF Mode Output
 

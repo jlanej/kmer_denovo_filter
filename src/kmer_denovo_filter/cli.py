@@ -126,6 +126,15 @@ def parse_args(argv=None):
              "discovery mode (default: [out-prefix].sv.bedpe)",
     )
     parser.add_argument(
+        "--jf-hash-size", default=None,
+        help="Initial hash size for Jellyfish count (e.g. '2G', '500M'). "
+             "By default, estimated from the child BAM file size. "
+             "A larger value reduces the chance of hash overflow "
+             "(which creates multi-file indexes that require more memory "
+             "to merge/dump), but uses more upfront RAM. "
+             "Recommended: set to ~50%% of available memory.",
+    )
+    parser.add_argument(
         "--threads", "-t", type=int, default=4,
         help="Number of threads for jellyfish (default: 4)",
     )
