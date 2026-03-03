@@ -58,6 +58,23 @@ def _format_file_size(path):
     return f"{size:.1f} PB"
 
 
+def _log_memory(label=""):
+    """Log current and peak process memory usage (Linux only)."""
+    try:
+        info = {}
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    info["RSS"] = int(line.split()[1]) / (1024 * 1024)
+                elif line.startswith("VmPeak:"):
+                    info["Peak"] = int(line.split()[1]) / (1024 * 1024)
+        if info:
+            parts = [f"{k}={v:.1f} GB" for k, v in sorted(info.items())]
+            logger.info("  [Memory] %s — %s", label, ", ".join(parts))
+    except Exception:
+        pass
+
+
 def _validate_inputs(args):
     """Validate pipeline inputs before starting computation.
 
@@ -847,7 +864,26 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     p_samtools.stdout.close()
-    jf_stdout, jf_stderr = p_jellyfish.communicate()
+
+    # Poll for completion with periodic progress logging
+    poll_interval = 60
+    while True:
+        try:
+            p_jellyfish.wait(timeout=poll_interval)
+            break
+        except subprocess.TimeoutExpired:
+            elapsed = time.monotonic() - extract_start
+            jf_size = (
+                _format_file_size(child_jf)
+                if os.path.exists(child_jf) else "pending"
+            )
+            logger.info(
+                "  … child k-mer counting (%s elapsed, jf index: %s)",
+                _format_elapsed(elapsed), jf_size,
+            )
+            _log_memory("child k-mer counting")
+
+    jf_stderr = p_jellyfish.stderr.read() if p_jellyfish.stderr else b""
     p_samtools.communicate()
 
     if p_jellyfish.returncode != 0:
@@ -860,6 +896,7 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
         _format_elapsed(time.monotonic() - extract_start),
         _format_file_size(child_jf),
     )
+    _log_memory("after child k-mer counting")
 
     # Step 2: Dump k-mers with count >= min_child_count (streamed to
     # avoid holding the full dump text in memory).
@@ -952,10 +989,112 @@ def _subtract_reference_kmers(ref_jf, child_candidates_fa, tmpdir):
     return child_non_ref_fa, n_non_ref
 
 
+def _count_parent_jellyfish(parent_bam, ref_fasta, kmer_fasta, kmer_size,
+                            parent_dir, threads, label="Parent"):
+    """Count child k-mers in a parent BAM using jellyfish.
+
+    Runs ``samtools fasta | jellyfish count --if`` to produce a Jellyfish
+    index that tracks only the child candidate k-mers.  Returns the path
+    to the ``.jf`` file — the caller is responsible for querying and
+    deleting it.
+
+    Args:
+        parent_bam: Path to parent BAM/CRAM.
+        ref_fasta: Path to reference FASTA (or None).
+        kmer_fasta: FASTA file of k-mers to track (``--if`` filter).
+        kmer_size: K-mer length.
+        parent_dir: Working directory for the index.
+        threads: Number of threads for jellyfish count.
+        label: Human-readable label for log messages.
+
+    Returns:
+        Path to the Jellyfish index file.
+    """
+    os.makedirs(parent_dir, exist_ok=True)
+    jf_output = os.path.join(parent_dir, "parent.jf")
+
+    samtools_cmd = ["samtools", "fasta", "-F", "0xD00", "-@", "2", parent_bam]
+    if ref_fasta:
+        samtools_cmd.extend(["--reference", ref_fasta])
+
+    jellyfish_cmd = [
+        "jellyfish", "count",
+        "-m", str(kmer_size),
+        "-s", "10M",
+        "-t", str(threads),
+        "-C",
+        "--if", kmer_fasta,
+        "-o", jf_output,
+        "/dev/fd/0",
+    ]
+
+    bam_size = _format_file_size(parent_bam)
+    logger.info(
+        "%s: scanning BAM (%s): %s", label, bam_size, parent_bam,
+    )
+    logger.info(
+        "  samtools fasta → jellyfish count (k=%d, threads=%d)",
+        kmer_size, threads,
+    )
+
+    scan_start = time.monotonic()
+    p_samtools = subprocess.Popen(
+        samtools_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    p_jellyfish = subprocess.Popen(
+        jellyfish_cmd, stdin=p_samtools.stdout,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    p_samtools.stdout.close()
+
+    # Poll for completion with periodic progress logging
+    poll_interval = 30
+    while True:
+        try:
+            p_jellyfish.wait(timeout=poll_interval)
+            break
+        except subprocess.TimeoutExpired:
+            elapsed = time.monotonic() - scan_start
+            jf_size = (
+                _format_file_size(jf_output)
+                if os.path.exists(jf_output) else "pending"
+            )
+            logger.info(
+                "  … %s still scanning (%s elapsed, jf index: %s)",
+                label, _format_elapsed(elapsed), jf_size,
+            )
+            _log_memory(f"{label} counting")
+
+    p_samtools.communicate()
+    jf_stderr = p_jellyfish.stderr.read()
+
+    if p_jellyfish.returncode != 0:
+        raise RuntimeError(
+            f"jellyfish count ({label}) failed: {jf_stderr.decode()}"
+        )
+
+    logger.info(
+        "  %s jellyfish counting complete (%s, index: %s)",
+        label, _format_elapsed(time.monotonic() - scan_start),
+        _format_file_size(jf_output),
+    )
+    return jf_output
+
+
 def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
                               child_non_ref_fa, kmer_size, threads, tmpdir,
                               parent_max_count=0):
     """Module 2: Filter non-reference child k-mers against both parents.
+
+    Uses streaming jellyfish queries to avoid loading all non-reference
+    k-mers into Python memory simultaneously.  Each parent's Jellyfish
+    index is built, queried, and deleted before proceeding to the next,
+    keeping peak memory proportional to the final proband-unique set
+    rather than to the full non-reference k-mer catalogue.
+
+    After the mother scan, only the surviving k-mers are written to a
+    reduced FASTA used as the ``--if`` filter for the father scan, which
+    further reduces jellyfish memory.
 
     Args:
         parent_max_count: Maximum k-mer count allowed in a parent before
@@ -966,49 +1105,118 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
         Set of canonical k-mer strings that are absent from both parents
         (proband-unique k-mers).
     """
-    # Read the non-ref child k-mers into a set
-    non_ref_kmers = set()
+    # Count input k-mers (stream — no need to load into memory)
+    n_input = 0
     with open(child_non_ref_fa) as fh:
         for line in fh:
             if not line.startswith(">"):
-                non_ref_kmers.add(line.strip())
+                n_input += 1
 
-    if not non_ref_kmers:
+    if n_input == 0:
         return set()
 
     logger.info(
-        "Filtering %d non-reference k-mers against parents…",
-        len(non_ref_kmers),
+        "Filtering %d non-reference k-mers against parents…", n_input,
     )
+    _log_memory("before parent filtering")
 
-    # Scan mother
-    mother_kmers = _scan_parent_jellyfish(
+    # ── Mother scan ────────────────────────────────────────────────
+    mother_jf = _count_parent_jellyfish(
         mother_bam, ref_fasta, child_non_ref_fa, kmer_size,
-        os.path.join(tmpdir, "mother"), threads,
-    )
-    logger.info(
-        "Mother: %d / %d non-ref k-mers found",
-        len(mother_kmers), len(non_ref_kmers),
+        os.path.join(tmpdir, "mother"), threads, label="Mother",
     )
 
-    # Scan father
-    father_kmers = _scan_parent_jellyfish(
-        father_bam, ref_fasta, child_non_ref_fa, kmer_size,
-        os.path.join(tmpdir, "father"), threads,
-    )
+    # Stream-filter: keep k-mers with count <= parent_max_count
+    after_mother_fa = os.path.join(tmpdir, "after_mother.fa")
+    n_surviving = 0
+    n_removed_mother = 0
+    query_cmd = [
+        "jellyfish", "query", mother_jf, "-s", child_non_ref_fa,
+    ]
+    with tempfile.TemporaryFile(mode="w+") as stderr_f:
+        p_query = subprocess.Popen(
+            query_cmd, stdout=subprocess.PIPE, stderr=stderr_f, text=True,
+        )
+        with open(after_mother_fa, "w") as fh:
+            for line in p_query.stdout:
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) >= 2 and int(parts[1]) <= parent_max_count:
+                    fh.write(f">{n_surviving}\n{parts[0]}\n")
+                    n_surviving += 1
+                else:
+                    n_removed_mother += 1
+        p_query.wait()
+        if p_query.returncode != 0:
+            stderr_f.seek(0)
+            raise RuntimeError(
+                f"jellyfish query (mother filter) failed: {stderr_f.read()}"
+            )
+
+    # Remove mother index immediately
+    if os.path.exists(mother_jf):
+        os.remove(mother_jf)
+
     logger.info(
-        "Father: %d / %d non-ref k-mers found",
-        len(father_kmers), len(non_ref_kmers),
+        "Mother: %d / %d non-ref k-mers found (count > %d), %d surviving",
+        n_removed_mother, n_input, parent_max_count, n_surviving,
+    )
+    _log_memory("after mother filtering")
+
+    if n_surviving == 0:
+        return set()
+
+    # ── Father scan (uses reduced k-mer set from mother filter) ────
+    father_jf = _count_parent_jellyfish(
+        father_bam, ref_fasta, after_mother_fa, kmer_size,
+        os.path.join(tmpdir, "father"), threads, label="Father",
     )
 
-    # Keep only k-mers absent from BOTH parents (count <= parent_max_count)
-    parent_kmers = {k for k, v in mother_kmers.items() if v > parent_max_count} | \
-                   {k for k, v in father_kmers.items() if v > parent_max_count}
-    proband_unique = non_ref_kmers - parent_kmers
+    # Stream-filter: keep k-mers with count <= parent_max_count
+    proband_unique = set()
+    n_removed_father = 0
+    query_cmd = [
+        "jellyfish", "query", father_jf, "-s", after_mother_fa,
+    ]
+    with tempfile.TemporaryFile(mode="w+") as stderr_f:
+        p_query = subprocess.Popen(
+            query_cmd, stdout=subprocess.PIPE, stderr=stderr_f, text=True,
+        )
+        for line in p_query.stdout:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and int(parts[1]) <= parent_max_count:
+                proband_unique.add(parts[0])
+            else:
+                n_removed_father += 1
+        p_query.wait()
+        if p_query.returncode != 0:
+            stderr_f.seek(0)
+            raise RuntimeError(
+                f"jellyfish query (father filter) failed: {stderr_f.read()}"
+            )
+
+    # Remove father index and intermediate file
+    if os.path.exists(father_jf):
+        os.remove(father_jf)
+    if os.path.exists(after_mother_fa):
+        os.remove(after_mother_fa)
+
+    logger.info(
+        "Father: %d / %d surviving k-mers found (count > %d), "
+        "%d proband-unique",
+        n_removed_father, n_surviving, parent_max_count,
+        len(proband_unique),
+    )
     logger.info(
         "Proband-unique k-mers (absent from both parents): %d / %d",
-        len(proband_unique), len(non_ref_kmers),
+        len(proband_unique), n_input,
     )
+    _log_memory("after parent filtering")
     return proband_unique
 
 
@@ -2430,6 +2638,7 @@ def run_discovery_pipeline(args):
             "[Module 0] Reference index ready (%s)",
             _format_elapsed(time.monotonic() - step_start),
         )
+        _log_memory("after Module 0")
 
         # ── Module 1: Child K-merization & Reference Subtraction ───
         step_start = time.monotonic()
@@ -2467,6 +2676,7 @@ def run_discovery_pipeline(args):
             "[Module 1] Complete (%s)",
             _format_elapsed(time.monotonic() - step_start),
         )
+        _log_memory("after Module 1")
 
         if n_non_ref == 0:
             logger.warning(
@@ -2503,6 +2713,7 @@ def run_discovery_pipeline(args):
             "[Module 2] Complete (%s)",
             _format_elapsed(time.monotonic() - step_start),
         )
+        _log_memory("after Module 2")
 
         if not proband_unique_kmers:
             logger.warning(
@@ -2548,6 +2759,7 @@ def run_discovery_pipeline(args):
         "[Module 3] Complete (%s)",
         _format_elapsed(time.monotonic() - step_start),
     )
+    _log_memory("after Module 3")
 
     # ── Region filtering ───────────────────────────────────────────
     min_reads = args.min_supporting_reads
