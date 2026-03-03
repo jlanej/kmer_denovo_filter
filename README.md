@@ -45,11 +45,15 @@ The tool supports two modes:
    BAM/CRAM with Jellyfish. Keep only k-mers with at least
    `--min-child-count` occurrences (default 3), then subtract any k-mers
    present in the reference. The remaining k-mers are non-reference child
-   k-mers.
+   k-mers. Intermediate data (the child Jellyfish index and candidates
+   FASTA) is removed as soon as each step completes to keep disk and
+   memory usage low.
 
 3. **Filter against parents** – Stream each parent's BAM/CRAM through
    Jellyfish to count the non-reference child k-mers. Remove any k-mer
    found in either parent. The survivors are *proband-unique* k-mers.
+   Each parent's Jellyfish index is removed immediately after it is
+   queried.
 
 4. **Anchor & cluster** – Scan the child BAM/CRAM for reads carrying
    proband-unique k-mers. Only reads with at least
