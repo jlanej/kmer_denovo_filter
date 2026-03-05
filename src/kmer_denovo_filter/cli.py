@@ -135,6 +135,14 @@ def parse_args(argv=None):
              "Recommended: set to ~50%% of available memory.",
     )
     parser.add_argument(
+        "--tmp-dir", default=None,
+        help="Directory for temporary files (jellyfish indexes, intermediate "
+             "FASTA files). Defaults to a subdirectory next to the output "
+             "files. IMPORTANT: avoid RAM-backed filesystems like tmpfs "
+             "(/tmp on many HPC systems), as intermediate files can exceed "
+             "100 GB for WGS data.",
+    )
+    parser.add_argument(
         "--threads", "-t", type=int, default=4,
         help="Number of threads for jellyfish (default: 4)",
     )

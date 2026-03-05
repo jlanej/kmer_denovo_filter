@@ -210,3 +210,12 @@ class TestParseArgs:
             self.REQUIRED_ARGS + ["--min-distinct-kmers-per-read", "5"]
         )
         assert args.min_distinct_kmers_per_read == 5
+
+    def test_tmp_dir_default(self):
+        args = parse_args(self.REQUIRED_ARGS)
+        assert args.tmp_dir is None
+
+    def test_tmp_dir_custom(self):
+        args = parse_args(self.REQUIRED_ARGS + ["--tmp-dir", "/scratch/tmp"])
+        assert args.tmp_dir == "/scratch/tmp"
+

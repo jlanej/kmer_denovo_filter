@@ -31,6 +31,87 @@ def _check_tool(name):
     return shutil.which(name) is not None
 
 
+def _resolve_tmp_dir(args, fallback_dir):
+    """Resolve the temporary directory for intermediate files.
+
+    Uses ``args.tmp_dir`` when provided.  Otherwise creates a
+    subdirectory next to the output files to avoid RAM-backed ``/tmp``
+    (tmpfs) on HPC systems.
+
+    Args:
+        args: Parsed CLI arguments (may have ``tmp_dir`` attribute).
+        fallback_dir: Directory to use when ``--tmp-dir`` is not set
+            (typically the parent directory of the output prefix or
+            output file).
+
+    Returns:
+        Absolute path to the temporary directory root (created if needed).
+    """
+    tmp_dir = getattr(args, "tmp_dir", None)
+    if tmp_dir:
+        os.makedirs(tmp_dir, exist_ok=True)
+        return os.path.abspath(tmp_dir)
+
+    # Default: create a subdirectory next to the output
+    tmp_root = os.path.join(fallback_dir, "kmer_denovo_tmp")
+    os.makedirs(tmp_root, exist_ok=True)
+    return os.path.abspath(tmp_root)
+
+
+def _is_tmpfs(path):
+    """Check if *path* resides on a tmpfs (RAM-backed) filesystem.
+
+    Returns True on Linux when the filesystem type is tmpfs.
+    Returns False on other platforms or when detection fails.
+    """
+    try:
+        # Linux: check /proc/mounts
+        real = os.path.realpath(path)
+        best_mount = ""
+        best_fstype = ""
+        with open("/proc/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3:
+                    mount_point, fstype = parts[1], parts[2]
+                    if real.startswith(mount_point) and len(mount_point) > len(best_mount):
+                        best_mount = mount_point
+                        best_fstype = fstype
+        return best_fstype == "tmpfs"
+    except (FileNotFoundError, PermissionError, OSError):
+        return False
+
+
+def _log_disk_usage(path, label=""):
+    """Log disk usage and available space for the filesystem containing *path*."""
+    try:
+        stat = os.statvfs(path)
+        total_gb = (stat.f_blocks * stat.f_frsize) / (1024**3)
+        avail_gb = (stat.f_bavail * stat.f_frsize) / (1024**3)
+        used_gb = total_gb - avail_gb
+        logger.info(
+            "  [Disk] %s — %.1f GB used / %.1f GB total (%.1f GB available) — %s",
+            label, used_gb, total_gb, avail_gb, path,
+        )
+    except OSError:
+        pass
+
+
+def _log_dir_size(path, label=""):
+    """Log the total size of files in a directory."""
+    try:
+        total = 0
+        for entry in os.scandir(path):
+            if entry.is_file(follow_symlinks=False):
+                total += entry.stat().st_size
+        logger.info(
+            "  [TmpDir] %s — %.2f GB in %s",
+            label, total / (1024**3), path,
+        )
+    except OSError:
+        pass
+
+
 def _format_elapsed(seconds):
     """Format elapsed seconds as a human-readable string."""
     if seconds < 60:
@@ -1045,6 +1126,7 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
             _log_memory("child k-mer counting")
             _log_subprocess_memory(p_jellyfish, "jellyfish-count")
             _log_subprocess_memory(p_samtools, "samtools-fasta")
+            _log_disk_usage(tmpdir, "tmpdir during counting")
 
     jf_stderr = p_jellyfish.stderr.read() if p_jellyfish.stderr else b""
     p_samtools.communicate()
@@ -1112,12 +1194,15 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
                         now = time.monotonic()
                         if now - last_dump_log >= 30:
                             logger.info(
-                                "  … dumped %d k-mers so far (%s)",
+                                "  … dumped %d k-mers so far (%s, "
+                                "FASTA: %s)",
                                 n_candidates,
                                 _format_elapsed(now - dump_start),
+                                _format_file_size(child_candidates_fa),
                             )
                             _log_subprocess_memory(p_dump, "jellyfish-dump")
                             _log_memory("during child dump")
+                            _log_disk_usage(tmpdir, "tmpdir during dump")
                             last_dump_log = now
         p_dump.wait()
         if p_dump.returncode != 0:
@@ -1302,18 +1387,17 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
     Uses streaming jellyfish queries to avoid loading all non-reference
     k-mers into Python memory simultaneously.  Each parent's Jellyfish
     index is built, queried, and deleted before proceeding to the next,
-    keeping peak memory proportional to the final proband-unique set
-    rather than to the full non-reference k-mer catalogue.
+    keeping peak memory proportional to disk I/O rather than in-memory
+    data structures.
 
     After the mother scan, only the surviving k-mers are written to a
     reduced FASTA used as the ``--if`` filter for the father scan, which
     further reduces jellyfish memory.
 
     Returns a tuple of:
-        proband_unique: Set of canonical k-mer strings absent from both
-            parents (proband-unique k-mers).
-        proband_unique_fa: Path to FASTA file of proband-unique k-mers
-            (for passing to worker processes without serialising the set).
+        n_proband_unique: Number of proband-unique k-mers (int).
+        proband_unique_fa: Path to FASTA file of proband-unique k-mers,
+            or None when no k-mers survive filtering.
 
     Args:
         parent_max_count: Maximum k-mer count allowed in a parent before
@@ -1328,7 +1412,7 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
                 n_input += 1
 
     if n_input == 0:
-        return set(), None
+        return 0, None
 
     logger.info(
         "Filtering %d non-reference k-mers against parents…", n_input,
@@ -1381,7 +1465,7 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
     _log_memory("after mother filtering")
 
     if n_surviving == 0:
-        return set(), None
+        return 0, None
 
     # ── Father scan (uses reduced k-mer set from mother filter) ────
     father_jf = _count_parent_jellyfish(
@@ -1389,9 +1473,9 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
         os.path.join(tmpdir, "father"), threads, label="Father",
     )
 
-    # Stream-filter: write surviving k-mers to FASTA *and* collect set
+    # Stream-filter: write surviving k-mers to FASTA (no in-memory set
+    # to avoid holding billions of k-mer strings in Python memory).
     proband_unique_fa = os.path.join(tmpdir, "proband_unique.fa")
-    proband_unique = set()
     n_removed_father = 0
     n_proband = 0
     query_cmd = [
@@ -1409,7 +1493,6 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
                 parts = line.split()
                 if len(parts) >= 2 and int(parts[1]) <= parent_max_count:
                     kmer = parts[0]
-                    proband_unique.add(kmer)
                     fh.write(f">{n_proband}\n{kmer}\n")
                     n_proband += 1
                 else:
@@ -1431,18 +1514,18 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
         "Father: %d / %d surviving k-mers found (count > %d), "
         "%d proband-unique",
         n_removed_father, n_surviving, parent_max_count,
-        len(proband_unique),
+        n_proband,
     )
     logger.info(
         "Proband-unique k-mers (absent from both parents): %d / %d",
-        len(proband_unique), n_input,
+        n_proband, n_input,
     )
     logger.info(
         "Proband-unique FASTA: %s (%s)",
         proband_unique_fa, _format_file_size(proband_unique_fa),
     )
     _log_memory("after parent filtering")
-    return proband_unique, proband_unique_fa
+    return n_proband, proband_unique_fa
 
 
 # ── Multiprocessing helpers for _anchor_and_cluster ────────────────────
@@ -1666,7 +1749,9 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     Args:
         child_bam: Path to child BAM file.
         ref_fasta: Path to reference FASTA (or None).
-        proband_unique_kmers: Set of canonical k-mer strings.
+        proband_unique_kmers: Set of canonical k-mer strings, or None
+            when *proband_unique_fa* is provided (preferred for large
+            k-mer sets to avoid holding them in Python memory).
         kmer_size: K-mer size.
         merge_distance: Maximum gap for merging adjacent regions.
         threads: Number of parallel workers for chromosome-level
@@ -1675,9 +1760,9 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
             proband-unique k-mers a read must carry to be retained
             (default 1).
         proband_unique_fa: Optional path to FASTA file of proband-unique
-            k-mers.  When provided and *threads* > 1, workers load
-            k-mers from this file instead of receiving the set via
-            pickle.
+            k-mers.  When provided, workers load k-mers from this file
+            instead of receiving the set via pickle (multi-threaded) or
+            using the in-memory set (single-threaded).
 
     Returns:
         regions: List of (chrom, start, end) tuples (0-based, half-open BED).
@@ -1698,8 +1783,8 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     """
     anchor_start = time.monotonic()
 
-    # Decide what to pass to worker init: file path if available,
-    # otherwise the set (only for small sets or single-threaded mode).
+    # Decide what to pass to worker init: always prefer the file path
+    # to avoid holding the full k-mer set in the main process memory.
     worker_init_arg = proband_unique_fa if proband_unique_fa else proband_unique_kmers
 
     if threads > 1:
@@ -1785,7 +1870,14 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         )
     else:
         # ── Single-threaded scanning with Aho-Corasick ─────────────
-        automaton = build_kmer_automaton(proband_unique_kmers)
+        # Load k-mers from FASTA when available to avoid requiring the
+        # full set to be held in the main process.
+        if proband_unique_fa:
+            kmers_for_automaton = _load_kmers_from_fasta(proband_unique_fa)
+        else:
+            kmers_for_automaton = proband_unique_kmers
+        automaton = build_kmer_automaton(kmers_for_automaton)
+        del kmers_for_automaton  # free immediately
         bam = pysam.AlignmentFile(
             child_bam,
             reference_filename=ref_fasta if ref_fasta else None,
@@ -2767,7 +2859,7 @@ def _write_discovery_summary(summary_path, regions, region_reads,
 
 
 def _write_informative_reads_discovery(
-    child_bam, ref_fasta, proband_unique_kmers, kmer_size,
+    child_bam, ref_fasta, proband_unique_kmers_or_path, kmer_size,
     output_bam,
 ):
     """Write child reads carrying proband-unique k-mers to a BAM file.
@@ -2785,11 +2877,21 @@ def _write_informative_reads_discovery(
     Args:
         child_bam: Path to the child BAM file.
         ref_fasta: Path to the reference FASTA.
-        proband_unique_kmers: Set of canonical k-mer strings.
+        proband_unique_kmers_or_path: Set of canonical k-mer strings,
+            or a path to a FASTA file containing them.
         kmer_size: K-mer size.
         output_bam: Path for the output BAM file.
     """
-    automaton = build_kmer_automaton(proband_unique_kmers)
+    if isinstance(proband_unique_kmers_or_path, str):
+        kmers = _load_kmers_from_fasta(proband_unique_kmers_or_path)
+        logger.info(
+            "  Loaded %d proband-unique k-mers from %s for BAM writing",
+            len(kmers), proband_unique_kmers_or_path,
+        )
+    else:
+        kmers = proband_unique_kmers_or_path
+    automaton = build_kmer_automaton(kmers)
+    del kmers  # free the set after automaton construction
     bam_in = pysam.AlignmentFile(
         child_bam, reference_filename=ref_fasta if ref_fasta else None,
     )
@@ -2900,10 +3002,26 @@ def run_discovery_pipeline(args):
     logger.info("  Min distinct kmers/read: %d", min_dk_per_read)
     logger.info("  JF hash size:      %s", jf_hash_size or "(auto)")
     logger.info("  Threads:           %d", args.threads)
+    logger.info("  Tmp dir:           %s", getattr(args, 'tmp_dir', None) or "(auto)")
     logger.info("=" * 60)
     _log_memory("pipeline start")
 
-    with tempfile.TemporaryDirectory(prefix="kmer_denovo_disc_") as tmpdir:
+    # Resolve temp directory — avoid RAM-backed /tmp on HPC systems
+    out_dir = os.path.dirname(os.path.abspath(out_prefix)) or "."
+    tmp_root = _resolve_tmp_dir(args, out_dir)
+    logger.info("  Temp directory root: %s", tmp_root)
+    if _is_tmpfs(tmp_root):
+        logger.warning(
+            "  ⚠ Temp directory %s appears to be on tmpfs (RAM-backed)! "
+            "Large intermediate files (100+ GB for WGS) will consume RAM. "
+            "Consider using --tmp-dir to point to a disk-backed filesystem.",
+            tmp_root,
+        )
+    _log_disk_usage(tmp_root, "tmpdir filesystem")
+
+    with tempfile.TemporaryDirectory(prefix="kmer_denovo_disc_",
+                                     dir=tmp_root) as tmpdir:
+        logger.info("  Working temp directory: %s", tmpdir)
 
         # ── Module 0: Reference K-mer Indexing ─────────────────────
         step_start = time.monotonic()
@@ -2921,6 +3039,7 @@ def run_discovery_pipeline(args):
         # ── Module 1: Child K-merization & Reference Subtraction ───
         step_start = time.monotonic()
         logger.info("[Module 1] Child k-mer extraction & reference subtraction")
+        _log_dir_size(tmpdir, "before Module 1")
         child_candidates_fa, n_candidates = _extract_child_kmers_discovery(
             args.child, args.ref_fasta, args.kmer_size,
             args.min_child_count, args.threads, tmpdir,
@@ -2956,6 +3075,8 @@ def run_discovery_pipeline(args):
             _format_elapsed(time.monotonic() - step_start),
         )
         _log_memory("after Module 1")
+        _log_dir_size(tmpdir, "after Module 1")
+        _log_disk_usage(tmpdir, "tmpdir filesystem after Module 1")
 
         if n_non_ref == 0:
             logger.warning(
@@ -2983,7 +3104,8 @@ def run_discovery_pipeline(args):
         # ── Module 2: Parent Filtering ─────────────────────────────
         step_start = time.monotonic()
         logger.info("[Module 2] Parent filtering")
-        proband_unique_kmers, proband_unique_fa = _filter_parents_discovery(
+        _log_dir_size(tmpdir, "before Module 2")
+        n_proband_unique, proband_unique_fa = _filter_parents_discovery(
             args.mother, args.father, args.ref_fasta,
             child_non_ref_fa, args.kmer_size, args.threads, tmpdir,
             parent_max_count=args.parent_max_count,
@@ -2993,8 +3115,10 @@ def run_discovery_pipeline(args):
             _format_elapsed(time.monotonic() - step_start),
         )
         _log_memory("after Module 2")
+        _log_dir_size(tmpdir, "after Module 2")
+        _log_disk_usage(tmpdir, "tmpdir filesystem after Module 2")
 
-        if not proband_unique_kmers:
+        if n_proband_unique == 0:
             logger.warning(
                 "No proband-unique k-mers after parent filtering; "
                 "writing empty outputs"
@@ -3018,30 +3142,20 @@ def run_discovery_pipeline(args):
             )
             return
 
-        # Copy proband_unique_fa to a persistent location outside tmpdir
-        # so it survives tmpdir cleanup (used by _write_informative_reads_discovery).
-        persistent_fa = f"{out_prefix}.proband_unique.fa"
-        if proband_unique_fa and os.path.exists(proband_unique_fa):
-            shutil.copy2(proband_unique_fa, persistent_fa)
-            logger.info(
-                "Proband-unique FASTA copied to %s (%s)",
-                persistent_fa, _format_file_size(persistent_fa),
-            )
-        else:
-            persistent_fa = None
-
         # ── Module 3: Anchoring & Region Clustering ────────────────
         step_start = time.monotonic()
         logger.info(
-            "[Module 3] Anchoring %d proband-unique k-mers to child reads",
-            len(proband_unique_kmers),
+            "[Module 3] Anchoring %d proband-unique k-mers to child reads "
+            "(loading from FASTA: %s)",
+            n_proband_unique,
+            _format_file_size(proband_unique_fa) if proband_unique_fa else "N/A",
         )
         _log_memory("before Module 3")
         (regions, region_reads, total_informative, region_kmers,
          unmapped_informative, read_sv_meta, kmer_coverage,
          read_coverage) = (
             _anchor_and_cluster(
-                args.child, args.ref_fasta, proband_unique_kmers,
+                args.child, args.ref_fasta, None,
                 args.kmer_size, merge_distance=args.cluster_distance,
                 threads=args.threads,
                 min_distinct_kmers_per_read=min_dk_per_read,
@@ -3054,9 +3168,24 @@ def run_discovery_pipeline(args):
         )
         _log_memory("after Module 3")
 
+        # Write informative reads BAM while proband_unique_fa is still
+        # available in tmpdir (avoids copying the FASTA out of tmpdir).
+        logger.info("[Module 4] Writing informative reads BAM: %s", info_bam_path)
+        _write_informative_reads_discovery(
+            args.child, args.ref_fasta, proband_unique_fa,
+            args.kmer_size, info_bam_path,
+        )
+
     # ── tmpdir cleaned up — all temp files removed ──────────────────
     logger.info("Temporary directory cleaned up")
     _log_memory("after tmpdir cleanup")
+
+    # Remove the tmp_root if it was auto-created and is now empty
+    try:
+        if not getattr(args, "tmp_dir", None) and os.path.isdir(tmp_root):
+            os.rmdir(tmp_root)  # only succeeds if empty
+    except OSError:
+        pass
 
     # ── Region filtering ───────────────────────────────────────────
     min_reads = args.min_supporting_reads
@@ -3120,20 +3249,9 @@ def run_discovery_pipeline(args):
 
     _write_bedpe(sv_links, bedpe_path)
 
-    logger.info("[Module 4] Writing informative reads BAM: %s", info_bam_path)
-    _write_informative_reads_discovery(
-        args.child, args.ref_fasta, proband_unique_kmers,
-        args.kmer_size, info_bam_path,
-    )
-
-    # Free the in-memory k-mer set after writing the BAM
-    n_proband_unique = len(proband_unique_kmers)
-    del proband_unique_kmers
-    _log_memory("after freeing proband_unique_kmers")
-
-    # Clean up persistent FASTA
-    if persistent_fa and os.path.exists(persistent_fa):
-        os.remove(persistent_fa)
+    # Informative reads BAM was already written inside the tmpdir
+    # context (before tmpdir cleanup) to avoid copying the FASTA.
+    _log_memory("after informative reads BAM")
 
     # ── Optional candidate comparison ──────────────────────────────
     candidate_comparison = None
@@ -3351,7 +3469,19 @@ def run_pipeline(args):
 
     parent_found_kmers = collections.Counter()
 
-    with tempfile.TemporaryDirectory(prefix="kmer_denovo_") as tmpdir:
+    out_dir = os.path.dirname(os.path.abspath(args.output)) or "."
+    tmp_root = _resolve_tmp_dir(args, out_dir)
+    logger.info("  Temp directory root: %s", tmp_root)
+    if _is_tmpfs(tmp_root):
+        logger.warning(
+            "  ⚠ Temp directory %s appears to be on tmpfs (RAM-backed)! "
+            "Consider using --tmp-dir to point to a disk-backed filesystem.",
+            tmp_root,
+        )
+    _log_disk_usage(tmp_root, "tmpdir filesystem")
+
+    with tempfile.TemporaryDirectory(prefix="kmer_denovo_",
+                                     dir=tmp_root) as tmpdir:
         kmer_fasta = os.path.join(tmpdir, "child_kmers.fa")
 
         total_child_kmers, variant_read_kmers = _collect_child_kmers(
@@ -3417,6 +3547,14 @@ def run_pipeline(args):
             )
 
     child_unique_kmers = max(0, total_child_kmers - len(parent_found_kmers))
+
+    # Remove the tmp_root if it was auto-created and is now empty
+    try:
+        if not getattr(args, "tmp_dir", None) and os.path.isdir(tmp_root):
+            os.rmdir(tmp_root)  # only succeeds if empty
+    except OSError:
+        pass
+
     logger.info(
         "Child-unique k-mers (approx): %d / %d (%.1f%% unique)",
         child_unique_kmers,
