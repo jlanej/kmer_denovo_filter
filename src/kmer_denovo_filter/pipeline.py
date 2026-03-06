@@ -140,6 +140,58 @@ def _format_file_size(path):
     return f"{size:.1f} PB"
 
 
+def _estimate_fasta_sequence_count(fasta_path, sample_lines=1000):
+    """Estimate FASTA sequence-entry count from a sampled prefix.
+
+    Returns a tuple of ``(count, extrapolated)`` where ``extrapolated`` is
+    ``True`` when the count is estimated from file size and sampled bytes, and
+    ``False`` when the full file was read (small files) or empty.
+
+    Args:
+        fasta_path: Path to FASTA file to sample.
+        sample_lines: Number of leading lines to sample before extrapolating.
+            Defaults to 1000.
+    """
+    if sample_lines <= 0:
+        raise ValueError("sample_lines must be > 0")
+
+    try:
+        file_size = os.path.getsize(fasta_path)
+    except OSError:
+        return 0, False
+
+    if file_size == 0:
+        return 0, False
+
+    sampled_bytes = 0
+    sampled_entries = 0
+    lines_read = 0
+    hit_eof = False
+
+    with open(fasta_path, "rb") as fh:
+        while lines_read < sample_lines:
+            line = fh.readline()
+            if not line:
+                hit_eof = True
+                break
+            sampled_bytes += len(line)
+            lines_read += 1
+            stripped = line.strip()
+            if stripped and stripped.startswith(b">"):
+                sampled_entries += 1
+
+    if sampled_bytes == 0:
+        return 0, False
+    if sampled_entries == 0:
+        return 0, False
+
+    if hit_eof:
+        return sampled_entries, False
+
+    estimated = int(round((sampled_entries / sampled_bytes) * file_size))
+    return max(estimated, 1), True
+
+
 def _log_memory(label=""):
     """Log current and peak process memory usage.
 
@@ -1410,7 +1462,7 @@ def _count_parent_jellyfish(parent_bam, ref_fasta, kmer_fasta, kmer_size,
         threads: Number of threads for jellyfish count.
         label: Human-readable label for log messages.
         n_filter_kmers: Number of k-mers in *kmer_fasta*.  When ``None``
-            the file is scanned to count entries.
+            this is estimated from a sampled FASTA prefix and file size.
 
     Returns:
         Path to the Jellyfish index file.
@@ -1420,11 +1472,14 @@ def _count_parent_jellyfish(parent_bam, ref_fasta, kmer_fasta, kmer_size,
 
     # Size hash to fit the filter k-mers without overflow.
     if n_filter_kmers is None:
-        n_filter_kmers = 0
-        with open(kmer_fasta) as fh:
-            for line in fh:
-                if line.rstrip() and not line.startswith(">"):
-                    n_filter_kmers += 1
+        n_filter_kmers, n_filter_kmers_is_extrapolated = _estimate_fasta_sequence_count(
+            kmer_fasta
+        )
+        if n_filter_kmers_is_extrapolated:
+            logger.info(
+                "  estimated filter_kmers from FASTA size/sample: ~%d",
+                n_filter_kmers,
+            )
     hash_size = max(n_filter_kmers * 2, 10_000_000)
     hash_size_str = str(hash_size)
 
@@ -1547,19 +1602,21 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
             the k-mer is considered parental.  K-mers with count >
             parent_max_count in either parent are removed.
     """
-    # Count input k-mers (stream — no need to load into memory)
-    n_input = 0
-    with open(child_non_ref_fa) as fh:
-        for line in fh:
-            if not line.startswith(">"):
-                n_input += 1
+    n_input, n_input_is_extrapolated = _estimate_fasta_sequence_count(
+        child_non_ref_fa
+    )
 
     if n_input == 0:
         return 0, None
 
-    logger.info(
-        "Filtering %d non-reference k-mers against parents…", n_input,
-    )
+    if n_input_is_extrapolated:
+        logger.info(
+            "Filtering ~%d non-reference k-mers against parents…", n_input,
+        )
+    else:
+        logger.info(
+            "Filtering %d non-reference k-mers against parents…", n_input,
+        )
     _log_memory("before parent filtering")
 
     # ── Mother scan ────────────────────────────────────────────────

@@ -13,6 +13,7 @@ from kmer_denovo_filter.cli import parse_args
 from kmer_denovo_filter.pipeline import (
     _classify_regions,
     _collect_kmer_ref_positions,
+    _estimate_fasta_sequence_count,
     _format_elapsed,
     _format_file_size,
     _validate_inputs,
@@ -632,6 +633,35 @@ class TestFormatFileSize:
         f = tmp_path / "empty.txt"
         f.write_bytes(b"")
         assert _format_file_size(str(f)) == "0.0 B"
+
+
+class TestEstimateFastaSequenceCount:
+    """Unit tests for sampled FASTA entry count estimation."""
+
+    def test_empty_file(self, tmp_path):
+        fa = tmp_path / "empty.fa"
+        fa.write_bytes(b"")
+        assert _estimate_fasta_sequence_count(str(fa)) == (0, False)
+
+    def test_small_file_exact_count(self, tmp_path):
+        fa = tmp_path / "small.fa"
+        fa.write_text(">0\nAAAA\n>1\nCCCC\n>2\nGGGG\n")
+        assert _estimate_fasta_sequence_count(str(fa)) == (3, False)
+
+    def test_large_file_extrapolates(self, tmp_path):
+        fa = tmp_path / "large.fa"
+        n_entries = 1500
+        with open(fa, "w") as fh:
+            for i in range(n_entries):
+                fh.write(f">{i:05d}\n")
+                fh.write("ACGTACGTACGTACGTACGT\n")
+
+        estimate, extrapolated = _estimate_fasta_sequence_count(
+            str(fa), sample_lines=1000,
+        )
+
+        assert extrapolated is True
+        assert estimate == n_entries
 
 
 class TestValidateInputs:
