@@ -3,6 +3,7 @@
   "child_candidate_kmers": 51125,
   "non_ref_kmers": 6679,
   "proband_unique_kmers": 630,
+  "prefiltered_kmers": 630,
   "informative_reads": 195,
   "unmapped_informative_reads": 11,
   "candidate_regions": 21,
