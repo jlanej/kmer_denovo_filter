@@ -1411,7 +1411,7 @@ def _count_parent_jellyfish(parent_bam, ref_fasta, kmer_fasta, kmer_size,
         n_filter_kmers = 0
         with open(kmer_fasta) as fh:
             for line in fh:
-                if line and not line.startswith(">"):
+                if line.rstrip() and not line.startswith(">"):
                     n_filter_kmers += 1
     hash_size = max(n_filter_kmers * 2, 10_000_000)
     hash_size_str = str(hash_size)
@@ -1461,10 +1461,12 @@ def _count_parent_jellyfish(parent_bam, ref_fasta, kmer_fasta, kmer_size,
             elapsed = time.monotonic() - scan_start
             jf_files = _find_jf_files(jf_output)
             if jf_files:
-                total_size = sum(
-                    os.path.getsize(f) for f in jf_files
-                    if os.path.exists(f)
-                )
+                total_size = 0
+                for f in jf_files:
+                    try:
+                        total_size += os.path.getsize(f)
+                    except FileNotFoundError:
+                        pass
                 jf_size = f"{total_size / (1024**3):.1f} GB"
             elif os.path.exists(jf_output):
                 jf_size = _format_file_size(jf_output)
