@@ -245,8 +245,8 @@ def read_supports_alt(
             *read* when not provided.
         seq: Optional pre-decoded ``read.query_sequence``.  Decoded from
             *read* when not provided.
-        quals: Optional pre-decoded ``read.query_qualities``.  Decoded from
-            *read* when not provided.
+        quals: Optional pre-decoded ``read.query_qualities``. Decoded from
+            *read* only when ``min_baseq > 0`` and not provided.
     """
     if alt is None or _is_symbolic(alt):
         return False
@@ -255,7 +255,7 @@ def read_supports_alt(
         seq = read.query_sequence
     if seq is None:
         return False
-    if quals is None:
+    if min_baseq > 0 and quals is None:
         quals = read.query_qualities
 
     if aligned_pairs is None:
