@@ -294,7 +294,7 @@
     "candidates": [
       {
         "variant": "chr8:125785997 A>AGAGTTACAATGAGTGTTACTCTGAAGGAGGATGGACTTTAATG",
-        "dka": 24,
+        "dka": 22,
         "dka_dkt": 0.3875,
         "captured": true,
         "region": "chr8:125785801-125786483"

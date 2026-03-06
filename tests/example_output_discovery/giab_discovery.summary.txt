@@ -52,7 +52,7 @@ Candidate Comparison (DKA_DKT > 0.25, DKA > 10)
 
   Candidate                        DKA   DKA_DKT                               Region
   ---------                        ---   -------                               ------
-  chr8:125785997 A>AGAGTTACAATGAGTGTTACTCTGAAGGAGGATGGACTTTAATG    24    0.3875             chr8:125785801-125786483
+  chr8:125785997 A>AGAGTTACAATGAGTGTTACTCTGAAGGAGGATGGACTTTAATG    22    0.3875             chr8:125785801-125786483
   chr11:55003995 T>C                24    0.4528              chr11:55003557-55004234
   chr11:55008577 C>T                13    0.3824              chr11:55008334-55008814
 

@@ -512,8 +512,10 @@ def _collect_child_kmers(
                 aligned_pairs=aligned_pairs, seq=seq, quals=quals,
             )
             if kmers:
-                supports = read_supports_alt(read, pos, ref, alt,
-                                             aligned_pairs=aligned_pairs, seq=seq)
+                supports = read_supports_alt(
+                    read, pos, ref, alt, min_baseq=min_baseq,
+                    aligned_pairs=aligned_pairs, seq=seq, quals=quals,
+                )
                 read_kmers.append((read.query_name, kmers, supports))
                 batch.update(kmers)
                 if len(batch) >= flush_threshold:
