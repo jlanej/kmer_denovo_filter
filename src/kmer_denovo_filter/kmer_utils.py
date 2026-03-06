@@ -1,6 +1,10 @@
 """K-mer utility functions."""
 
+import logging
+
 import ahocorasick
+
+logger = logging.getLogger(__name__)
 
 _COMP = str.maketrans("ACGTacgt", "TGCAtgca")
 
@@ -53,6 +57,40 @@ def build_kmer_automaton(canonical_kmers):
         return None
     A.make_automaton()
     return A
+
+
+def estimate_automaton_memory_gb(n_kmers, kmer_size=31):
+    """Estimate the in-memory size of an Aho-Corasick automaton in GB.
+
+    Empirically measured at ~928 bytes per pattern for 31-mer DNA
+    sequences (including trie node, failure links, and Python string
+    value overhead).  With forward + reverse-complement, the pattern
+    count is roughly ``2 × n_kmers``.
+
+    Args:
+        n_kmers: Number of canonical k-mers.
+        kmer_size: Length of each k-mer (default 31).
+
+    Returns:
+        Estimated memory in GB (float).
+    """
+    n_patterns = n_kmers * 2  # fwd + RC
+    bytes_per_pattern = 928  # empirically measured
+    total_bytes = n_patterns * bytes_per_pattern
+    return total_bytes / (1024**3)
+
+
+def _format_elapsed_simple(seconds):
+    """Format elapsed seconds as a human-readable string."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    if seconds < 3600:
+        minutes = int(seconds // 60)
+        secs = seconds % 60
+        return f"{minutes}m {secs:.1f}s"
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    return f"{hours}h {minutes}m"
 
 
 def read_supports_alt(read, variant_pos, ref, alt, *, aligned_pairs=None, seq=None):
