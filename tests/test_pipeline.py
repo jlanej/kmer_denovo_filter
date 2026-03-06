@@ -12,15 +12,17 @@ import pytest
 from kmer_denovo_filter.cli import parse_args
 from kmer_denovo_filter.pipeline import (
     _classify_regions,
-    _collect_kmer_ref_positions,
-    _estimate_fasta_sequence_count,
-    _format_elapsed,
-    _format_file_size,
     _validate_inputs,
     _write_bedgraph,
     _write_bedpe,
     run_discovery_pipeline,
     run_pipeline,
+)
+from kmer_denovo_filter.utils import (
+    _collect_kmer_ref_positions,
+    _estimate_fasta_sequence_count,
+    _format_elapsed,
+    _format_file_size,
 )
 
 GIAB_DIR = os.path.join(os.path.dirname(__file__), "data", "giab")
