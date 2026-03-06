@@ -18,7 +18,6 @@ import pysam
 from kmer_denovo_filter.kmer_utils import (
     _is_symbolic,
     build_kmer_automaton,
-    canonicalize,
     estimate_automaton_memory_gb,
     extract_variant_spanning_kmers,
     read_supports_alt,
@@ -163,13 +162,13 @@ def _log_memory(label=""):
         if not info:
             import resource
             rusage = resource.getrusage(resource.RUSAGE_SELF)
-            # macOS reports maxrss in bytes; Linux in KB
             import platform
-            divisor = (1024 * 1024) if platform.system() == "Darwin" else (1024 * 1024)
-            rss_gb = rusage.ru_maxrss / divisor
             if platform.system() == "Darwin":
-                rss_gb = rusage.ru_maxrss / (1024 * 1024 * 1024)
-            info["Peak_RSS"] = rss_gb
+                # macOS reports maxrss in bytes
+                info["Peak_RSS"] = rusage.ru_maxrss / (1024**3)
+            else:
+                # Linux reports maxrss in KB
+                info["Peak_RSS"] = rusage.ru_maxrss / (1024 * 1024)
         if info:
             parts = [f"{k}={v:.2f} GB" for k, v in sorted(info.items())]
             logger.info("  [Memory] %s — %s", label, ", ".join(parts))
@@ -1961,15 +1960,14 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
                     read.is_supplementary,
                 ))
                 # Map novel k-mer query positions to reference coords
-                if kmer_size is not None:
-                    chrom = read.reference_name
-                    cov = _collect_kmer_ref_positions(
-                        read, kmer_hit_indices, kmer_size,
-                    )
-                    kmer_coverage[chrom] += cov
-                    # Count one read per touched position
-                    for pos in cov:
-                        read_coverage[chrom][pos] += 1
+                chrom = read.reference_name
+                cov = _collect_kmer_ref_positions(
+                    read, kmer_hit_indices, kmer_size,
+                )
+                kmer_coverage[chrom] += cov
+                # Count one read per touched position
+                for pos in cov:
+                    read_coverage[chrom][pos] += 1
 
             # Collect SV metadata for this informative read
             max_clip = 0
@@ -2051,7 +2049,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     n_kmer_count = n_proband_unique or (
         len(proband_unique_kmers) if proband_unique_kmers else 0
     )
-    est_per_worker_gb = estimate_automaton_memory_gb(n_kmer_count, kmer_size)
+    est_per_worker_gb = estimate_automaton_memory_gb(n_kmer_count)
 
     total_mem_gb, avail_mem_gb = _get_available_memory_gb()
     logger.info(
@@ -2066,7 +2064,6 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
             f"{avail_mem_gb:.1f} GB" if avail_mem_gb is not None
             else "(unknown)",
         )
-
 
     if threads > 1:
         # ── Parallel scanning by chromosome ────────────────────────
@@ -3191,7 +3188,7 @@ def _write_discovery_summary(summary_path, regions, region_reads,
 
 def _write_informative_reads_discovery(
     child_bam, ref_fasta, proband_unique_kmers_or_path, kmer_size,
-    output_bam, automaton_path=None,
+    output_bam,
 ):
     """Write child reads carrying proband-unique k-mers to a BAM file.
 
@@ -3213,7 +3210,6 @@ def _write_informative_reads_discovery(
             or a path to a FASTA file containing them.
         kmer_size: K-mer size.
         output_bam: Path for the output BAM file.
-        automaton_path: Ignored (kept for API compatibility).
     """
     _log_memory("before informative reads k-mer load")
     if isinstance(proband_unique_kmers_or_path, str):
