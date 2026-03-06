@@ -455,6 +455,26 @@ class TestReadSupportsAlt:
         read = self.MockRead(seq, pairs, quals)
         assert read_supports_alt(read, 102, "A", "G", min_baseq=20) is True
 
+    def test_min_baseq_zero_does_not_fetch_query_qualities(self):
+        class LazyQualRead:
+            query_sequence = "ACGTACGT"
+            _aligned_pairs = [(i, 100 + i) for i in range(8)]
+
+            @property
+            def query_qualities(self):
+                raise AssertionError("query_qualities should not be accessed")
+
+            def get_aligned_pairs(self, matches_only=False):
+                if matches_only:
+                    return [
+                        (q, r) for q, r in self._aligned_pairs
+                        if q is not None and r is not None
+                    ]
+                return self._aligned_pairs
+
+        read = LazyQualRead()
+        assert read_supports_alt(read, 102, "A", "G", min_baseq=0) is True
+
 
 class TestBuildKmerAutomaton:
     """Tests for the Aho-Corasick automaton builder."""
