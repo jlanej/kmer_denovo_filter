@@ -494,7 +494,7 @@ apptainer exec --bind /data,/scratch "$SIF" kmer-denovo \
   --summary /scratch/summary.txt \
   --kmer-size 31 \
   --threads ${SLURM_CPUS_PER_TASK} \
-  --memory ${SLURM_MEM_PER_NODE%?}   # convert SLURM MB→GB (approximate)
+  --memory $(( ${SLURM_MEM_PER_NODE:-32768} / 1024 ))
 
 # Discovery mode (uncomment to use instead)
 # For WGS discovery, request at least 64 GB; 128 GB recommended.

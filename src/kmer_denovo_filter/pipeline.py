@@ -2218,11 +2218,15 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                     or completed_contigs == len(tasks)
                 )
                 if time_since_log >= progress_interval or at_milestone:
+                    pct = (
+                        100 * completed_contigs / len(tasks)
+                        if tasks else 0
+                    )
                     logger.info(
                         "  [Anchoring] Progress: %d/%d contigs complete "
                         "(%.0f%%), %d reads scanned, %d informative (%s)",
                         completed_contigs, len(tasks),
-                        100 * completed_contigs / len(tasks),
+                        pct,
                         total_reads_scanned,
                         len(read_hits) + unmapped_informative,
                         _format_elapsed(now - anchor_start),
