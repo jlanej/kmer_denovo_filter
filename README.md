@@ -182,7 +182,8 @@ kmer-denovo \
 | `--ref-fasta` / `-r` | – | Reference FASTA with `.fai` index (required for CRAM; required for discovery mode unless `--ref-jf` is provided) |
 | `--kmer-size` / `-k` | 31 | K-mer size (must be odd, 3–201) |
 | `--min-baseq` | 20 | Minimum base quality for read k-mers |
-| `--threads` / `-t` | 4 | Number of threads for Jellyfish |
+| `--threads` / `-t` | 4 | Number of threads for Jellyfish and parallel anchoring workers |
+| `--memory` | auto | Available memory in GB. On HPC (e.g. SLURM), set this to the allocated memory so worker counts and hash sizes are tuned correctly. When omitted, auto-detected from the system |
 | `--debug-kmers` | false | Enable per-variant debug output |
 | **VCF mode** | | |
 | `--vcf` | – | Input VCF with candidate variants (activates VCF mode) |
@@ -492,7 +493,8 @@ apptainer exec --bind /data,/scratch "$SIF" kmer-denovo \
   --metrics /scratch/metrics.json \
   --summary /scratch/summary.txt \
   --kmer-size 31 \
-  --threads ${SLURM_CPUS_PER_TASK}
+  --threads ${SLURM_CPUS_PER_TASK} \
+  --memory $(( ${SLURM_MEM_PER_NODE:-32768} / 1024 ))
 
 # Discovery mode (uncomment to use instead)
 # For WGS discovery, request at least 64 GB; 128 GB recommended.
@@ -502,6 +504,9 @@ apptainer exec --bind /data,/scratch "$SIF" kmer-denovo \
 # via page cache). The --tmp-dir flag defaults to a subdirectory
 # next to --out-prefix; on HPC systems, point it to a fast scratch
 # filesystem (avoid RAM-backed /tmp or tmpfs).
+# Use --memory to tell the tool how much RAM your SLURM job has
+# so that worker counts are tuned correctly (system-reported memory
+# may reflect the full node, not your allocation).
 # apptainer exec --bind /data,/scratch "$SIF" kmer-denovo \
 #   --child   /data/trio/child.bam \
 #   --mother  /data/trio/mother.bam \
@@ -510,7 +515,8 @@ apptainer exec --bind /data,/scratch "$SIF" kmer-denovo \
 #   --out-prefix /scratch/discovery_output \
 #   --min-child-count 3 \
 #   --kmer-size 31 \
-#   --threads ${SLURM_CPUS_PER_TASK}
+#   --threads ${SLURM_CPUS_PER_TASK} \
+#   --memory 128
 ```
 
 > **Tip:** Use `--bind` to make host directories visible inside the

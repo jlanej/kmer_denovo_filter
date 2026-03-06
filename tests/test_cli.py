@@ -30,6 +30,7 @@ class TestParseArgs:
         assert args.min_mapq == 20
         assert args.threads == 4
         assert args.debug_kmers is False
+        assert args.memory is None
         assert args.metrics is None
         assert args.informative_reads is None
         assert args.summary is None
@@ -78,6 +79,18 @@ class TestParseArgs:
     def test_short_threads(self):
         args = parse_args(self.REQUIRED_ARGS + ["-t", "2"])
         assert args.threads == 2
+
+    def test_memory_default(self):
+        args = parse_args(self.REQUIRED_ARGS)
+        assert args.memory is None
+
+    def test_memory_custom(self):
+        args = parse_args(self.REQUIRED_ARGS + ["--memory", "64"])
+        assert args.memory == 64.0
+
+    def test_memory_fractional(self):
+        args = parse_args(self.REQUIRED_ARGS + ["--memory", "128.5"])
+        assert args.memory == 128.5
 
     def test_informative_reads(self):
         args = parse_args(
