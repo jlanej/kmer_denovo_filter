@@ -277,7 +277,7 @@ def read_supports_alt(
             # qpos is None for deleted bases (skip), otherwise append the read base
             if qpos is not None:
                 if (
-                    quals is not None and min_baseq > 0
+                    min_baseq > 0 and quals is not None
                     and quals[qpos] < min_baseq
                 ):
                     return False

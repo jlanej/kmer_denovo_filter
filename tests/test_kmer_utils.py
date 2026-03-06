@@ -441,7 +441,7 @@ class TestReadSupportsAlt:
         # REF=T, ALT=TCATA — but read has no insertion
         assert read_supports_alt(read, 103, "T", "TCATA") is False
 
-    def test_low_quality_alt_base_returns_false(self):
+    def test_low_quality_base_at_variant_position_rejects_alt_support(self):
         seq = "ACGTACGT"
         pairs = [(i, 100 + i) for i in range(8)]
         quals = [30, 30, 5, 30, 30, 30, 30, 30]
