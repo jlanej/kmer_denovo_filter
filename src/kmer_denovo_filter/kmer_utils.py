@@ -55,6 +55,27 @@ def build_kmer_automaton(canonical_kmers):
     return A
 
 
+def estimate_automaton_memory_gb(n_kmers):
+    """Estimate the in-memory size of an Aho-Corasick automaton in GB.
+
+    Empirically measured at ~928 bytes per pattern for 31-mer DNA
+    sequences (including trie node, failure links, and Python string
+    value overhead).  With forward + reverse-complement, the pattern
+    count is roughly ``2 × n_kmers``.
+
+    Args:
+        n_kmers: Number of canonical k-mers.
+
+    Returns:
+        Estimated memory in GB (float).
+    """
+    n_patterns = n_kmers * 2  # fwd + RC
+    bytes_per_pattern = 928  # empirically measured
+    total_bytes = n_patterns * bytes_per_pattern
+    return total_bytes / (1024**3)
+
+
+
 def read_supports_alt(read, variant_pos, ref, alt, *, aligned_pairs=None, seq=None):
     """Return True if *read* carries the alternate allele at *variant_pos*.
 
