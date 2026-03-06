@@ -147,6 +147,13 @@ def parse_args(argv=None):
         help="Number of threads for jellyfish (default: 4)",
     )
     parser.add_argument(
+        "--memory", type=float, default=None,
+        help="Available memory in GB. On HPC systems (e.g. SLURM), set "
+             "this to the allocated memory (e.g. --memory 64 for a 64 GB "
+             "allocation) so that worker counts and hash sizes are tuned "
+             "correctly. When omitted, auto-detected from the system.",
+    )
+    parser.add_argument(
         "--debug-kmers", action="store_true", default=False,
         help="Enable per-variant debug output",
     )

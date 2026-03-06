@@ -573,7 +573,12 @@ def _scan_parent_jellyfish(
     os.makedirs(parent_dir, exist_ok=True)
     jf_output = os.path.join(parent_dir, "parent.jf")
 
-    samtools_cmd = ["samtools", "fasta", "-F", "0xD00", "-@", "2", parent_bam]
+    samtools_threads = max(1, threads // 4)
+    samtools_cmd = [
+        "samtools", "fasta", "-F", "0xD00",
+        "-@", str(samtools_threads),
+        parent_bam,
+    ]
     if ref_fasta:
         samtools_cmd.extend(["--reference", ref_fasta])
 
@@ -1161,7 +1166,12 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
         "Extracting child k-mers from BAM (k=%d, jf hash size=%s)…",
         kmer_size, jf_hash_size,
     )
-    samtools_cmd = ["samtools", "fasta", "-F", "0xD00", "-@", "2", child_bam]
+    samtools_threads = max(1, threads // 4)
+    samtools_cmd = [
+        "samtools", "fasta", "-F", "0xD00",
+        "-@", str(samtools_threads),
+        child_bam,
+    ]
     if ref_fasta:
         samtools_cmd.extend(["--reference", ref_fasta])
 
@@ -1416,7 +1426,12 @@ def _count_parent_jellyfish(parent_bam, ref_fasta, kmer_fasta, kmer_size,
     hash_size = max(n_filter_kmers * 2, 10_000_000)
     hash_size_str = str(hash_size)
 
-    samtools_cmd = ["samtools", "fasta", "-F", "0xD00", "-@", "2", parent_bam]
+    samtools_threads = max(1, threads // 4)
+    samtools_cmd = [
+        "samtools", "fasta", "-F", "0xD00",
+        "-@", str(samtools_threads),
+        parent_bam,
+    ]
     if ref_fasta:
         samtools_cmd.extend(["--reference", ref_fasta])
 
@@ -1947,7 +1962,8 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                         proband_unique_fa=None,
                         proband_jf=None,
                         n_proband_unique=None,
-                        tmpdir=None):
+                        tmpdir=None,
+                        memory_limit_gb=None):
     """Module 3: Find reads containing proband-unique k-mers and cluster regions.
 
     Scans **all** primary, non-duplicate child reads — including unmapped
@@ -1982,6 +1998,10 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
             large k-mer sets.
         n_proband_unique: Number of proband-unique k-mers (for logging).
         tmpdir: Writable directory for temporary files.
+        memory_limit_gb: Explicit memory limit in GB.  When provided,
+            overrides auto-detected system memory for worker-count
+            planning.  Useful on HPC where SLURM allocations differ
+            from total node memory.
 
     Returns:
         Tuple of (regions, region_reads, total_informative, region_kmers,
@@ -2006,6 +2026,17 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
 
     # ── Log memory planning ─────────────────────────────────────────
     total_mem_gb, avail_mem_gb = _get_available_memory_gb()
+    # When the caller supplies an explicit memory limit (e.g. from
+    # --memory on HPC), treat it as both total and available so that
+    # worker-count planning uses the user's allocation rather than
+    # system-reported values.
+    if memory_limit_gb is not None:
+        total_mem_gb = memory_limit_gb
+        avail_mem_gb = memory_limit_gb
+        logger.info(
+            "  [MemoryPlanning] Using explicit memory limit: %.1f GB",
+            memory_limit_gb,
+        )
     if use_jellyfish:
         # Jellyfish-backed: workers share OS page cache, memory ≈ 1×
         # the .jf file size regardless of worker count.
@@ -2050,7 +2081,9 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         # ── Dynamically cap workers based on available memory ──────
         if use_jellyfish:
             # Jellyfish workers share page cache; no per-worker penalty.
-            n_workers = min(threads, len(tasks), 8)
+            # All workers share the same memory-mapped .jf file, so
+            # worker count is bounded only by threads and task count.
+            n_workers = min(threads, len(tasks))
         else:
             max_workers_by_mem = threads
             if avail_mem_gb is not None and est_per_worker_gb > 0:
@@ -2059,7 +2092,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
             elif total_mem_gb is not None and est_per_worker_gb > 0:
                 usable_gb = total_mem_gb * 0.7
                 max_workers_by_mem = max(1, int(usable_gb / est_per_worker_gb))
-            n_workers = min(threads, len(tasks), max_workers_by_mem, 8)
+            n_workers = min(threads, len(tasks), max_workers_by_mem)
         n_workers = max(n_workers, 1)
 
         logger.info(
@@ -2105,51 +2138,98 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                 executor.submit(_scan_contig_for_hits, *t): t[2]
                 for t in tasks
             }
-            for future in concurrent.futures.as_completed(futures):
-                contig = futures[future]
-                try:
-                    (hits, seen, unmapped, scanned,
-                     sv_meta, worker_cov,
-                     worker_read_cov) = future.result()
-                except Exception:
-                    logger.error(
-                        "Worker failed for contig=%s", contig,
-                    )
-                    raise
-                total_reads_scanned += scanned
-                unmapped_informative += unmapped
-                completed_contigs += 1
-                for hit in hits:
-                    # hit: (ref_name, start, end, qname, kmers, is_supp)
-                    dedup_key = (hit[3], hit[5])  # (qname, is_supplementary)
-                    if dedup_key not in reads_seen:
-                        reads_seen.add(dedup_key)
-                        read_hits.append(hit)
-                # Merge SV metadata (only for keys not already seen)
-                for key, meta in sv_meta.items():
-                    if key not in read_sv_meta:
-                        read_sv_meta[key] = meta
-                # Merge k-mer coverage (update is faster than += for Counters)
-                for chrom, cov in worker_cov.items():
-                    kmer_coverage[chrom].update(cov)
-                # Merge read coverage
-                for chrom, cov in worker_read_cov.items():
-                    read_coverage[chrom].update(cov)
-                # Track all seen keys for cross-contig dedup
-                reads_seen.update(seen)
 
-                # Log progress periodically
-                if completed_contigs % 100 == 0 or completed_contigs == len(tasks):
+            # Use wait() with timeout for time-based progress reporting
+            # so users get feedback even when large contigs take hours.
+            pending = set(futures.keys())
+            last_progress_log = time.monotonic()
+            progress_interval = 300  # seconds (5 minutes)
+
+            while pending:
+                done, pending = concurrent.futures.wait(
+                    pending, timeout=progress_interval,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+
+                if not done:
+                    # Timeout — no contig completed; log heartbeat
+                    elapsed = time.monotonic() - anchor_start
                     logger.info(
-                        "  Anchoring progress: %d/%d contigs complete, "
-                        "%d reads scanned, %d informative (%s)",
+                        "  [Anchoring] Heartbeat: %d/%d contigs complete, "
+                        "%d reads scanned, %d informative (%s elapsed)",
                         completed_contigs, len(tasks),
                         total_reads_scanned,
                         len(read_hits) + unmapped_informative,
-                        _format_elapsed(time.monotonic() - anchor_start),
+                        _format_elapsed(elapsed),
                     )
                     _log_memory("during anchoring")
                     _log_children_memory("during anchoring")
+                    last_progress_log = time.monotonic()
+                    continue
+
+                for future in done:
+                    contig = futures[future]
+                    try:
+                        (hits, seen, unmapped, scanned,
+                         sv_meta, worker_cov,
+                         worker_read_cov) = future.result()
+                    except Exception:
+                        logger.error(
+                            "Worker failed for contig=%s", contig,
+                        )
+                        raise
+                    total_reads_scanned += scanned
+                    unmapped_informative += unmapped
+                    completed_contigs += 1
+                    for hit in hits:
+                        # hit: (ref_name, start, end, qname, kmers, is_supp)
+                        dedup_key = (hit[3], hit[5])  # (qname, is_supplementary)
+                        if dedup_key not in reads_seen:
+                            reads_seen.add(dedup_key)
+                            read_hits.append(hit)
+                    # Merge SV metadata (only for keys not already seen)
+                    for key, meta in sv_meta.items():
+                        if key not in read_sv_meta:
+                            read_sv_meta[key] = meta
+                    # Merge k-mer coverage (update is faster than += for Counters)
+                    for chrom, cov in worker_cov.items():
+                        kmer_coverage[chrom].update(cov)
+                    # Merge read coverage
+                    for chrom, cov in worker_read_cov.items():
+                        read_coverage[chrom].update(cov)
+                    # Track all seen keys for cross-contig dedup
+                    reads_seen.update(seen)
+
+                    # Log individual contig completion for large contigs
+                    if scanned >= 1_000_000:
+                        logger.info(
+                            "  [Anchoring] Contig %s complete: %d reads "
+                            "scanned, %d informative hits (%s elapsed)",
+                            contig or "(unmapped)", scanned,
+                            len(hits) + unmapped,
+                            _format_elapsed(time.monotonic() - anchor_start),
+                        )
+
+                # Log progress: time-based (every 5 min) or milestone-based
+                now = time.monotonic()
+                time_since_log = now - last_progress_log
+                at_milestone = (
+                    completed_contigs % 100 == 0
+                    or completed_contigs == len(tasks)
+                )
+                if time_since_log >= progress_interval or at_milestone:
+                    logger.info(
+                        "  [Anchoring] Progress: %d/%d contigs complete "
+                        "(%.0f%%), %d reads scanned, %d informative (%s)",
+                        completed_contigs, len(tasks),
+                        100 * completed_contigs / len(tasks),
+                        total_reads_scanned,
+                        len(read_hits) + unmapped_informative,
+                        _format_elapsed(now - anchor_start),
+                    )
+                    _log_memory("during anchoring")
+                    _log_children_memory("during anchoring")
+                    last_progress_log = now
 
         logger.info(
             "  Anchoring: %d reads scanned, %d informative (%s) [%d workers]",
@@ -3316,6 +3396,7 @@ def run_discovery_pipeline(args):
     if min_dk_per_read is None:
         min_dk_per_read = max(1, args.kmer_size // 4)
     jf_hash_size = getattr(args, "jf_hash_size", None)
+    memory_limit_gb = getattr(args, "memory", None)
 
     # ── Configuration summary ──────────────────────────────────────
     logger.info("=" * 60)
@@ -3342,6 +3423,11 @@ def run_discovery_pipeline(args):
     logger.info("  Min distinct kmers/read: %d", min_dk_per_read)
     logger.info("  JF hash size:      %s", jf_hash_size or "(auto)")
     logger.info("  Threads:           %d", args.threads)
+    logger.info(
+        "  Memory limit:      %s",
+        f"{memory_limit_gb:.1f} GB" if memory_limit_gb is not None
+        else "(auto-detect)",
+    )
     logger.info("  Tmp dir:           %s", getattr(args, 'tmp_dir', None) or "(auto)")
     total_mem_gb, avail_mem_gb = _get_available_memory_gb()
     if total_mem_gb is not None:
@@ -3535,6 +3621,7 @@ def run_discovery_pipeline(args):
                 proband_jf=proband_jf,
                 n_proband_unique=n_proband_unique,
                 tmpdir=tmpdir,
+                memory_limit_gb=memory_limit_gb,
             )
         )
         logger.info(
@@ -3810,6 +3897,12 @@ def run_pipeline(args):
     logger.info("  Min base quality:  %d", args.min_baseq)
     logger.info("  Min mapping qual:  %d", args.min_mapq)
     logger.info("  Threads:           %d", args.threads)
+    memory_limit_gb = getattr(args, "memory", None)
+    logger.info(
+        "  Memory limit:      %s",
+        f"{memory_limit_gb:.1f} GB" if memory_limit_gb is not None
+        else "(auto-detect)",
+    )
     logger.info("  Proband ID:        %s", args.proband_id or "(not set)")
     logger.info("=" * 60)
 
