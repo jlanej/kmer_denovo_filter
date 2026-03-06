@@ -317,8 +317,6 @@ def _estimate_jf_hash_size(bam_path, kmer_size, default="1G"):
     # capped between 100M and 4G.
     estimated_bases = file_size * 3
     estimated_distinct = estimated_bases // 10
-    entry_bytes = kmer_size + 8
-    hash_bytes = estimated_distinct * entry_bytes
 
     # Cap between 100M and 4G entries (not bytes)
     min_entries = 100_000_000   # 100M
@@ -1376,13 +1374,20 @@ def _subtract_reference_kmers(ref_jf, child_candidates_fa, tmpdir):
 
 
 def _count_parent_jellyfish(parent_bam, ref_fasta, kmer_fasta, kmer_size,
-                            parent_dir, threads, label="Parent"):
+                            parent_dir, threads, label="Parent",
+                            n_filter_kmers=None):
     """Count child k-mers in a parent BAM using jellyfish.
 
     Runs ``samtools fasta | jellyfish count --if`` to produce a Jellyfish
     index that tracks only the child candidate k-mers.  Returns the path
     to the ``.jf`` file — the caller is responsible for querying and
     deleting it.
+
+    The hash size is set to ``2 × n_filter_kmers`` (clamped to a
+    10 M minimum) so that Jellyfish has enough room for all filtered
+    k-mers.  When *n_filter_kmers* is not provided, the entries in
+    *kmer_fasta* are counted.  If Jellyfish still produces multiple
+    chunk files (hash overflow), they are merged automatically.
 
     Args:
         parent_bam: Path to parent BAM/CRAM.
@@ -1392,12 +1397,24 @@ def _count_parent_jellyfish(parent_bam, ref_fasta, kmer_fasta, kmer_size,
         parent_dir: Working directory for the index.
         threads: Number of threads for jellyfish count.
         label: Human-readable label for log messages.
+        n_filter_kmers: Number of k-mers in *kmer_fasta*.  When ``None``
+            the file is scanned to count entries.
 
     Returns:
         Path to the Jellyfish index file.
     """
     os.makedirs(parent_dir, exist_ok=True)
     jf_output = os.path.join(parent_dir, "parent.jf")
+
+    # Size hash to fit the filter k-mers without overflow.
+    if n_filter_kmers is None:
+        n_filter_kmers = 0
+        with open(kmer_fasta) as fh:
+            for line in fh:
+                if line and not line.startswith(">"):
+                    n_filter_kmers += 1
+    hash_size = max(n_filter_kmers * 2, 10_000_000)
+    hash_size_str = str(hash_size)
 
     samtools_cmd = ["samtools", "fasta", "-F", "0xD00", "-@", "2", parent_bam]
     if ref_fasta:
@@ -1406,7 +1423,7 @@ def _count_parent_jellyfish(parent_bam, ref_fasta, kmer_fasta, kmer_size,
     jellyfish_cmd = [
         "jellyfish", "count",
         "-m", str(kmer_size),
-        "-s", "10M",
+        "-s", hash_size_str,
         "-t", str(threads),
         "-C",
         "--if", kmer_fasta,
@@ -1419,8 +1436,9 @@ def _count_parent_jellyfish(parent_bam, ref_fasta, kmer_fasta, kmer_size,
         "%s: scanning BAM (%s): %s", label, bam_size, parent_bam,
     )
     logger.info(
-        "  samtools fasta → jellyfish count (k=%d, threads=%d)",
-        kmer_size, threads,
+        "  samtools fasta → jellyfish count (k=%d, threads=%d, "
+        "hash=%s, filter_kmers=%d)",
+        kmer_size, threads, hash_size_str, n_filter_kmers,
     )
 
     scan_start = time.monotonic()
@@ -1441,10 +1459,17 @@ def _count_parent_jellyfish(parent_bam, ref_fasta, kmer_fasta, kmer_size,
             break
         except subprocess.TimeoutExpired:
             elapsed = time.monotonic() - scan_start
-            jf_size = (
-                _format_file_size(jf_output)
-                if os.path.exists(jf_output) else "pending"
-            )
+            jf_files = _find_jf_files(jf_output)
+            if jf_files:
+                total_size = sum(
+                    os.path.getsize(f) for f in jf_files
+                    if os.path.exists(f)
+                )
+                jf_size = f"{total_size / (1024**3):.1f} GB"
+            elif os.path.exists(jf_output):
+                jf_size = _format_file_size(jf_output)
+            else:
+                jf_size = "pending"
             logger.info(
                 "  … %s still scanning (%s elapsed, jf index: %s)",
                 label, _format_elapsed(elapsed), jf_size,
@@ -1460,6 +1485,15 @@ def _count_parent_jellyfish(parent_bam, ref_fasta, kmer_fasta, kmer_size,
         raise RuntimeError(
             f"jellyfish count ({label}) failed: {jf_stderr.decode()}"
         )
+
+    # Handle multi-file output (hash overflow) — merge if needed
+    jf_files = _find_jf_files(jf_output)
+    if len(jf_files) > 1:
+        merged_path = os.path.join(parent_dir, "parent_merged.jf")
+        jf_output = _merge_jf_files(jf_files, merged_path)
+    elif jf_files and jf_files[0] != jf_output:
+        # Single numbered file (e.g. parent.jf_0) — rename to expected name
+        os.rename(jf_files[0], jf_output)
 
     logger.info(
         "  %s jellyfish counting complete (%s, index: %s)",
@@ -1513,6 +1547,7 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
     mother_jf = _count_parent_jellyfish(
         mother_bam, ref_fasta, child_non_ref_fa, kmer_size,
         os.path.join(tmpdir, "mother"), threads, label="Mother",
+        n_filter_kmers=n_input,
     )
 
     # Stream-filter: keep k-mers with count <= parent_max_count
@@ -1561,6 +1596,7 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
     father_jf = _count_parent_jellyfish(
         father_bam, ref_fasta, after_mother_fa, kmer_size,
         os.path.join(tmpdir, "father"), threads, label="Father",
+        n_filter_kmers=n_surviving,
     )
 
     # Stream-filter: write surviving k-mers to FASTA (no in-memory set

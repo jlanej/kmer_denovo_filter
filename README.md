@@ -205,6 +205,7 @@ kmer-denovo \
 | `--candidate-summary` | – | Path to a VCF-mode `summary.txt` for candidate comparison. High-quality *de novos* (DKA\_DKT > 0.25, DKA > 10) are checked against discovered regions |
 | `--sv-bedpe` | – | Output BEDPE file for linked SV breakpoint pairs (default: `[out-prefix].sv.bedpe`) |
 | `--jf-hash-size` | auto | Initial hash size for `jellyfish count` (e.g. `2G`, `500M`). Estimated from the child BAM file size by default. A larger value avoids hash overflow (which creates multi-file indexes requiring more memory to merge/dump) |
+| `--tmp-dir` | auto | Directory for temporary files (jellyfish indexes, intermediate FASTA files). Defaults to a subdirectory next to the output files. Avoid RAM-backed filesystems like tmpfs (`/tmp` on many HPC systems), as intermediate files can exceed 100 GB for WGS data |
 
 ### VCF Mode Output
 
@@ -367,7 +368,7 @@ When no linked breakpoints are found the file contains only the header line.
 
 ### Discovery Mode Filtering Flow
 
-Discovery mode applies filters at three levels, in this order:
+Discovery mode applies filters at four levels, in this order:
 
 1. **K-mer–level** (Modules 1–2):
    * `--min-child-count` — Minimum k-mer occurrences in the child
