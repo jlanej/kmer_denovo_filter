@@ -7,7 +7,6 @@ K-mer Filtering
   Child candidate k-mers:         51125
   Non-reference k-mers:            6679
   Proband-unique k-mers:            630
-  Pre-filtered (in child):          630
 
 Region Counts
 ----------------------------------------
