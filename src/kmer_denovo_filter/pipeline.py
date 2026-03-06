@@ -146,6 +146,11 @@ def _estimate_fasta_sequence_count(fasta_path, sample_lines=1000):
     Returns a tuple of ``(count, extrapolated)`` where ``extrapolated`` is
     ``True`` when the count is estimated from file size and sampled bytes, and
     ``False`` when the full file was read (small files) or empty.
+
+    Args:
+        fasta_path: Path to FASTA file to sample.
+        sample_lines: Number of leading lines to sample before extrapolating.
+            Defaults to 1000.
     """
     if sample_lines <= 0:
         raise ValueError("sample_lines must be > 0")
@@ -171,10 +176,13 @@ def _estimate_fasta_sequence_count(fasta_path, sample_lines=1000):
                 break
             sampled_bytes += len(line)
             lines_read += 1
-            if line.strip() and not line.startswith(b">"):
+            stripped = line.strip()
+            if stripped and stripped.startswith(b">"):
                 sampled_entries += 1
 
-    if sampled_entries == 0 or sampled_bytes == 0:
+    if sampled_bytes == 0:
+        return 0, False
+    if sampled_entries == 0:
         return 0, False
 
     if hit_eof:
@@ -1464,8 +1472,10 @@ def _count_parent_jellyfish(parent_bam, ref_fasta, kmer_fasta, kmer_size,
 
     # Size hash to fit the filter k-mers without overflow.
     if n_filter_kmers is None:
-        n_filter_kmers, estimated = _estimate_fasta_sequence_count(kmer_fasta)
-        if estimated:
+        n_filter_kmers, n_filter_kmers_is_extrapolated = _estimate_fasta_sequence_count(
+            kmer_fasta
+        )
+        if n_filter_kmers_is_extrapolated:
             logger.info(
                 "  estimated filter_kmers from FASTA size/sample: ~%d",
                 n_filter_kmers,
@@ -1592,12 +1602,14 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
             the k-mer is considered parental.  K-mers with count >
             parent_max_count in either parent are removed.
     """
-    n_input, n_input_estimated = _estimate_fasta_sequence_count(child_non_ref_fa)
+    n_input, n_input_is_extrapolated = _estimate_fasta_sequence_count(
+        child_non_ref_fa
+    )
 
     if n_input == 0:
         return 0, None
 
-    if n_input_estimated:
+    if n_input_is_extrapolated:
         logger.info(
             "Filtering ~%d non-reference k-mers against parents…", n_input,
         )
