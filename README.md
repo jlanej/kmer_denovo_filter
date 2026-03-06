@@ -55,17 +55,15 @@ The tool supports two modes:
    Each parent's Jellyfish index is removed immediately after it is
    queried.
 
-4. **Pre-filter (child re-scan)** – Of the hundreds of millions of
-   proband-unique k-mers, only a fraction actually appear in child reads.
-   Re-scan the child BAM with `jellyfish count --if` (restricted to the
-   proband-unique set) to identify which k-mers are truly present. This
-   typically reduces the set by 95–99% (e.g. 268M → 1–10M k-mers),
-   enabling the anchoring step to use a fast Aho-Corasick automaton that
-   fits comfortably in memory.
+4. **Build proband-unique index** – Build a Jellyfish hash index from the
+   proband-unique k-mers FASTA. This index is memory-mapped and shared
+   across workers via the OS page cache, so N workers ≈ 1× the index
+   size in RAM (typically 2–10 GB for WGS data).
 
-5. **Anchor & cluster** – Build an Aho-Corasick automaton from the
-   pre-filtered k-mers and scan the child BAM/CRAM for reads containing
-   them. Only reads with at least `--min-distinct-kmers-per-read`
+5. **Anchor & cluster** – Scan each child read with a sliding k-mer
+   window. Each k-mer is canonicalized and queried against the
+   proband-unique Jellyfish index via a long-lived ``jellyfish query``
+   subprocess. Reads with at least `--min-distinct-kmers-per-read`
    (default k/4) distinct proband-unique k-mers are retained. Cluster
    nearby reads (within `--cluster-distance` bp) into candidate genomic
    regions. Regions are then filtered by `--min-supporting-reads` and
@@ -307,7 +305,6 @@ Machine-readable pipeline statistics:
   "child_candidate_kmers": 150000,
   "non_ref_kmers": 45000,
   "proband_unique_kmers": 1200,
-  "prefiltered_kmers": 850,
   "informative_reads": 350,
   "unmapped_informative_reads": 5,
   "candidate_regions": 42,
@@ -342,7 +339,7 @@ included with capture rate and per-candidate details.
 
 Human-readable overview including:
 
-* K-mer filtering statistics (child candidates → non-reference → proband-unique → pre-filtered)
+* K-mer filtering statistics (child candidates → non-reference → proband-unique)
 * Region counts and informative read totals
 * Region size statistics (mean, median, max)
 * Per-region results table with coordinates, size, read count, k-mer count, SV annotations, and classification
@@ -370,7 +367,7 @@ When no linked breakpoints are found the file contains only the header line.
 
 ### Discovery Mode Filtering Flow
 
-Discovery mode applies filters at four levels, in this order:
+Discovery mode applies filters at three levels, in this order:
 
 1. **K-mer–level** (Modules 1–2):
    * `--min-child-count` — Minimum k-mer occurrences in the child
@@ -381,21 +378,20 @@ Discovery mode applies filters at four levels, in this order:
      parent are removed (default 0, meaning any parental occurrence
      removes the k-mer).
 
-2. **Pre-filter** (Module 2b):
-   * Re-scans child reads with `jellyfish count --if` to retain only
-     proband-unique k-mers that actually appear in child reads.
-     Typically removes 95–99% of the proband-unique set, enabling
-     the anchoring step to use a memory-efficient Aho-Corasick
-     automaton.
+   After filtering, a Jellyfish hash index is built from the surviving
+   proband-unique k-mers. This index is memory-mapped and shared across
+   workers via the OS page cache, so even with hundreds of millions of
+   k-mers, per-worker memory remains proportional to 1× the index file
+   (typically 2–10 GB), not N× the k-mer set.
 
-3. **Read-level** (Module 3, anchoring):
+2. **Read-level** (Module 3, anchoring):
    * `--min-distinct-kmers-per-read` — A read must carry at least this
      many distinct proband-unique k-mers to be considered informative.
      The default is `k/4` (e.g. 7 for k=31).  Reads below the threshold
      are excluded from **all** downstream outputs: regions, bedGraph,
      read coverage BED, and the informative BAM's coverage signal.
 
-4. **Region-level** (post-clustering):
+3. **Region-level** (post-clustering):
    * `--min-supporting-reads` — Minimum number of reads in a region
      (default 1).
    * `--min-distinct-kmers` — Minimum number of distinct proband-unique
@@ -404,7 +400,7 @@ Discovery mode applies filters at four levels, in this order:
    These two filters control which regions appear in the BED file and
    metrics JSON.
 
-5. **Position-level** (output):
+4. **Position-level** (output):
    * `--min-bedgraph-reads` — Minimum number of distinct reads at a
      single reference position for inclusion in the bedGraph and read
      coverage BED (default 3).
@@ -499,9 +495,10 @@ apptainer exec --bind /data,/scratch "$SIF" kmer-denovo \
 
 # Discovery mode (uncomment to use instead)
 # For WGS discovery, request at least 64 GB; 128 GB recommended.
-# The jellyfish pre-filter step keeps Module 3 memory manageable,
-# but the child k-mer counting step (Module 1) may need 80–120 GB
-# for large WGS BAMs. The --tmp-dir flag defaults to a subdirectory
+# The child k-mer counting step (Module 1) may need 80–120 GB
+# for large WGS BAMs. Module 3 (anchoring) uses a disk-backed
+# Jellyfish index, keeping per-worker memory low (~2–10 GB shared
+# via page cache). The --tmp-dir flag defaults to a subdirectory
 # next to --out-prefix; on HPC systems, point it to a fast scratch
 # filesystem (avoid RAM-backed /tmp or tmpfs).
 # apptainer exec --bind /data,/scratch "$SIF" kmer-denovo \

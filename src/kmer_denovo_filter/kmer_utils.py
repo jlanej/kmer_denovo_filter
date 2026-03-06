@@ -1,6 +1,11 @@
 """K-mer utility functions."""
 
+import logging
+import subprocess
+
 import ahocorasick
+
+logger = logging.getLogger(__name__)
 
 _COMP = str.maketrans("ACGTacgt", "TGCAtgca")
 
@@ -73,6 +78,150 @@ def estimate_automaton_memory_gb(n_kmers):
     bytes_per_pattern = 928  # empirically measured
     total_bytes = n_patterns * bytes_per_pattern
     return total_bytes / (1024**3)
+
+
+# ── Jellyfish-backed k-mer query (disk-backed, low memory) ─────────
+
+
+class JellyfishKmerQuery:
+    """Query k-mers against a Jellyfish index file without loading into memory.
+
+    Uses a long-lived ``jellyfish query -s /dev/stdin`` subprocess so that
+    the k-mer hash table lives in jellyfish's memory-mapped address space
+    (shared via OS page cache across workers) rather than in Python.
+
+    For WGS-scale discovery with hundreds of millions of proband-unique
+    k-mers, this uses ~2–10 GB (the jellyfish hash file, memory-mapped)
+    instead of ~20–460 GB (Python set or Aho-Corasick automaton).
+
+    Usage::
+
+        q = JellyfishKmerQuery("/path/to/proband_unique.jf")
+        for read in bam:
+            hits = q.scan_read(read.query_sequence, kmer_size=31)
+            # hits: set of (canonical_kmer, query_start_index)
+        q.close()
+    """
+
+    def __init__(self, jf_path):
+        self.jf_path = jf_path
+        self._proc = None
+
+    def _ensure_proc(self):
+        """Start the jellyfish query subprocess if not already running."""
+        if self._proc is not None and self._proc.poll() is None:
+            return
+        self._proc = subprocess.Popen(
+            ["jellyfish", "query", self.jf_path, "-s", "/dev/stdin"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def query_batch(self, canonical_kmers):
+        """Query a batch of canonical k-mers against the index.
+
+        Args:
+            canonical_kmers: List of canonical k-mer strings.
+
+        Returns:
+            Set of canonical k-mers that are present (count > 0) in the
+            index.
+        """
+        if not canonical_kmers:
+            return set()
+
+        self._ensure_proc()
+
+        # Write k-mers as a FASTA block to stdin
+        fasta_lines = []
+        for i, kmer in enumerate(canonical_kmers):
+            fasta_lines.append(f">{i}\n{kmer}\n")
+        fasta_block = "".join(fasta_lines)
+
+        # We can't use communicate() on a long-lived process, so we
+        # write + flush, then read exactly len(canonical_kmers) lines.
+        # But this risks deadlock if jellyfish buffers output.
+        #
+        # Safer approach: close stdin to signal EOF, read all output,
+        # then restart the process for the next batch.
+        self._proc.stdin.write(fasta_block.encode())
+        self._proc.stdin.close()
+
+        hits = set()
+        for line in self._proc.stdout:
+            line = line.decode().rstrip("\n")
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] != "0":
+                hits.add(parts[0])
+
+        self._proc.wait()
+        self._proc = None  # will be restarted on next call
+        return hits
+
+    def scan_read(self, seq, kmer_size):
+        """Scan a read sequence for proband-unique k-mers.
+
+        Extracts all k-mers via a sliding window, canonicalizes each,
+        and batch-queries the jellyfish index.
+
+        Args:
+            seq: Read sequence string (uppercase recommended).
+            kmer_size: Length of k-mers.
+
+        Returns:
+            Tuple of (unique_in_read, kmer_hit_indices):
+                unique_in_read: set of canonical k-mers found.
+                kmer_hit_indices: set of query start indices.
+        """
+        seq_len = len(seq)
+        if seq_len < kmer_size:
+            return set(), set()
+
+        seq_upper = seq.upper()
+        canon_at_pos = {}  # pos -> canonical k-mer
+        candidates = []
+
+        for i in range(seq_len - kmer_size + 1):
+            kmer = seq_upper[i:i + kmer_size]
+            if "N" in kmer:
+                continue
+            canon = canonicalize(kmer)
+            canon_at_pos[i] = canon
+            candidates.append(canon)
+
+        if not candidates:
+            return set(), set()
+
+        # Deduplicate candidates for the batch query
+        unique_candidates = list(set(candidates))
+        hits = self.query_batch(unique_candidates)
+
+        unique_in_read = set()
+        kmer_hit_indices = set()
+        for pos, canon in canon_at_pos.items():
+            if canon in hits:
+                unique_in_read.add(canon)
+                kmer_hit_indices.add(pos)
+
+        return unique_in_read, kmer_hit_indices
+
+    def close(self):
+        """Terminate the subprocess if running."""
+        if self._proc is not None:
+            try:
+                if self._proc.poll() is None:
+                    self._proc.stdin.close()
+                    self._proc.terminate()
+                    self._proc.wait(timeout=5)
+            except Exception:
+                pass
+            self._proc = None
+
+    def __del__(self):
+        self.close()
 
 
 
