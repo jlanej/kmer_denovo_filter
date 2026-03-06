@@ -285,9 +285,10 @@ class TestReadSupportsAlt:
     class MockRead:
         """Minimal mock of pysam.AlignedSegment."""
 
-        def __init__(self, seq, aligned_pairs):
+        def __init__(self, seq, aligned_pairs, quals=None):
             self.query_sequence = seq
             self._aligned_pairs = aligned_pairs
+            self.query_qualities = quals
 
         def get_aligned_pairs(self, matches_only=False):
             if matches_only:
@@ -439,6 +440,20 @@ class TestReadSupportsAlt:
         read = self.MockRead(seq, pairs)
         # REF=T, ALT=TCATA — but read has no insertion
         assert read_supports_alt(read, 103, "T", "TCATA") is False
+
+    def test_low_quality_alt_base_returns_false(self):
+        seq = "ACGTACGT"
+        pairs = [(i, 100 + i) for i in range(8)]
+        quals = [30, 30, 5, 30, 30, 30, 30, 30]
+        read = self.MockRead(seq, pairs, quals)
+        assert read_supports_alt(read, 102, "A", "G", min_baseq=20) is False
+
+    def test_high_quality_alt_base_returns_true(self):
+        seq = "ACGTACGT"
+        pairs = [(i, 100 + i) for i in range(8)]
+        quals = [30] * 8
+        read = self.MockRead(seq, pairs, quals)
+        assert read_supports_alt(read, 102, "A", "G", min_baseq=20) is True
 
 
 class TestBuildKmerAutomaton:

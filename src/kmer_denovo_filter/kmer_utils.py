@@ -195,8 +195,8 @@ class JellyfishKmerQuery:
         if not candidates:
             return set(), set()
 
-        # Deduplicate candidates for the batch query
-        unique_candidates = list(set(candidates))
+        # Deduplicate while preserving first-seen order.
+        unique_candidates = list(dict.fromkeys(candidates))
         hits = self.query_batch(unique_candidates)
 
         unique_in_read = set()
@@ -225,7 +225,10 @@ class JellyfishKmerQuery:
 
 
 
-def read_supports_alt(read, variant_pos, ref, alt, *, aligned_pairs=None, seq=None):
+def read_supports_alt(
+    read, variant_pos, ref, alt, min_baseq=0, *,
+    aligned_pairs=None, seq=None, quals=None,
+):
     """Return True if *read* carries the alternate allele at *variant_pos*.
 
     Extracts the exact read sequence aligned to the reference span of the
@@ -235,10 +238,14 @@ def read_supports_alt(read, variant_pos, ref, alt, *, aligned_pairs=None, seq=No
     Returns ``False`` for symbolic alleles or when *alt* is ``None``.
 
     Args:
+        min_baseq: Minimum base quality threshold for bases considered as
+            alt support.
         aligned_pairs: Optional pre-computed result of
             ``read.get_aligned_pairs(matches_only=False)``.  Computed from
             *read* when not provided.
         seq: Optional pre-decoded ``read.query_sequence``.  Decoded from
+            *read* when not provided.
+        quals: Optional pre-decoded ``read.query_qualities``.  Decoded from
             *read* when not provided.
     """
     if alt is None or _is_symbolic(alt):
@@ -248,6 +255,8 @@ def read_supports_alt(read, variant_pos, ref, alt, *, aligned_pairs=None, seq=No
         seq = read.query_sequence
     if seq is None:
         return False
+    if quals is None:
+        quals = read.query_qualities
 
     if aligned_pairs is None:
         aligned_pairs = read.get_aligned_pairs(matches_only=False)
@@ -267,6 +276,11 @@ def read_supports_alt(read, variant_pos, ref, alt, *, aligned_pairs=None, seq=No
         if in_variant_region:
             # qpos is None for deleted bases (skip), otherwise append the read base
             if qpos is not None:
+                if (
+                    quals is not None and min_baseq > 0
+                    and quals[qpos] < min_baseq
+                ):
+                    return False
                 extracted_seq.append(seq[qpos])
 
     # If the variant region was skipped entirely due to read boundaries
