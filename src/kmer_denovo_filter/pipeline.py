@@ -17,8 +17,10 @@ import pysam
 
 from kmer_denovo_filter.kmer_utils import (
     JellyfishKmerQuery,
+    _extract_read_kmers,
     _is_symbolic,
     build_kmer_automaton,
+    canonicalize,
     estimate_automaton_memory_gb,
     extract_variant_spanning_kmers,
     read_supports_alt,
@@ -1452,6 +1454,11 @@ _worker_jf_query = None        # JellyfishKmerQuery (large k-mer sets)
 _worker_kmer_size = None
 _worker_min_distinct_kmers_per_read = 1
 
+# Number of reads to accumulate before issuing a single jellyfish
+# subprocess call.  Larger batches amortize subprocess overhead
+# but temporarily hold more read objects in memory.
+_JF_READ_BATCH_SIZE = 5000
+
 
 def _init_scan_worker(proband_data, kmer_size,
                       min_distinct_kmers_per_read=1):
@@ -1485,6 +1492,62 @@ def _init_scan_worker(proband_data, kmer_size,
 
     _worker_kmer_size = kmer_size
     _worker_min_distinct_kmers_per_read = min_distinct_kmers_per_read
+
+
+def _process_informative_read(read, unique_in_read, kmer_hit_indices,
+                              kmer_size, reads_seen, read_hits,
+                              read_sv_meta, kmer_coverage, read_coverage):
+    """Record an informative read's hits, coverage, and SV metadata.
+
+    Returns 1 if the read is unmapped-informative, 0 otherwise.
+    Mutates *reads_seen*, *read_hits*, *read_sv_meta*, *kmer_coverage*,
+    and *read_coverage* in place.
+    """
+    dedup_key = (read.query_name, read.is_supplementary)
+    if dedup_key in reads_seen:
+        return 0
+
+    reads_seen.add(dedup_key)
+    if read.is_unmapped:
+        return 1
+
+    read_hits.append((
+        read.reference_name,
+        read.reference_start,
+        read.reference_end,
+        read.query_name,
+        unique_in_read,
+        read.is_supplementary,
+    ))
+    # Map novel k-mer query positions to reference coords
+    chrom = read.reference_name
+    cov = _collect_kmer_ref_positions(
+        read, kmer_hit_indices, kmer_size,
+    )
+    kmer_coverage[chrom] += cov
+    # Count one read per touched position
+    for pos in cov:
+        read_coverage[chrom][pos] += 1
+
+    # Collect SV metadata for this informative read
+    max_clip = 0
+    if read.cigartuples:
+        for op, length in read.cigartuples:
+            if op == 4 and length > max_clip:  # soft clip
+                max_clip = length
+    read_sv_meta[dedup_key] = {
+        "has_sa": read.has_tag("SA"),
+        "sa_str": read.get_tag("SA") if (
+            read.has_tag("SA") and not read.is_supplementary
+        ) else None,
+        "is_paired": read.is_paired,
+        "is_proper_pair": read.is_proper_pair,
+        "mate_is_unmapped": (
+            read.mate_is_unmapped if read.is_paired else False
+        ),
+        "max_clip": max_clip,
+    }
+    return 0
 
 
 def _scan_contig_for_hits(child_bam, ref_fasta, contig):
@@ -1543,77 +1606,109 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
     else:
         iterator = bam.fetch(contig=contig)
 
-    for read in iterator:
-        if read.is_secondary:
-            continue
-        if read.is_duplicate:
-            continue
+    if jf_query is not None:
+        # ── Batched jellyfish path ─────────────────────────────────
+        # Reads are accumulated in batches so that k-mers from many
+        # reads are queried in a single jellyfish subprocess call.
+        # This reduces subprocess overhead from O(n_reads) to
+        # O(n_reads / batch_size).
+        pending = []   # (read, canon_at_pos, unique_candidates)
+        pending_kmers = set()
 
-        total_reads_scanned += 1
-        seq = read.query_sequence
-        if seq is None:
-            continue
+        for read in iterator:
+            if read.is_secondary:
+                continue
+            if read.is_duplicate:
+                continue
 
-        unique_in_read = set()
-        kmer_hit_indices = set()
-        if automaton is not None:
-            # Fast Aho-Corasick path (small k-mer sets)
-            for _end_idx, canonical_kmer in automaton.iter(seq):
-                unique_in_read.add(canonical_kmer)
-                kmer_hit_indices.add(_end_idx - kmer_size + 1)
-        elif jf_query is not None:
-            # Jellyfish query path (large k-mer sets)
-            unique_in_read, kmer_hit_indices = jf_query.scan_read(
+            total_reads_scanned += 1
+            seq = read.query_sequence
+            if seq is None:
+                continue
+
+            canon_at_pos, unique_candidates = _extract_read_kmers(
                 seq, kmer_size,
             )
+            pending_kmers.update(unique_candidates)
+            pending.append((read, canon_at_pos, unique_candidates))
 
-        # Per-read filter: require a minimum number of distinct kmers
-        if len(unique_in_read) < min_dk_per_read:
+            if len(pending) < _JF_READ_BATCH_SIZE:
+                continue
+
+            # Pre-cache all k-mers from this batch in one subprocess
+            if pending_kmers:
+                jf_query.query_batch(list(pending_kmers))
+                pending_kmers = set()
+
+            # Process each read using cached results
+            for read_obj, c_at_pos, u_cands in pending:
+                hits = jf_query.query_batch(u_cands)  # served from cache
+                unique_in_read = set()
+                kmer_hit_indices = set()
+                for pos, canon in c_at_pos.items():
+                    if canon in hits:
+                        unique_in_read.add(canon)
+                        kmer_hit_indices.add(pos)
+
+                if len(unique_in_read) < min_dk_per_read:
+                    continue
+
+                unmapped_informative += _process_informative_read(
+                    read_obj, unique_in_read, kmer_hit_indices,
+                    kmer_size, reads_seen, read_hits,
+                    read_sv_meta, kmer_coverage, read_coverage,
+                )
+            pending = []
+
+        # Flush remaining reads
+        if pending:
+            if pending_kmers:
+                jf_query.query_batch(list(pending_kmers))
+            for read_obj, c_at_pos, u_cands in pending:
+                hits = jf_query.query_batch(u_cands)
+                unique_in_read = set()
+                kmer_hit_indices = set()
+                for pos, canon in c_at_pos.items():
+                    if canon in hits:
+                        unique_in_read.add(canon)
+                        kmer_hit_indices.add(pos)
+
+                if len(unique_in_read) < min_dk_per_read:
+                    continue
+
+                unmapped_informative += _process_informative_read(
+                    read_obj, unique_in_read, kmer_hit_indices,
+                    kmer_size, reads_seen, read_hits,
+                    read_sv_meta, kmer_coverage, read_coverage,
+                )
+    else:
+        # ── Aho-Corasick path (or no backend) ──────────────────────
+        for read in iterator:
+            if read.is_secondary:
+                continue
+            if read.is_duplicate:
+                continue
+
+            total_reads_scanned += 1
+            seq = read.query_sequence
+            if seq is None:
+                continue
+
             unique_in_read = set()
             kmer_hit_indices = set()
+            if automaton is not None:
+                for _end_idx, canonical_kmer in automaton.iter(seq):
+                    unique_in_read.add(canonical_kmer)
+                    kmer_hit_indices.add(_end_idx - kmer_size + 1)
 
-        dedup_key = (read.query_name, read.is_supplementary)
-        if unique_in_read and dedup_key not in reads_seen:
-            reads_seen.add(dedup_key)
-            if read.is_unmapped:
-                unmapped_informative += 1
-            else:
-                read_hits.append((
-                    read.reference_name,
-                    read.reference_start,
-                    read.reference_end,
-                    read.query_name,
-                    unique_in_read,
-                    read.is_supplementary,
-                ))
-                # Map novel k-mer query positions to reference coords
-                chrom = read.reference_name
-                cov = _collect_kmer_ref_positions(
-                    read, kmer_hit_indices, kmer_size,
-                )
-                kmer_coverage[chrom] += cov
-                # Count one read per touched position
-                for pos in cov:
-                    read_coverage[chrom][pos] += 1
+            if len(unique_in_read) < min_dk_per_read:
+                continue
 
-            # Collect SV metadata for this informative read
-            max_clip = 0
-            if read.cigartuples:
-                for op, length in read.cigartuples:
-                    if op == 4 and length > max_clip:  # soft clip
-                        max_clip = length
-            read_sv_meta[dedup_key] = {
-                "has_sa": read.has_tag("SA"),
-                "sa_str": read.get_tag("SA") if (
-                    read.has_tag("SA") and not read.is_supplementary
-                ) else None,
-                "is_paired": read.is_paired,
-                "is_proper_pair": read.is_proper_pair,
-                "mate_is_unmapped": (
-                    read.mate_is_unmapped if read.is_paired else False
-                ),
-                "max_clip": max_clip,
-            }
+            unmapped_informative += _process_informative_read(
+                read, unique_in_read, kmer_hit_indices,
+                kmer_size, reads_seen, read_hits,
+                read_sv_meta, kmer_coverage, read_coverage,
+            )
 
     bam.close()
     return (read_hits, reads_seen, unmapped_informative,
@@ -1946,83 +2041,157 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         unmapped_informative = 0
         total_reads_scanned = 0
 
-        for read in bam.fetch():
-            if read.is_secondary:
-                continue
-            if read.is_duplicate:
-                continue
+        if jf_query_st is not None:
+            # Batched jellyfish path (single-threaded)
+            pending = []
+            pending_kmers = set()
 
-            total_reads_scanned += 1
-            seq = read.query_sequence
-            if seq is None:
-                continue
+            for read in bam.fetch():
+                if read.is_secondary:
+                    continue
+                if read.is_duplicate:
+                    continue
 
-            unique_in_read = set()
-            kmer_hit_indices = set()
-            if automaton is not None:
-                for _end_idx, canonical_kmer in automaton.iter(seq):
-                    unique_in_read.add(canonical_kmer)
-                    kmer_hit_indices.add(_end_idx - kmer_size + 1)
-            elif jf_query_st is not None:
-                unique_in_read, kmer_hit_indices = jf_query_st.scan_read(
+                total_reads_scanned += 1
+                seq = read.query_sequence
+                if seq is None:
+                    continue
+
+                canon_at_pos, unique_candidates = _extract_read_kmers(
                     seq, kmer_size,
                 )
+                pending_kmers.update(unique_candidates)
+                pending.append((read, canon_at_pos, unique_candidates))
 
-            # Per-read filter: require a minimum number of distinct kmers
-            if len(unique_in_read) < min_distinct_kmers_per_read:
+                if len(pending) < _JF_READ_BATCH_SIZE:
+                    continue
+
+                if pending_kmers:
+                    jf_query_st.query_batch(list(pending_kmers))
+                    pending_kmers = set()
+
+                for read_obj, c_at_pos, u_cands in pending:
+                    hits = jf_query_st.query_batch(u_cands)
+                    unique_in_read = set()
+                    kmer_hit_indices = set()
+                    for pos, canon in c_at_pos.items():
+                        if canon in hits:
+                            unique_in_read.add(canon)
+                            kmer_hit_indices.add(pos)
+
+                    if len(unique_in_read) < min_distinct_kmers_per_read:
+                        continue
+
+                    unmapped_informative += _process_informative_read(
+                        read_obj, unique_in_read, kmer_hit_indices,
+                        kmer_size, reads_seen, read_hits,
+                        read_sv_meta, kmer_coverage, read_coverage,
+                    )
+                pending = []
+
+                if total_reads_scanned % 1_000_000 == 0:
+                    logger.info(
+                        "  Anchoring: %d reads scanned, %d informative (%s)",
+                        total_reads_scanned,
+                        len(read_hits) + unmapped_informative,
+                        _format_elapsed(time.monotonic() - anchor_start),
+                    )
+
+            # Flush remaining
+            if pending:
+                if pending_kmers:
+                    jf_query_st.query_batch(list(pending_kmers))
+                for read_obj, c_at_pos, u_cands in pending:
+                    hits = jf_query_st.query_batch(u_cands)
+                    unique_in_read = set()
+                    kmer_hit_indices = set()
+                    for pos, canon in c_at_pos.items():
+                        if canon in hits:
+                            unique_in_read.add(canon)
+                            kmer_hit_indices.add(pos)
+
+                    if len(unique_in_read) < min_distinct_kmers_per_read:
+                        continue
+
+                    unmapped_informative += _process_informative_read(
+                        read_obj, unique_in_read, kmer_hit_indices,
+                        kmer_size, reads_seen, read_hits,
+                        read_sv_meta, kmer_coverage, read_coverage,
+                    )
+        else:
+            for read in bam.fetch():
+                if read.is_secondary:
+                    continue
+                if read.is_duplicate:
+                    continue
+
+                total_reads_scanned += 1
+                seq = read.query_sequence
+                if seq is None:
+                    continue
+
                 unique_in_read = set()
                 kmer_hit_indices = set()
+                if automaton is not None:
+                    for _end_idx, canonical_kmer in automaton.iter(seq):
+                        unique_in_read.add(canonical_kmer)
+                        kmer_hit_indices.add(_end_idx - kmer_size + 1)
 
-            dedup_key = (read.query_name, read.is_supplementary)
-            if unique_in_read and dedup_key not in reads_seen:
-                reads_seen.add(dedup_key)
-                if read.is_unmapped:
-                    unmapped_informative += 1
-                else:
-                    read_hits.append((
-                        read.reference_name,
-                        read.reference_start,
-                        read.reference_end,
-                        read.query_name,
-                        unique_in_read,
-                        read.is_supplementary,
-                    ))
-                    # Map novel k-mer query positions to reference coords
-                    chrom = read.reference_name
-                    cov = _collect_kmer_ref_positions(
-                        read, kmer_hit_indices, kmer_size,
+                # Per-read filter: require a minimum number of distinct kmers
+                if len(unique_in_read) < min_distinct_kmers_per_read:
+                    unique_in_read = set()
+                    kmer_hit_indices = set()
+
+                dedup_key = (read.query_name, read.is_supplementary)
+                if unique_in_read and dedup_key not in reads_seen:
+                    reads_seen.add(dedup_key)
+                    if read.is_unmapped:
+                        unmapped_informative += 1
+                    else:
+                        read_hits.append((
+                            read.reference_name,
+                            read.reference_start,
+                            read.reference_end,
+                            read.query_name,
+                            unique_in_read,
+                            read.is_supplementary,
+                        ))
+                        # Map novel k-mer query positions to reference coords
+                        chrom = read.reference_name
+                        cov = _collect_kmer_ref_positions(
+                            read, kmer_hit_indices, kmer_size,
+                        )
+                        kmer_coverage[chrom] += cov
+                        # Count one read per touched position
+                        for pos in cov:
+                            read_coverage[chrom][pos] += 1
+
+                    # Collect SV metadata for this informative read
+                    max_clip = 0
+                    if read.cigartuples:
+                        for op, length in read.cigartuples:
+                            if op == 4 and length > max_clip:
+                                max_clip = length
+                    read_sv_meta[dedup_key] = {
+                        "has_sa": read.has_tag("SA"),
+                        "sa_str": read.get_tag("SA") if (
+                            read.has_tag("SA") and not read.is_supplementary
+                        ) else None,
+                        "is_paired": read.is_paired,
+                        "is_proper_pair": read.is_proper_pair,
+                        "mate_is_unmapped": (
+                            read.mate_is_unmapped if read.is_paired else False
+                        ),
+                        "max_clip": max_clip,
+                    }
+
+                if total_reads_scanned % 1_000_000 == 0:
+                    logger.info(
+                        "  Anchoring: %d reads scanned, %d informative (%s)",
+                        total_reads_scanned,
+                        len(read_hits) + unmapped_informative,
+                        _format_elapsed(time.monotonic() - anchor_start),
                     )
-                    kmer_coverage[chrom] += cov
-                    # Count one read per touched position
-                    for pos in cov:
-                        read_coverage[chrom][pos] += 1
-
-                # Collect SV metadata for this informative read
-                max_clip = 0
-                if read.cigartuples:
-                    for op, length in read.cigartuples:
-                        if op == 4 and length > max_clip:
-                            max_clip = length
-                read_sv_meta[dedup_key] = {
-                    "has_sa": read.has_tag("SA"),
-                    "sa_str": read.get_tag("SA") if (
-                        read.has_tag("SA") and not read.is_supplementary
-                    ) else None,
-                    "is_paired": read.is_paired,
-                    "is_proper_pair": read.is_proper_pair,
-                    "mate_is_unmapped": (
-                        read.mate_is_unmapped if read.is_paired else False
-                    ),
-                    "max_clip": max_clip,
-                }
-
-            if total_reads_scanned % 1_000_000 == 0:
-                logger.info(
-                    "  Anchoring: %d reads scanned, %d informative (%s)",
-                    total_reads_scanned,
-                    len(read_hits) + unmapped_informative,
-                    _format_elapsed(time.monotonic() - anchor_start),
-                )
 
         bam.close()
         if jf_query_st is not None:

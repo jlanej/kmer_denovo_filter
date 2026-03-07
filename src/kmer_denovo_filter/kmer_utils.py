@@ -83,16 +83,53 @@ def estimate_automaton_memory_gb(n_kmers):
 # ── Jellyfish-backed k-mer query (disk-backed, low memory) ─────────
 
 
+def _extract_read_kmers(seq, kmer_size):
+    """Extract canonicalized k-mers from a read sequence.
+
+    Args:
+        seq: Read sequence string.
+        kmer_size: Length of k-mers.
+
+    Returns:
+        Tuple of (canon_at_pos, unique_candidates):
+            canon_at_pos: dict mapping query position to canonical k-mer.
+            unique_candidates: deduplicated list of canonical k-mers
+                preserving first-seen order.
+    """
+    seq_len = len(seq)
+    if seq_len < kmer_size:
+        return {}, []
+
+    seq_upper = seq.upper()
+    canon_at_pos = {}
+    candidates = []
+
+    for i in range(seq_len - kmer_size + 1):
+        kmer = seq_upper[i:i + kmer_size]
+        if "N" in kmer:
+            continue
+        canon = canonicalize(kmer)
+        canon_at_pos[i] = canon
+        candidates.append(canon)
+
+    unique_candidates = list(dict.fromkeys(candidates))
+    return canon_at_pos, unique_candidates
+
+
 class JellyfishKmerQuery:
     """Query k-mers against a Jellyfish index file without loading into memory.
 
-    Uses a long-lived ``jellyfish query -s /dev/stdin`` subprocess so that
-    the k-mer hash table lives in jellyfish's memory-mapped address space
+    Uses ``jellyfish query -s /dev/stdin`` subprocesses so that the
+    k-mer hash table lives in jellyfish's memory-mapped address space
     (shared via OS page cache across workers) rather than in Python.
 
     For WGS-scale discovery with hundreds of millions of proband-unique
     k-mers, this uses ~2–10 GB (the jellyfish hash file, memory-mapped)
     instead of ~20–460 GB (Python set or Aho-Corasick automaton).
+
+    A result cache avoids re-querying k-mers that have already been
+    seen.  Adjacent reads in a sorted BAM share most of their k-mers,
+    so the cache dramatically reduces the number of subprocess calls.
 
     Usage::
 
@@ -105,21 +142,46 @@ class JellyfishKmerQuery:
 
     def __init__(self, jf_path):
         self.jf_path = jf_path
-        self._proc = None
+        self._cache = {}  # canonical_kmer -> bool (present in index)
 
-    def _ensure_proc(self):
-        """Start the jellyfish query subprocess if not already running."""
-        if self._proc is not None and self._proc.poll() is None:
-            return
-        self._proc = subprocess.Popen(
+    def _subprocess_query(self, kmers):
+        """Query k-mers via a jellyfish subprocess.
+
+        Uses ``communicate()`` to safely handle stdin/stdout without
+        risk of deadlock, even for large batches.
+
+        Args:
+            kmers: Iterable of canonical k-mer strings.
+
+        Returns:
+            Set of canonical k-mers that are present (count > 0).
+        """
+        fasta_block = "".join(
+            f">{i}\n{kmer}\n" for i, kmer in enumerate(kmers)
+        )
+        proc = subprocess.Popen(
             ["jellyfish", "query", self.jf_path, "-s", "/dev/stdin"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        stdout, _ = proc.communicate(fasta_block.encode())
+
+        hits = set()
+        for line in stdout.decode().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] != "0":
+                hits.add(parts[0])
+        return hits
 
     def query_batch(self, canonical_kmers):
         """Query a batch of canonical k-mers against the index.
+
+        Results are cached so that repeated queries for the same k-mer
+        (common with overlapping reads) skip the subprocess entirely.
 
         Args:
             canonical_kmers: List of canonical k-mer strings.
@@ -131,35 +193,13 @@ class JellyfishKmerQuery:
         if not canonical_kmers:
             return set()
 
-        self._ensure_proc()
+        uncached = [k for k in canonical_kmers if k not in self._cache]
+        if uncached:
+            hits = self._subprocess_query(uncached)
+            for k in uncached:
+                self._cache[k] = k in hits
 
-        # Write k-mers as a FASTA block to stdin
-        fasta_lines = []
-        for i, kmer in enumerate(canonical_kmers):
-            fasta_lines.append(f">{i}\n{kmer}\n")
-        fasta_block = "".join(fasta_lines)
-
-        # We can't use communicate() on a long-lived process, so we
-        # write + flush, then read exactly len(canonical_kmers) lines.
-        # But this risks deadlock if jellyfish buffers output.
-        #
-        # Safer approach: close stdin to signal EOF, read all output,
-        # then restart the process for the next batch.
-        self._proc.stdin.write(fasta_block.encode())
-        self._proc.stdin.close()
-
-        hits = set()
-        for line in self._proc.stdout:
-            line = line.decode().rstrip("\n")
-            if not line:
-                continue
-            parts = line.split()
-            if len(parts) >= 2 and parts[1] != "0":
-                hits.add(parts[0])
-
-        self._proc.wait()
-        self._proc = None  # will be restarted on next call
-        return hits
+        return {k for k in canonical_kmers if self._cache.get(k, False)}
 
     def scan_read(self, seq, kmer_size):
         """Scan a read sequence for proband-unique k-mers.
@@ -176,27 +216,11 @@ class JellyfishKmerQuery:
                 unique_in_read: set of canonical k-mers found.
                 kmer_hit_indices: set of query start indices.
         """
-        seq_len = len(seq)
-        if seq_len < kmer_size:
+        canon_at_pos, unique_candidates = _extract_read_kmers(seq, kmer_size)
+
+        if not unique_candidates:
             return set(), set()
 
-        seq_upper = seq.upper()
-        canon_at_pos = {}  # pos -> canonical k-mer
-        candidates = []
-
-        for i in range(seq_len - kmer_size + 1):
-            kmer = seq_upper[i:i + kmer_size]
-            if "N" in kmer:
-                continue
-            canon = canonicalize(kmer)
-            canon_at_pos[i] = canon
-            candidates.append(canon)
-
-        if not candidates:
-            return set(), set()
-
-        # Deduplicate while preserving first-seen order.
-        unique_candidates = list(dict.fromkeys(candidates))
         hits = self.query_batch(unique_candidates)
 
         unique_in_read = set()
@@ -209,16 +233,8 @@ class JellyfishKmerQuery:
         return unique_in_read, kmer_hit_indices
 
     def close(self):
-        """Terminate the subprocess if running."""
-        if self._proc is not None:
-            try:
-                if self._proc.poll() is None:
-                    self._proc.stdin.close()
-                    self._proc.terminate()
-                    self._proc.wait(timeout=5)
-            except Exception:
-                pass
-            self._proc = None
+        """Clear the result cache."""
+        self._cache.clear()
 
     def __del__(self):
         self.close()
