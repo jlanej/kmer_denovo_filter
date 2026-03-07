@@ -1612,7 +1612,7 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
         # reads are queried in a single jellyfish subprocess call.
         # This reduces subprocess overhead from O(n_reads) to
         # O(n_reads / batch_size).
-        pending = []   # (read, canon_at_pos, unique_candidates)
+        pending = []   # (read, canon_at_pos)
         pending_kmers = set()
 
         for read in iterator:
@@ -1630,23 +1630,25 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
                 seq, kmer_size,
             )
             pending_kmers.update(unique_candidates)
-            pending.append((read, canon_at_pos, unique_candidates))
+            pending.append((read, canon_at_pos))
 
             if len(pending) < _JF_READ_BATCH_SIZE:
                 continue
 
-            # Pre-cache all k-mers from this batch in one subprocess
+            # Query all unique k-mers from this batch in one subprocess.
+            # Avoid unbounded per-worker cache growth by processing each
+            # batch against this local hit set, then clearing cache.
+            batch_hits = set()
             if pending_kmers:
-                jf_query.query_batch(list(pending_kmers))
+                batch_hits = jf_query.query_batch(list(pending_kmers))
                 pending_kmers = set()
 
-            # Process each read using cached results
-            for read_obj, c_at_pos, u_cands in pending:
-                hits = jf_query.query_batch(u_cands)  # served from cache
+            # Process each read against batch-level hits
+            for read_obj, c_at_pos in pending:
                 unique_in_read = set()
                 kmer_hit_indices = set()
                 for pos, canon in c_at_pos.items():
-                    if canon in hits:
+                    if canon in batch_hits:
                         unique_in_read.add(canon)
                         kmer_hit_indices.add(pos)
 
@@ -1659,17 +1661,18 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
                     read_sv_meta, kmer_coverage, read_coverage,
                 )
             pending = []
+            jf_query.close()
 
         # Flush remaining reads
         if pending:
+            batch_hits = set()
             if pending_kmers:
-                jf_query.query_batch(list(pending_kmers))
-            for read_obj, c_at_pos, u_cands in pending:
-                hits = jf_query.query_batch(u_cands)
+                batch_hits = jf_query.query_batch(list(pending_kmers))
+            for read_obj, c_at_pos in pending:
                 unique_in_read = set()
                 kmer_hit_indices = set()
                 for pos, canon in c_at_pos.items():
-                    if canon in hits:
+                    if canon in batch_hits:
                         unique_in_read.add(canon)
                         kmer_hit_indices.add(pos)
 
@@ -1681,6 +1684,7 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
                     kmer_size, reads_seen, read_hits,
                     read_sv_meta, kmer_coverage, read_coverage,
                 )
+            jf_query.close()
     else:
         # ── Aho-Corasick path (or no backend) ──────────────────────
         for read in iterator:

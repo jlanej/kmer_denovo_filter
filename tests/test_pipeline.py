@@ -9,6 +9,7 @@ import tempfile
 import pysam
 import pytest
 
+import kmer_denovo_filter.pipeline as pipeline_mod
 from kmer_denovo_filter.cli import parse_args
 from kmer_denovo_filter.pipeline import (
     _classify_regions,
@@ -2339,3 +2340,93 @@ class TestBedgraphDiscoveryIntegration:
             assert cols[0] == chrom
             assert int(cols[1]) < int(cols[2])  # start < end
             assert int(cols[3]) > 0  # positive coverage
+
+
+class TestJellyfishBatchScanMemory:
+    """Unit tests for Jellyfish-backed batch scanning memory behavior."""
+
+    def test_scan_contig_clears_cache_per_batch(self, monkeypatch):
+        class _FakeRead:
+            def __init__(self, seq):
+                self.query_sequence = seq
+                self.is_secondary = False
+                self.is_duplicate = False
+
+        class _FakeBam:
+            def __init__(self, *args, **kwargs):
+                self._reads = [
+                    _FakeRead("AAAAA"),
+                    _FakeRead("CCCCC"),
+                    _FakeRead("GGGGG"),
+                ]
+
+            def fetch(self, contig=None):
+                return iter(self._reads)
+
+            def close(self):
+                return None
+
+        class _FakeJFQuery:
+            def __init__(self):
+                self.query_calls = []
+                self.close_calls = 0
+
+            def query_batch(self, kmers):
+                self.query_calls.append(set(kmers))
+                return set(kmers)
+
+            def close(self):
+                self.close_calls += 1
+
+        jf_query = _FakeJFQuery()
+        seen_reads = []
+
+        def _fake_extract_read_kmers(seq, kmer_size):
+            return ({0: seq}, [seq])
+
+        def _fake_process_informative_read(
+            read,
+            unique_in_read,
+            kmer_hit_indices,
+            kmer_size,
+            reads_seen,
+            read_hits,
+            read_sv_meta,
+            kmer_coverage,
+            read_coverage,
+        ):
+            seen_reads.append((read.query_sequence, unique_in_read))
+            return 0
+
+        monkeypatch.setattr(pipeline_mod.pysam, "AlignmentFile", _FakeBam)
+        monkeypatch.setattr(
+            pipeline_mod, "_extract_read_kmers", _fake_extract_read_kmers,
+        )
+        monkeypatch.setattr(
+            pipeline_mod, "_process_informative_read",
+            _fake_process_informative_read,
+        )
+        monkeypatch.setattr(pipeline_mod, "_JF_READ_BATCH_SIZE", 2)
+        monkeypatch.setattr(pipeline_mod, "_worker_automaton", None)
+        monkeypatch.setattr(pipeline_mod, "_worker_jf_query", jf_query)
+        monkeypatch.setattr(pipeline_mod, "_worker_kmer_size", 5)
+        monkeypatch.setattr(
+            pipeline_mod, "_worker_min_distinct_kmers_per_read", 1,
+        )
+
+        (
+            _read_hits,
+            _reads_seen,
+            _unmapped_informative,
+            total_reads_scanned,
+            _read_sv_meta,
+            _kmer_coverage,
+            _read_coverage,
+        ) = pipeline_mod._scan_contig_for_hits("child.bam", "ref.fa", "chr1")
+
+        assert total_reads_scanned == 3
+        assert len(jf_query.query_calls) == 2
+        assert jf_query.query_calls[0] == {"AAAAA", "CCCCC"}
+        assert jf_query.query_calls[1] == {"GGGGG"}
+        assert jf_query.close_calls == 2
+        assert len(seen_reads) == 3
