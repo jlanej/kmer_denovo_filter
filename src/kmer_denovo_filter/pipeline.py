@@ -1454,6 +1454,11 @@ _worker_jf_query = None        # JellyfishKmerQuery (large k-mer sets)
 _worker_kmer_size = None
 _worker_min_distinct_kmers_per_read = 1
 
+# Number of reads to accumulate before issuing a single jellyfish
+# subprocess call.  Larger batches amortize subprocess overhead
+# but temporarily hold more read objects in memory.
+_JF_READ_BATCH_SIZE = 5000
+
 
 def _init_scan_worker(proband_data, kmer_size,
                       min_distinct_kmers_per_read=1):
@@ -1607,7 +1612,6 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
         # reads are queried in a single jellyfish subprocess call.
         # This reduces subprocess overhead from O(n_reads) to
         # O(n_reads / batch_size).
-        _JF_BATCH_SIZE = 5000
         pending = []   # (read, canon_at_pos, unique_candidates)
         pending_kmers = set()
 
@@ -1628,7 +1632,7 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
             pending_kmers.update(unique_candidates)
             pending.append((read, canon_at_pos, unique_candidates))
 
-            if len(pending) < _JF_BATCH_SIZE:
+            if len(pending) < _JF_READ_BATCH_SIZE:
                 continue
 
             # Pre-cache all k-mers from this batch in one subprocess
@@ -2039,7 +2043,6 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
 
         if jf_query_st is not None:
             # Batched jellyfish path (single-threaded)
-            _JF_BATCH_SIZE = 5000
             pending = []
             pending_kmers = set()
 
@@ -2060,7 +2063,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                 pending_kmers.update(unique_candidates)
                 pending.append((read, canon_at_pos, unique_candidates))
 
-                if len(pending) < _JF_BATCH_SIZE:
+                if len(pending) < _JF_READ_BATCH_SIZE:
                     continue
 
                 if pending_kmers:
