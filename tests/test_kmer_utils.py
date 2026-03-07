@@ -1,6 +1,7 @@
 """Tests for k-mer utility functions."""
 
 from kmer_denovo_filter.kmer_utils import (
+    _extract_read_kmers,
     _is_symbolic,
     build_kmer_automaton,
     canonicalize,
@@ -531,3 +532,178 @@ class TestBuildKmerAutomaton:
         for seq in (kmer, rc):
             for _, val in A.iter(seq):
                 assert val == kmer
+
+
+class TestExtractReadKmers:
+    """Tests for _extract_read_kmers helper."""
+
+    def test_basic_extraction(self):
+        """Extracts canonical k-mers with correct positions."""
+        seq = "ACGTACGT"
+        canon_at_pos, unique_cands = _extract_read_kmers(seq, 5)
+        assert len(canon_at_pos) == 4  # positions 0..3
+        assert all(isinstance(k, str) for k in canon_at_pos.values())
+        assert len(unique_cands) > 0
+
+    def test_short_sequence(self):
+        """Sequence shorter than kmer_size returns empty results."""
+        canon_at_pos, unique_cands = _extract_read_kmers("ACG", 5)
+        assert canon_at_pos == {}
+        assert unique_cands == []
+
+    def test_skips_n_containing_kmers(self):
+        """K-mers containing N should be skipped."""
+        seq = "ACNGTACGT"
+        canon_at_pos, unique_cands = _extract_read_kmers(seq, 5)
+        # positions 0-4 span the N, so many k-mers are skipped
+        for pos, kmer in canon_at_pos.items():
+            assert "N" not in kmer
+
+    def test_deduplicates_candidates(self):
+        """unique_candidates should contain no duplicates."""
+        seq = "AAAAAAAAAA"  # many identical k-mers
+        canon_at_pos, unique_cands = _extract_read_kmers(seq, 5)
+        assert len(unique_cands) == len(set(unique_cands))
+
+    def test_canonicalization(self):
+        """Extracted k-mers are canonical."""
+        seq = "ACGTACGT"
+        canon_at_pos, unique_cands = _extract_read_kmers(seq, 5)
+        for kmer in unique_cands:
+            assert kmer == canonicalize(kmer)
+
+    def test_consistency_with_manual(self):
+        """Results match manual canonicalization."""
+        seq = "ACGTAC"
+        kmer_size = 4
+        canon_at_pos, unique_cands = _extract_read_kmers(seq, kmer_size)
+        expected_pos = {}
+        for i in range(len(seq) - kmer_size + 1):
+            kmer = seq[i:i + kmer_size]
+            expected_pos[i] = canonicalize(kmer)
+        assert canon_at_pos == expected_pos
+
+
+import os
+import subprocess
+import pytest
+
+from kmer_denovo_filter.kmer_utils import JellyfishKmerQuery
+
+
+@pytest.fixture
+def jf_index(tmp_path):
+    """Create a small jellyfish index for testing."""
+    fa = tmp_path / "test.fa"
+    fa.write_text(">seq\nACGTACGTACGTACGTACGT\n")
+    jf = str(tmp_path / "test.jf")
+    subprocess.run(
+        ["jellyfish", "count", "-m", "5", "-s", "10M", "-t", "1",
+         "-C", str(fa), "-o", jf],
+        check=True,
+    )
+    return jf
+
+
+class TestJellyfishKmerQueryCache:
+    """Tests for JellyfishKmerQuery caching behaviour."""
+
+    def test_query_batch_returns_hits(self, jf_index):
+        """query_batch returns present k-mers."""
+        q = JellyfishKmerQuery(jf_index)
+        # ACGTA is in the index (from "ACGTACGTACGTACGTACGT")
+        hits = q.query_batch([canonicalize("ACGTA")])
+        assert len(hits) > 0
+        q.close()
+
+    def test_query_batch_no_hits(self, jf_index):
+        """query_batch returns empty set for absent k-mers."""
+        q = JellyfishKmerQuery(jf_index)
+        hits = q.query_batch([canonicalize("TTTTT")])
+        assert len(hits) == 0
+        q.close()
+
+    def test_cache_avoids_subprocess(self, jf_index):
+        """Second call to query_batch should use cache (no subprocess)."""
+        q = JellyfishKmerQuery(jf_index)
+        kmer = canonicalize("ACGTA")
+        hits1 = q.query_batch([kmer])
+        # Second call — same k-mer should come from cache
+        hits2 = q.query_batch([kmer])
+        assert hits1 == hits2
+        q.close()
+
+    def test_cache_populated(self, jf_index):
+        """Cache is populated after query_batch."""
+        q = JellyfishKmerQuery(jf_index)
+        kmer = canonicalize("ACGTA")
+        q.query_batch([kmer])
+        assert kmer in q._cache
+        q.close()
+
+    def test_mixed_cached_uncached(self, jf_index):
+        """Querying mix of cached and uncached k-mers works."""
+        q = JellyfishKmerQuery(jf_index)
+        kmer1 = canonicalize("ACGTA")
+        q.query_batch([kmer1])  # cache kmer1
+
+        kmer2 = canonicalize("TTTTT")
+        # kmer1 is cached, kmer2 is not
+        hits = q.query_batch([kmer1, kmer2])
+        assert kmer1 in hits
+        assert kmer2 not in hits
+        q.close()
+
+    def test_scan_read_basic(self, jf_index):
+        """scan_read finds k-mers present in index."""
+        q = JellyfishKmerQuery(jf_index)
+        unique, indices = q.scan_read("ACGTACGTACGTACGTACGT", 5)
+        assert len(unique) > 0
+        assert len(indices) > 0
+        q.close()
+
+    def test_scan_read_no_match(self, jf_index):
+        """scan_read returns empty for non-matching sequence."""
+        q = JellyfishKmerQuery(jf_index)
+        unique, indices = q.scan_read("TTTTTTTTTTTTTTT", 5)
+        assert len(unique) == 0
+        assert len(indices) == 0
+        q.close()
+
+    def test_scan_read_caches_results(self, jf_index):
+        """scan_read populates the cache for future lookups."""
+        q = JellyfishKmerQuery(jf_index)
+        q.scan_read("ACGTACGTACGTACGTACGT", 5)
+        # Cache should contain k-mers from the read
+        assert len(q._cache) > 0
+        q.close()
+
+    def test_batch_then_scan_uses_cache(self, jf_index):
+        """Pre-populating cache via query_batch speeds up scan_read."""
+        q = JellyfishKmerQuery(jf_index)
+        seq = "ACGTACGTACGTACGTACGT"
+        # Pre-populate cache
+        _, unique_cands = _extract_read_kmers(seq, 5)
+        q.query_batch(unique_cands)
+        cache_size_after_batch = len(q._cache)
+
+        # scan_read should use cache, not add new entries
+        unique, indices = q.scan_read(seq, 5)
+        assert len(q._cache) == cache_size_after_batch
+        assert len(unique) > 0
+        q.close()
+
+    def test_empty_batch(self, jf_index):
+        """Empty batch returns empty set."""
+        q = JellyfishKmerQuery(jf_index)
+        hits = q.query_batch([])
+        assert hits == set()
+        q.close()
+
+    def test_close_clears_cache(self, jf_index):
+        """close() clears the internal cache."""
+        q = JellyfishKmerQuery(jf_index)
+        q.query_batch([canonicalize("ACGTA")])
+        assert len(q._cache) > 0
+        q.close()
+        assert len(q._cache) == 0
