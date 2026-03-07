@@ -1612,7 +1612,7 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
         # reads are queried in a single jellyfish subprocess call.
         # This reduces subprocess overhead from O(n_reads) to
         # O(n_reads / batch_size).
-        pending = []   # (read, canon_at_pos, unique_candidates)
+        pending = []   # (read, canon_at_pos)
         pending_kmers = set()
 
         for read in iterator:
@@ -1630,7 +1630,7 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
                 seq, kmer_size,
             )
             pending_kmers.update(unique_candidates)
-            pending.append((read, canon_at_pos, unique_candidates))
+            pending.append((read, canon_at_pos))
 
             if len(pending) < _JF_READ_BATCH_SIZE:
                 continue
@@ -1644,7 +1644,7 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
                 pending_kmers = set()
 
             # Process each read against batch-level hits
-            for read_obj, c_at_pos, _u_cands in pending:
+            for read_obj, c_at_pos in pending:
                 unique_in_read = set()
                 kmer_hit_indices = set()
                 for pos, canon in c_at_pos.items():
@@ -1668,7 +1668,7 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
             batch_hits = set()
             if pending_kmers:
                 batch_hits = jf_query.query_batch(list(pending_kmers))
-            for read_obj, c_at_pos, _u_cands in pending:
+            for read_obj, c_at_pos in pending:
                 unique_in_read = set()
                 kmer_hit_indices = set()
                 for pos, canon in c_at_pos.items():
