@@ -25,7 +25,8 @@ EOF
 }
 
 DB_PATH=""
-THREADS="${THREADS:-}"
+ENV_THREADS="${THREADS:-}"
+THREADS=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -56,10 +57,10 @@ if [[ -z "$DB_PATH" ]]; then
 fi
 
 if [[ -z "$THREADS" ]]; then
-    if command -v nproc >/dev/null 2>&1; then
-        THREADS="$(nproc)"
+    if [[ -n "$ENV_THREADS" ]]; then
+        THREADS="$ENV_THREADS"
     else
-        THREADS="4"
+        THREADS="$(nproc 2>/dev/null || echo 4)"
     fi
 fi
 
@@ -77,7 +78,7 @@ kraken2-build --standard --db "$DB_PATH" --threads "$THREADS"
 # Validate key files expected by Kraken2Runner lineage-aware matching.
 for req in "hash.k2d" "opts.k2d" "taxo.k2d" "taxonomy/nodes.dmp"; do
     if [[ ! -f "$DB_PATH/$req" ]]; then
-        echo "Error: expected database file missing: $DB_PATH/$req" >&2
+        echo "Error: missing required database file: $DB_PATH/$req" >&2
         exit 1
     fi
 done
