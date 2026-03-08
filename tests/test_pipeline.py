@@ -1137,17 +1137,25 @@ class TestDiscoveryPipeline:
 
         original_check_tool = pipeline_mod._check_tool
 
+        called = {
+            "checked_kraken2": False,
+            "ran_kraken2": False,
+        }
+
         def _check_tool_no_kraken(name):
             if name == "kraken2":
-                raise AssertionError("discovery mode should not check kraken2")
+                called["checked_kraken2"] = True
+                return False
             return original_check_tool(name)
 
-        def _raise_if_called(*_args, **_kwargs):
-            raise AssertionError("discovery mode should not run kraken2")
+        def _track_if_called(*_args, **_kwargs):
+            called["ran_kraken2"] = True
+            result = pipeline_mod.Kraken2Runner.Result()
+            return result
 
         monkeypatch.setattr(pipeline_mod, "_check_tool", _check_tool_no_kraken)
         monkeypatch.setattr(
-            pipeline_mod, "_run_kraken2_on_reads", _raise_if_called,
+            pipeline_mod, "_run_kraken2_on_reads", _track_if_called,
         )
 
         args = parse_args([
@@ -1166,6 +1174,8 @@ class TestDiscoveryPipeline:
         with open(metrics_path) as fh:
             metrics = json.load(fh)
         assert "kraken2" not in metrics
+        assert called["checked_kraken2"] is False
+        assert called["ran_kraken2"] is False
 
     def test_discovery_inherited_no_regions(self, tmpdir):
         """When child shares k-mers with a parent, no regions should appear."""

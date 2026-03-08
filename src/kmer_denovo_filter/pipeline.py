@@ -48,6 +48,7 @@ from kmer_denovo_filter.utils import (
 )
 
 logger = logging.getLogger(__name__)
+_BACTERIAL_FRACTION_PRECISION = 4
 
 
 def _run_kraken2_on_reads(
@@ -4093,11 +4094,11 @@ def run_pipeline(args):
             dka_bacterial = len(dka_names.intersection(bacterial_read_names))
 
             ann["dku_bacterial_fraction"] = (
-                round(dku_bacterial / len(dku_names), 4)
+                round(dku_bacterial / len(dku_names), _BACTERIAL_FRACTION_PRECISION)
                 if dku_names else 0.0
             )
             ann["dka_bacterial_fraction"] = (
-                round(dka_bacterial / len(dka_names), 4)
+                round(dka_bacterial / len(dka_names), _BACTERIAL_FRACTION_PRECISION)
                 if dka_names else 0.0
             )
 
