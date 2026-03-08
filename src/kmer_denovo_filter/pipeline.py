@@ -54,6 +54,7 @@ _BACTERIAL_FRACTION_PRECISION = 4
 def _run_kraken2_on_reads(
     child_bam, ref_fasta, read_names, kraken2_db,
     confidence=0.0, threads=1, tmpdir=None,
+    informative_reads_by_variant=None,
 ):
     """Classify child reads with kraken2 and return a result summary.
 
@@ -69,6 +70,10 @@ def _run_kraken2_on_reads(
         confidence: Kraken2 confidence threshold.
         threads: Number of threads for kraken2.
         tmpdir: Optional directory for temporary files.
+        informative_reads_by_variant: Optional dict mapping variant key
+            (chrom:pos, 0-based) to informative read-name sets. When
+            provided, only those loci are fetched from the BAM/CRAM to
+            avoid a whole-file scan.
 
     Returns:
         A :class:`Kraken2Runner.Result`.
@@ -76,16 +81,47 @@ def _run_kraken2_on_reads(
     if not read_names:
         return Kraken2Runner.Result()
 
-    # Collect sequences from BAM
+    # Collect sequences from BAM.
+    # Prefer targeted locus fetches when variant→read mappings are
+    # available; otherwise fall back to a whole-file scan.
     sequences = {}
     bam = pysam.AlignmentFile(
         child_bam, reference_filename=ref_fasta if ref_fasta else None,
     )
-    for read in bam.fetch(until_eof=True):
-        if read.query_name in read_names and read.query_sequence:
-            # Use first occurrence of each read name
-            if read.query_name not in sequences:
-                sequences[read.query_name] = read.query_sequence
+    used_targeted_fetch = False
+    if informative_reads_by_variant:
+        loci_to_names = {}
+        for var_key, names in informative_reads_by_variant.items():
+            if not names:
+                continue
+            chrom, sep, pos_str = var_key.rpartition(":")
+            if sep == "":
+                continue
+            try:
+                pos = int(pos_str)
+            except ValueError:
+                continue
+            target_names = set(names).intersection(read_names)
+            if not target_names:
+                continue
+            loci_to_names.setdefault((chrom, pos), set()).update(target_names)
+
+        if loci_to_names:
+            used_targeted_fetch = True
+            for (chrom, pos), target_names in sorted(loci_to_names.items()):
+                for read in bam.fetch(chrom, pos, pos + 1):
+                    if (
+                        read.query_name in target_names
+                        and read.query_sequence
+                        and read.query_name not in sequences
+                    ):
+                        sequences[read.query_name] = read.query_sequence
+
+    if not used_targeted_fetch:
+        for read in bam.fetch(until_eof=True):
+            if read.query_name in read_names and read.query_sequence:
+                if read.query_name not in sequences:
+                    sequences[read.query_name] = read.query_sequence
     bam.close()
 
     if not sequences:
@@ -4079,6 +4115,7 @@ def run_pipeline(args):
             args.child, args.ref_fasta, all_informative_names,
             kraken2_db, confidence=kraken2_confidence,
             threads=args.threads,
+            informative_reads_by_variant=informative_reads_by_variant,
         )
         logger.info(
             "[Kraken2] %s (%s)",

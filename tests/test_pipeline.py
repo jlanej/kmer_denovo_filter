@@ -269,6 +269,44 @@ class TestPipelineIntegration:
             assert sample["DKU_BF"] == pytest.approx(1.0)
             assert sample["DKA_BF"] == pytest.approx(1.0)
 
+    def test_kraken2_read_extraction_uses_variant_locus(self, tmpdir, monkeypatch):
+        """Kraken2 read extraction uses locus-targeted fetches when available."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        _create_ref_fasta(ref_fa, chrom, 200)
+
+        read_name = "pair1"
+        non_variant_seq = "A" * 40
+        variant_seq = "T" * 40
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [
+                (read_name, 10, non_variant_seq, None),
+                (read_name, 50, variant_seq, None),
+            ],
+        )
+
+        captured = {}
+
+        def _mock_classify(self, sequences, tmpdir=None):
+            captured.update(dict(sequences))
+            return pipeline_mod.Kraken2Runner.Result()
+
+        monkeypatch.setattr(
+            pipeline_mod.Kraken2Runner, "classify_sequences", _mock_classify,
+        )
+
+        pipeline_mod._run_kraken2_on_reads(
+            child_bam=child_bam,
+            ref_fasta=ref_fa,
+            read_names={read_name},
+            kraken2_db=os.path.join(tmpdir, "kraken_db"),
+            informative_reads_by_variant={"chr1:50": {read_name}},
+        )
+
+        assert captured[read_name] == variant_seq
+
     def test_inherited_variant_no_unique(self, tmpdir):
         """When the variant is also in a parent, DKU should be 0."""
         chrom = "chr1"
