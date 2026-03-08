@@ -17,6 +17,7 @@ import pysam
 
 from kmer_denovo_filter.kmer_utils import (
     JellyfishKmerQuery,
+    Kraken2Runner,
     _extract_read_kmers,
     _is_symbolic,
     build_kmer_automaton,
@@ -47,6 +48,52 @@ from kmer_denovo_filter.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _run_kraken2_on_reads(
+    child_bam, ref_fasta, read_names, kraken2_db,
+    confidence=0.0, threads=1, tmpdir=None,
+):
+    """Classify child reads with kraken2 and return a result summary.
+
+    Extracts sequences for *read_names* from *child_bam*, classifies them
+    with kraken2, and returns a :class:`Kraken2Runner.Result` with tallied
+    bacterial / human / root counts.
+
+    Args:
+        child_bam: Path to child BAM/CRAM.
+        ref_fasta: Path to reference FASTA (may be None for BAM).
+        read_names: Set of read names to classify.
+        kraken2_db: Path to the kraken2 database directory.
+        confidence: Kraken2 confidence threshold.
+        threads: Number of threads for kraken2.
+        tmpdir: Optional directory for temporary files.
+
+    Returns:
+        A :class:`Kraken2Runner.Result`.
+    """
+    if not read_names:
+        return Kraken2Runner.Result()
+
+    # Collect sequences from BAM
+    sequences = {}
+    bam = pysam.AlignmentFile(
+        child_bam, reference_filename=ref_fasta if ref_fasta else None,
+    )
+    for read in bam.fetch(until_eof=True):
+        if read.query_name in read_names and read.query_sequence:
+            # Use first occurrence of each read name
+            if read.query_name not in sequences:
+                sequences[read.query_name] = read.query_sequence
+    bam.close()
+
+    if not sequences:
+        return Kraken2Runner.Result()
+
+    kr = Kraken2Runner(
+        kraken2_db, confidence=confidence, threads=threads,
+    )
+    return kr.classify_sequences(sequences, tmpdir=tmpdir)
 
 
 def _validate_inputs(args):
@@ -3211,6 +3258,16 @@ def run_discovery_pipeline(args):
             logger.error("%s not found in PATH", tool)
             sys.exit(1)
 
+    kraken2_db = getattr(args, "kraken2_db", None)
+    kraken2_confidence = getattr(args, "kraken2_confidence", 0.0)
+    if kraken2_db is not None:
+        if not _check_tool("kraken2"):
+            logger.error("kraken2 not found in PATH (required by --kraken2-db)")
+            sys.exit(1)
+        if not os.path.isdir(kraken2_db):
+            logger.error("Kraken2 database not found: %s", kraken2_db)
+            sys.exit(1)
+
     _validate_inputs(args)
 
     out_prefix = args.out_prefix
@@ -3259,6 +3316,7 @@ def run_discovery_pipeline(args):
         else "(auto-detect)",
     )
     logger.info("  Tmp dir:           %s", getattr(args, 'tmp_dir', None) or "(auto)")
+    logger.info("  Kraken2 DB:        %s", kraken2_db or "(disabled)")
     total_mem_gb, avail_mem_gb = _get_available_memory_gb()
     if total_mem_gb is not None:
         logger.info(
@@ -3499,6 +3557,28 @@ def run_discovery_pipeline(args):
             pre_filter, len(regions), min_reads, min_kmers,
         )
 
+    # ── Kraken2 bacterial content flagging (discovery mode) ──────────
+    kraken2_result = None
+    if kraken2_db is not None:
+        step_start_k2 = time.monotonic()
+        all_informative_names = set()
+        for names in region_reads.values():
+            all_informative_names.update(names)
+        logger.info(
+            "[Kraken2] Classifying %d informative reads for bacterial content",
+            len(all_informative_names),
+        )
+        kraken2_result = _run_kraken2_on_reads(
+            args.child, args.ref_fasta, all_informative_names,
+            kraken2_db, confidence=kraken2_confidence,
+            threads=args.threads,
+        )
+        logger.info(
+            "[Kraken2] %s (%s)",
+            kraken2_result.summary(),
+            _format_elapsed(time.monotonic() - step_start_k2),
+        )
+
     # ── Module 4: Output ───────────────────────────────────────────
     step_start = time.monotonic()
     logger.info("[Module 4] Writing output files")
@@ -3623,6 +3703,20 @@ def run_discovery_pipeline(args):
             ],
         }
 
+    if kraken2_result is not None:
+        metrics["kraken2"] = {
+            "total_reads_classified": kraken2_result.total,
+            "classified": kraken2_result.classified,
+            "unclassified": kraken2_result.unclassified,
+            "bacterial_reads": kraken2_result.bacterial_count,
+            "human_reads": kraken2_result.human_count,
+            "root_reads": kraken2_result.root_count,
+            "bacterial_fraction": (
+                round(kraken2_result.bacterial_count / kraken2_result.total, 4)
+                if kraken2_result.total > 0 else 0.0
+            ),
+        }
+
     # ── Curated DNM region evaluation ─────────────────────────────
     dnm_evaluation = _evaluate_dnm_regions(
         regions, metrics["regions"],
@@ -3702,6 +3796,16 @@ def run_pipeline(args):
             logger.error("%s not found in PATH", tool)
             sys.exit(1)
 
+    kraken2_db = getattr(args, "kraken2_db", None)
+    kraken2_confidence = getattr(args, "kraken2_confidence", 0.0)
+    if kraken2_db is not None:
+        if not _check_tool("kraken2"):
+            logger.error("kraken2 not found in PATH (required by --kraken2-db)")
+            sys.exit(1)
+        if not os.path.isdir(kraken2_db):
+            logger.error("Kraken2 database not found: %s", kraken2_db)
+            sys.exit(1)
+
     _validate_inputs(args)
 
     # ── Configuration summary ──────────────────────────────────────
@@ -3734,6 +3838,7 @@ def run_pipeline(args):
         else "(auto-detect)",
     )
     logger.info("  Proband ID:        %s", args.proband_id or "(not set)")
+    logger.info("  Kraken2 DB:        %s", kraken2_db or "(disabled)")
     logger.info("=" * 60)
 
     # ── Step 1: Parse VCF ──────────────────────────────────────────
@@ -3960,6 +4065,28 @@ def run_pipeline(args):
         _format_elapsed(time.monotonic() - step_start),
     )
 
+    # ── Kraken2 bacterial content flagging (VCF mode) ──────────────
+    kraken2_result = None
+    if kraken2_db is not None:
+        step_start = time.monotonic()
+        all_informative_names = set()
+        for names in informative_reads_by_variant.values():
+            all_informative_names.update(names)
+        logger.info(
+            "[Kraken2] Classifying %d informative reads for bacterial content",
+            len(all_informative_names),
+        )
+        kraken2_result = _run_kraken2_on_reads(
+            args.child, args.ref_fasta, all_informative_names,
+            kraken2_db, confidence=kraken2_confidence,
+            threads=args.threads,
+        )
+        logger.info(
+            "[Kraken2] %s (%s)",
+            kraken2_result.summary(),
+            _format_elapsed(time.monotonic() - step_start),
+        )
+
     # ── Step 5: Write outputs ──────────────────────────────────────
     step_start = time.monotonic()
     logger.info("[Step 5/5] Writing output files")
@@ -3995,6 +4122,19 @@ def run_pipeline(args):
             "child_unique_kmers": child_unique_kmers,
             "variants_with_unique_reads": likely_dnm,
         }
+        if kraken2_result is not None:
+            metrics["kraken2"] = {
+                "total_reads_classified": kraken2_result.total,
+                "classified": kraken2_result.classified,
+                "unclassified": kraken2_result.unclassified,
+                "bacterial_reads": kraken2_result.bacterial_count,
+                "human_reads": kraken2_result.human_count,
+                "root_reads": kraken2_result.root_count,
+                "bacterial_fraction": (
+                    round(kraken2_result.bacterial_count / kraken2_result.total, 4)
+                    if kraken2_result.total > 0 else 0.0
+                ),
+            }
         with open(args.metrics, "w") as fh:
             json.dump(metrics, fh, indent=2)
         logger.info("[Step 5/5] Metrics written to: %s", args.metrics)
