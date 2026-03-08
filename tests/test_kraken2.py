@@ -85,7 +85,7 @@ class TestKraken2RunnerClassify:
         assert result.total == 0
 
     @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
-    def test_classify_parses_output(self, mock_popen):
+    def test_classify_parses_output(self, mock_popen, caplog):
         """Test that kraken2 output is correctly parsed."""
         # Simulate kraken2 per-read output:
         # C = classified, U = unclassified
@@ -108,6 +108,7 @@ class TestKraken2RunnerClassify:
         kr = Kraken2Runner("/fake/db")
 
         # Without taxonomy files, only exact taxid 2 is bacterial
+        caplog.set_level("WARNING", logger="kmer_denovo_filter.kmer_utils")
         with mock.patch.object(
             Kraken2Runner, '_load_bacterial_taxids', return_value=None,
         ):
@@ -126,6 +127,8 @@ class TestKraken2RunnerClassify:
         assert result.human_count == 1
         assert result.root_count == 1
         assert "read1" in result.bacterial_read_names
+        assert "lineage matching is unavailable" in caplog.text
+        assert "exact taxid==2 matching only" in caplog.text
 
     @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
     def test_classify_with_bacterial_taxids(self, mock_popen):

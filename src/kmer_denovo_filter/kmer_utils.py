@@ -334,7 +334,8 @@ class Kraken2Runner:
 
         If the taxonomy directory is not present (e.g. a pre-built
         database without nodes.dmp), returns ``None`` so that the
-        caller falls back to direct-taxid-only matching.
+        caller can emit a warning and fall back to direct-taxid-only
+        matching.
         """
         nodes_path = os.path.join(db_path, "taxonomy", "nodes.dmp")
         if not os.path.isfile(nodes_path):
@@ -451,6 +452,14 @@ class Kraken2Runner:
 
             # Load bacterial taxid set for lineage-aware matching
             bacterial_taxids = self._load_bacterial_taxids(self.db_path)
+            if bacterial_taxids is None:
+                logger.warning(
+                    "Kraken2 taxonomy lineage matching is unavailable "
+                    "(missing/unreadable taxonomy/nodes.dmp under DB: %s). "
+                    "Falling back to exact taxid==2 matching only; "
+                    "bacterial fractions may be severely undercounted.",
+                    self.db_path,
+                )
 
             # Parse per-read output
             # Format: C/U\tread_name\ttaxid\tlength\tkmers_string
