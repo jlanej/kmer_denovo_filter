@@ -160,9 +160,10 @@ def parse_args(argv=None):
     parser.add_argument(
         "--kraken2-db", default=None,
         help="Path to a Kraken2 database for bacterial content flagging. "
-             "When provided, informative reads are classified with kraken2 "
-             "and bacterial read counts are reported in the metrics output. "
-             "Requires kraken2 to be on PATH.",
+             "In VCF mode, informative reads are classified with kraken2 and "
+             "bacterial fraction annotations are added to the output VCF. "
+             "Currently ignored in discovery mode. Requires kraken2 to be on "
+             "PATH.",
     )
     parser.add_argument(
         "--kraken2-confidence", type=float, default=0.0,

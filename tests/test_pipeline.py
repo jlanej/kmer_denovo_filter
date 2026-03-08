@@ -203,6 +203,72 @@ class TestPipelineIntegration:
             assert read.query_name == "read1"
         bam_info.close()
 
+    def test_vcf_kraken2_bacterial_fraction_annotations(self, tmpdir, monkeypatch):
+        """VCF mode writes DKU_BF and DKA_BF when kraken2 is enabled."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+        var_pos_0 = 50
+
+        child_seq = list(ref_seq[40:80])
+        child_seq[10] = "G" if ref_seq[var_pos_0] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [("read1", 40, child_seq, None)],
+        )
+
+        parent_seq = ref_seq[40:80]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(mother_bam, ref_fa, chrom, [("mread1", 40, parent_seq, None)])
+        _create_bam(father_bam, ref_fa, chrom, [("fread1", 40, parent_seq, None)])
+
+        in_vcf = os.path.join(tmpdir, "input.vcf")
+        _create_vcf(in_vcf, chrom, [(51, ref_seq[var_pos_0], child_seq[10])])
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
+        kraken_db = os.path.join(tmpdir, "kraken_db")
+        os.makedirs(kraken_db)
+
+        def _mock_check_tool(_name):
+            return True
+
+        def _mock_run_kraken2(*_args, **_kwargs):
+            result = pipeline_mod.Kraken2Runner.Result()
+            result.total = 1
+            result.classified = 1
+            result.bacterial_count = 1
+            result.bacterial_read_names.add("read1")
+            return result
+
+        monkeypatch.setattr(pipeline_mod, "_check_tool", _mock_check_tool)
+        monkeypatch.setattr(
+            pipeline_mod, "_run_kraken2_on_reads", _mock_run_kraken2,
+        )
+
+        args = parse_args([
+            "--child", child_bam,
+            "--mother", mother_bam,
+            "--father", father_bam,
+            "--ref-fasta", ref_fa,
+            "--vcf", in_vcf,
+            "--output", out_vcf,
+            "--kmer-size", "5",
+            "--proband-id", "HG002",
+            "--kraken2-db", kraken_db,
+        ])
+        run_pipeline(args)
+
+        with pysam.VariantFile(out_vcf) as vcf_out:
+            rec = next(iter(vcf_out))
+            sample = rec.samples["HG002"]
+            assert "DKU_BF" in sample
+            assert "DKA_BF" in sample
+            assert sample["DKU_BF"] == pytest.approx(1.0)
+            assert sample["DKA_BF"] == pytest.approx(1.0)
+
     def test_inherited_variant_no_unique(self, tmpdir):
         """When the variant is also in a parent, DKU should be 0."""
         chrom = "chr1"
@@ -1044,6 +1110,62 @@ class TestDiscoveryPipeline:
         assert "Per-Region Results" in summary
         assert "Split" in summary
         assert "Class" in summary
+
+    def test_discovery_ignores_kraken2_for_now(self, tmpdir, monkeypatch):
+        """Discovery mode should not invoke kraken2 even if args are provided."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        mut_seq = list(ref_seq[30:90])
+        mut_seq[20] = "G" if ref_seq[50] != "G" else "T"
+        mut_seq = "".join(mut_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [("read1", 30, mut_seq, None), ("read2", 30, mut_seq, None)],
+        )
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(mother_bam, ref_fa, chrom, [("mread1", 30, ref_seq[30:90], None)])
+        _create_bam(father_bam, ref_fa, chrom, [("fread1", 30, ref_seq[30:90], None)])
+
+        out_prefix = os.path.join(tmpdir, "disc_no_kraken")
+        kraken_db = os.path.join(tmpdir, "kraken_db")
+        os.makedirs(kraken_db)
+
+        original_check_tool = pipeline_mod._check_tool
+
+        def _check_tool_no_kraken(name):
+            if name == "kraken2":
+                raise AssertionError("discovery mode should not check kraken2")
+            return original_check_tool(name)
+
+        def _raise_if_called(*_args, **_kwargs):
+            raise AssertionError("discovery mode should not run kraken2")
+
+        monkeypatch.setattr(pipeline_mod, "_check_tool", _check_tool_no_kraken)
+        monkeypatch.setattr(
+            pipeline_mod, "_run_kraken2_on_reads", _raise_if_called,
+        )
+
+        args = parse_args([
+            "--child", child_bam,
+            "--mother", mother_bam,
+            "--father", father_bam,
+            "--ref-fasta", ref_fa,
+            "--out-prefix", out_prefix,
+            "--min-child-count", "2",
+            "--kmer-size", "5",
+            "--kraken2-db", kraken_db,
+        ])
+        run_discovery_pipeline(args)
+
+        metrics_path = f"{out_prefix}.metrics.json"
+        with open(metrics_path) as fh:
+            metrics = json.load(fh)
+        assert "kraken2" not in metrics
 
     def test_discovery_inherited_no_regions(self, tmpdir):
         """When child shares k-mers with a parent, no regions should appear."""

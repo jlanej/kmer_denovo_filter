@@ -467,14 +467,21 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
     The output is always bgzipped and tabix-indexed.  If *output_vcf*
     does not already end with ``.gz``, ``.gz`` is appended.
 
-    When *proband_id* matches a sample in the VCF, DKU and DKT are written
+    When *proband_id* matches a sample in the VCF, DKU and related fields are written
     as FORMAT fields on that sample.  Otherwise they are written as INFO
     fields.
+
+    When bacterial-fraction annotations are present in *annotations*,
+    DKU_BF and DKA_BF are also added.
 
     Returns:
         The actual output path (with ``.gz`` suffix).
     """
     vcf_in = pysam.VariantFile(input_vcf)
+    has_bacterial_fraction = any(
+        "dku_bacterial_fraction" in ann or "dka_bacterial_fraction" in ann
+        for ann in annotations.values()
+    )
 
     use_format = proband_id is not None and proband_id in list(vcf_in.header.samples)
 
@@ -605,6 +612,29 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
              "Minimum k-mer count in parents for alt-allele-supporting k-mers"),
         ],
     )
+    if has_bacterial_fraction:
+        vcf_in.header.add_meta(
+            category,
+            items=[
+                ("ID", "DKU_BF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of DKU reads (reads with >=1 child-unique "
+                 "variant-spanning k-mer) classified as bacterial by kraken2"),
+            ],
+        )
+        vcf_in.header.add_meta(
+            category,
+            items=[
+                ("ID", "DKA_BF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of DKA reads (DKU reads that also support the "
+                 "alternate allele) classified as bacterial by kraken2"),
+            ],
+        )
 
     if not output_vcf.endswith(".gz"):
         output_vcf = output_vcf + ".gz"
@@ -627,6 +657,13 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                 rec.samples[proband_id]["MAX_PKC_ALT"] = ann["max_pkc_alt"]
                 rec.samples[proband_id]["AVG_PKC_ALT"] = ann["avg_pkc_alt"]
                 rec.samples[proband_id]["MIN_PKC_ALT"] = ann["min_pkc_alt"]
+                if has_bacterial_fraction:
+                    rec.samples[proband_id]["DKU_BF"] = ann.get(
+                        "dku_bacterial_fraction", 0.0,
+                    )
+                    rec.samples[proband_id]["DKA_BF"] = ann.get(
+                        "dka_bacterial_fraction", 0.0,
+                    )
             else:
                 rec.info["DKU"] = ann["dku"]
                 rec.info["DKT"] = ann["dkt"]
@@ -639,6 +676,9 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                 rec.info["MAX_PKC_ALT"] = ann["max_pkc_alt"]
                 rec.info["AVG_PKC_ALT"] = ann["avg_pkc_alt"]
                 rec.info["MIN_PKC_ALT"] = ann["min_pkc_alt"]
+                if has_bacterial_fraction:
+                    rec.info["DKU_BF"] = ann.get("dku_bacterial_fraction", 0.0)
+                    rec.info["DKA_BF"] = ann.get("dka_bacterial_fraction", 0.0)
         vcf_out.write(rec)
 
     vcf_out.close()
@@ -3258,16 +3298,6 @@ def run_discovery_pipeline(args):
             logger.error("%s not found in PATH", tool)
             sys.exit(1)
 
-    kraken2_db = getattr(args, "kraken2_db", None)
-    kraken2_confidence = getattr(args, "kraken2_confidence", 0.0)
-    if kraken2_db is not None:
-        if not _check_tool("kraken2"):
-            logger.error("kraken2 not found in PATH (required by --kraken2-db)")
-            sys.exit(1)
-        if not os.path.isdir(kraken2_db):
-            logger.error("Kraken2 database not found: %s", kraken2_db)
-            sys.exit(1)
-
     _validate_inputs(args)
 
     out_prefix = args.out_prefix
@@ -3316,7 +3346,6 @@ def run_discovery_pipeline(args):
         else "(auto-detect)",
     )
     logger.info("  Tmp dir:           %s", getattr(args, 'tmp_dir', None) or "(auto)")
-    logger.info("  Kraken2 DB:        %s", kraken2_db or "(disabled)")
     total_mem_gb, avail_mem_gb = _get_available_memory_gb()
     if total_mem_gb is not None:
         logger.info(
@@ -3557,28 +3586,6 @@ def run_discovery_pipeline(args):
             pre_filter, len(regions), min_reads, min_kmers,
         )
 
-    # ── Kraken2 bacterial content flagging (discovery mode) ──────────
-    kraken2_result = None
-    if kraken2_db is not None:
-        step_start_k2 = time.monotonic()
-        all_informative_names = set()
-        for names in region_reads.values():
-            all_informative_names.update(names)
-        logger.info(
-            "[Kraken2] Classifying %d informative reads for bacterial content",
-            len(all_informative_names),
-        )
-        kraken2_result = _run_kraken2_on_reads(
-            args.child, args.ref_fasta, all_informative_names,
-            kraken2_db, confidence=kraken2_confidence,
-            threads=args.threads,
-        )
-        logger.info(
-            "[Kraken2] %s (%s)",
-            kraken2_result.summary(),
-            _format_elapsed(time.monotonic() - step_start_k2),
-        )
-
     # ── Module 4: Output ───────────────────────────────────────────
     step_start = time.monotonic()
     logger.info("[Module 4] Writing output files")
@@ -3701,17 +3708,6 @@ def run_discovery_pipeline(args):
                 }
                 for c in candidate_comparison
             ],
-        }
-
-    if kraken2_result is not None:
-        metrics["kraken2"] = {
-            "total_reads_classified": kraken2_result.total,
-            "classified": kraken2_result.classified,
-            "unclassified": kraken2_result.unclassified,
-            "bacterial_reads": kraken2_result.bacterial_count,
-            "human_reads": kraken2_result.human_count,
-            "root_reads": kraken2_result.root_count,
-            "bacterial_fraction": kraken2_result.bacterial_fraction,
         }
 
     # ── Curated DNM region evaluation ─────────────────────────────
@@ -3969,6 +3965,7 @@ def run_pipeline(args):
     )
     annotations = {}
     informative_reads_by_variant = {}
+    informative_alt_reads_by_variant = {}
     n_variants = len(variants)
     log_interval = max(1, n_variants // 10)  # report ~10 times
     running_dnm = 0
@@ -3991,6 +3988,7 @@ def run_pipeline(args):
         dku = 0
         dka = 0
         informative_names = set()
+        informative_alt_names = set()
         all_variant_kmers = set()
         alt_variant_kmers = set()
         for read_name, kmers, supports_alt in read_kmers_list:
@@ -4004,6 +4002,7 @@ def run_pipeline(args):
                 informative_names.add(read_name)
                 if supports_alt:
                     dka += 1
+                    informative_alt_names.add(read_name)
 
         if dku > 0:
             running_dnm += 1
@@ -4037,6 +4036,8 @@ def run_pipeline(args):
         }
         if informative_names:
             informative_reads_by_variant[var_key] = informative_names
+        if informative_alt_names:
+            informative_alt_reads_by_variant[var_key] = informative_alt_names
 
         if args.debug_kmers:
             logger.info("Variant %s: DKU=%d DKT=%d DKA=%d", var_key, dku, dkt, dka)
@@ -4083,6 +4084,22 @@ def run_pipeline(args):
             kraken2_result.summary(),
             _format_elapsed(time.monotonic() - step_start),
         )
+        bacterial_read_names = kraken2_result.bacterial_read_names
+        for var_key, ann in annotations.items():
+            dku_names = informative_reads_by_variant.get(var_key, set())
+            dka_names = informative_alt_reads_by_variant.get(var_key, set())
+
+            dku_bacterial = len(dku_names.intersection(bacterial_read_names))
+            dka_bacterial = len(dka_names.intersection(bacterial_read_names))
+
+            ann["dku_bacterial_fraction"] = (
+                round(dku_bacterial / len(dku_names), 4)
+                if dku_names else 0.0
+            )
+            ann["dka_bacterial_fraction"] = (
+                round(dka_bacterial / len(dka_names), 4)
+                if dka_names else 0.0
+            )
 
     # ── Step 5: Write outputs ──────────────────────────────────────
     step_start = time.monotonic()

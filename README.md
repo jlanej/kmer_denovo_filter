@@ -227,6 +227,10 @@ and annotated with the following fields:
   minimum k-mer count among variant-spanning k-mers found in the parents.
 * **MAX_PKC_ALT** / **AVG_PKC_ALT** / **MIN_PKC_ALT** – Same as above but
   restricted to k-mers from reads that directly support the alternate allele.
+* **DKU_BF** / **DKA_BF** *(optional; when `--kraken2-db` is provided in VCF mode)* –
+  Fraction of DKU reads and DKA reads, respectively, that are classified as
+  bacterial by kraken2. These support downstream filtering of likely
+  bacterial-contaminant evidence.
 
 When `--proband-id` is provided and matches a sample in the input VCF,
 annotations are written as **FORMAT** (per-sample) fields on that sample.
