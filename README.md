@@ -79,6 +79,9 @@ The tool supports two modes:
 * Python ≥ 3.9
 * [samtools](https://www.htslib.org/) on `PATH`
 * [Jellyfish ≥ 2](https://github.com/gmarcais/Jellyfish) on `PATH`
+* Optional for VCF-mode bacterial-fraction annotations:
+  * [Kraken2](https://github.com/DerrickWood/kraken2) on `PATH`
+  * `kraken2-build` (to prepare/download a database)
 
 ## Installation
 
@@ -185,6 +188,8 @@ kmer-denovo \
 | `--threads` / `-t` | 4 | Number of threads for Jellyfish and parallel anchoring workers |
 | `--memory` | auto | Available memory in GB. On HPC (e.g. SLURM), set this to the allocated memory so worker counts and hash sizes are tuned correctly. When omitted, auto-detected from the system |
 | `--debug-kmers` | false | Enable per-variant debug output |
+| `--kraken2-db` | – | Optional Kraken2 database path. In VCF mode, enables DKU_BF/DKA_BF bacterial-fraction annotations. Ignored in discovery mode. **Memory note:** the standard Kraken2 DB typically needs ~50–100 GB RAM to load/classify; provision memory accordingly to avoid OOM |
+| `--kraken2-confidence` | 0.0 | Kraken2 LCA confidence threshold (0.0–1.0) |
 | **VCF mode** | | |
 | `--vcf` | – | Input VCF with candidate variants (activates VCF mode) |
 | `--output` / `-o` | – | Output annotated VCF (required with `--vcf`) |
@@ -227,6 +232,10 @@ and annotated with the following fields:
   minimum k-mer count among variant-spanning k-mers found in the parents.
 * **MAX_PKC_ALT** / **AVG_PKC_ALT** / **MIN_PKC_ALT** – Same as above but
   restricted to k-mers from reads that directly support the alternate allele.
+* **DKU_BF** / **DKA_BF** *(optional; when `--kraken2-db` is provided in VCF mode)* –
+  Fraction of DKU reads and DKA reads, respectively, that are classified as
+  bacterial by kraken2. These support downstream filtering of likely
+  bacterial-contaminant evidence.
 
 When `--proband-id` is provided and matches a sample in the input VCF,
 annotations are written as **FORMAT** (per-sample) fields on that sample.
@@ -244,6 +253,27 @@ The optional `--informative-reads` BAM file contains child reads that carry
 at least one variant-spanning k-mer absent from both parents. Each read is
 tagged with `DV` indicating which variant(s) it supports. The BAM is sorted
 and indexed for direct visualization in IGV.
+
+### Kraken2 Database Setup Helper
+
+To build/download a complete Kraken2 standard database (taxonomy + standard
+libraries), use:
+
+```bash
+./scripts/download_kraken2_db.sh --db /path/to/kraken2_db --threads 16
+```
+
+This helper validates that required Kraken2 DB files are present, including
+`taxonomy/nodes.dmp` used for lineage-aware bacterial classification.
+
+You can also run the helper inside the published container:
+
+```bash
+docker run --rm \
+  -v "$PWD:/work" \
+  ghcr.io/jlanej/kmer_denovo_filter:latest \
+  bash /work/scripts/download_kraken2_db.sh --db /work/kraken2_db --threads 16
+```
 
 ### Discovery Mode Output
 
@@ -413,7 +443,8 @@ provenance is self-documenting.
 ## Docker
 
 A Docker image is published to GitHub Container Registry on every push to
-`main`:
+`main`. The image includes `samtools`, `jellyfish`, `kraken2`, and
+`kraken2-build`:
 
 ```bash
 # VCF mode
@@ -423,6 +454,7 @@ docker run --rm -v $PWD:/data ghcr.io/jlanej/kmer_denovo_filter:latest \
   --father /data/father.bam \
   --vcf /data/candidates.vcf \
   --output /data/annotated.vcf \
+  --kraken2-db /data/kraken2_db \
   --proband-id HG002
 
 # Discovery mode

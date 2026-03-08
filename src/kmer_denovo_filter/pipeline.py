@@ -17,6 +17,7 @@ import pysam
 
 from kmer_denovo_filter.kmer_utils import (
     JellyfishKmerQuery,
+    Kraken2Runner,
     _extract_read_kmers,
     _is_symbolic,
     build_kmer_automaton,
@@ -47,6 +48,98 @@ from kmer_denovo_filter.utils import (
 )
 
 logger = logging.getLogger(__name__)
+_BACTERIAL_FRACTION_PRECISION = 4
+
+
+def _run_kraken2_on_reads(
+    child_bam, ref_fasta, read_names, kraken2_db,
+    confidence=0.0, threads=1, tmpdir=None,
+    informative_reads_by_variant=None,
+):
+    """Classify child reads with kraken2 and return a result summary.
+
+    Extracts sequences for *read_names* from *child_bam*, classifies them
+    with kraken2, and returns a :class:`Kraken2Runner.Result` with tallied
+    bacterial / human / root counts.
+
+    Args:
+        child_bam: Path to child BAM/CRAM.
+        ref_fasta: Path to reference FASTA (may be None for BAM).
+        read_names: Set of read names to classify.
+        kraken2_db: Path to the kraken2 database directory.
+        confidence: Kraken2 confidence threshold.
+        threads: Number of threads for kraken2.
+        tmpdir: Optional directory for temporary files.
+        informative_reads_by_variant: Optional dict mapping internal
+            variant keys (``chrom:pos`` with 0-based ``pos`` as produced
+            by this pipeline) to informative read-name sets. When
+            provided, only those loci are fetched from the BAM/CRAM to
+            avoid a whole-file scan.
+
+    Returns:
+        A :class:`Kraken2Runner.Result`.
+    """
+    if not read_names:
+        return Kraken2Runner.Result()
+
+    # Collect sequences from BAM.
+    # Prefer targeted locus fetches when variant→read mappings are
+    # available; otherwise fall back to a whole-file scan.
+    sequences = {}
+    bam = pysam.AlignmentFile(
+        child_bam, reference_filename=ref_fasta if ref_fasta else None,
+    )
+    used_targeted_fetch = False
+    if informative_reads_by_variant:
+        loci_to_names = {}
+        for var_key, names in informative_reads_by_variant.items():
+            if not names:
+                continue
+            chrom, sep, pos_str = var_key.rpartition(":")
+            if not sep:
+                logger.warning(
+                    "[Kraken2] Skipping malformed variant key (missing ':'): %s",
+                    var_key,
+                )
+                continue
+            try:
+                pos = int(pos_str)
+            except ValueError:
+                logger.warning(
+                    "[Kraken2] Skipping malformed variant key (non-integer pos): %s",
+                    var_key,
+                )
+                continue
+            target_names = set(names).intersection(read_names)
+            if not target_names:
+                continue
+            loci_to_names.setdefault((chrom, pos), set()).update(target_names)
+
+        if loci_to_names:
+            used_targeted_fetch = True
+            for (chrom, pos), target_names in sorted(loci_to_names.items()):
+                for read in bam.fetch(chrom, pos, pos + 1):
+                    if (
+                        read.query_name in target_names
+                        and read.query_sequence
+                        and read.query_name not in sequences
+                    ):
+                        sequences[read.query_name] = read.query_sequence
+
+    if not used_targeted_fetch:
+        for read in bam.fetch(until_eof=True):
+            if read.query_name in read_names and read.query_sequence:
+                if read.query_name not in sequences:
+                    sequences[read.query_name] = read.query_sequence
+    bam.close()
+
+    if not sequences:
+        return Kraken2Runner.Result()
+
+    kr = Kraken2Runner(
+        kraken2_db, confidence=confidence, threads=threads,
+    )
+    return kr.classify_sequences(sequences, tmpdir=tmpdir)
 
 
 def _validate_inputs(args):
@@ -420,14 +513,21 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
     The output is always bgzipped and tabix-indexed.  If *output_vcf*
     does not already end with ``.gz``, ``.gz`` is appended.
 
-    When *proband_id* matches a sample in the VCF, DKU and DKT are written
+    When *proband_id* matches a sample in the VCF, DKU and related fields are written
     as FORMAT fields on that sample.  Otherwise they are written as INFO
     fields.
+
+    When bacterial-fraction annotations are present in *annotations*,
+    DKU_BF and DKA_BF are also added.
 
     Returns:
         The actual output path (with ``.gz`` suffix).
     """
     vcf_in = pysam.VariantFile(input_vcf)
+    has_bacterial_fraction = any(
+        "dku_bacterial_fraction" in ann or "dka_bacterial_fraction" in ann
+        for ann in annotations.values()
+    )
 
     use_format = proband_id is not None and proband_id in list(vcf_in.header.samples)
 
@@ -558,6 +658,32 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
              "Minimum k-mer count in parents for alt-allele-supporting k-mers"),
         ],
     )
+    if has_bacterial_fraction:
+        vcf_in.header.add_meta(
+            category,
+            items=[
+                ("ID", "DKU_BF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of unique DKU read names (fragments with >=1 "
+                 "child-unique variant-spanning k-mer) classified as bacterial "
+                 "by kraken2; denominator equals the number of unique fragments, "
+                 "which may be less than DKU when both mates span the locus"),
+            ],
+        )
+        vcf_in.header.add_meta(
+            category,
+            items=[
+                ("ID", "DKA_BF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of unique DKA read names (DKU fragments that also "
+                 "support the alternate allele) classified as bacterial by "
+                 "kraken2; DKA names are always a subset of DKU names"),
+            ],
+        )
 
     if not output_vcf.endswith(".gz"):
         output_vcf = output_vcf + ".gz"
@@ -580,6 +706,13 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                 rec.samples[proband_id]["MAX_PKC_ALT"] = ann["max_pkc_alt"]
                 rec.samples[proband_id]["AVG_PKC_ALT"] = ann["avg_pkc_alt"]
                 rec.samples[proband_id]["MIN_PKC_ALT"] = ann["min_pkc_alt"]
+                if has_bacterial_fraction:
+                    rec.samples[proband_id]["DKU_BF"] = ann.get(
+                        "dku_bacterial_fraction", 0.0,
+                    )
+                    rec.samples[proband_id]["DKA_BF"] = ann.get(
+                        "dka_bacterial_fraction", 0.0,
+                    )
             else:
                 rec.info["DKU"] = ann["dku"]
                 rec.info["DKT"] = ann["dkt"]
@@ -592,6 +725,9 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                 rec.info["MAX_PKC_ALT"] = ann["max_pkc_alt"]
                 rec.info["AVG_PKC_ALT"] = ann["avg_pkc_alt"]
                 rec.info["MIN_PKC_ALT"] = ann["min_pkc_alt"]
+                if has_bacterial_fraction:
+                    rec.info["DKU_BF"] = ann.get("dku_bacterial_fraction", 0.0)
+                    rec.info["DKA_BF"] = ann.get("dka_bacterial_fraction", 0.0)
         vcf_out.write(rec)
 
     vcf_out.close()
@@ -3702,6 +3838,16 @@ def run_pipeline(args):
             logger.error("%s not found in PATH", tool)
             sys.exit(1)
 
+    kraken2_db = getattr(args, "kraken2_db", None)
+    kraken2_confidence = getattr(args, "kraken2_confidence", 0.0)
+    if kraken2_db is not None:
+        if not _check_tool("kraken2"):
+            logger.error("kraken2 not found in PATH (required by --kraken2-db)")
+            sys.exit(1)
+        if not os.path.isdir(kraken2_db):
+            logger.error("Kraken2 database not found: %s", kraken2_db)
+            sys.exit(1)
+
     _validate_inputs(args)
 
     # ── Configuration summary ──────────────────────────────────────
@@ -3734,6 +3880,7 @@ def run_pipeline(args):
         else "(auto-detect)",
     )
     logger.info("  Proband ID:        %s", args.proband_id or "(not set)")
+    logger.info("  Kraken2 DB:        %s", kraken2_db or "(disabled)")
     logger.info("=" * 60)
 
     # ── Step 1: Parse VCF ──────────────────────────────────────────
@@ -3867,6 +4014,7 @@ def run_pipeline(args):
     )
     annotations = {}
     informative_reads_by_variant = {}
+    informative_alt_reads_by_variant = {}
     n_variants = len(variants)
     log_interval = max(1, n_variants // 10)  # report ~10 times
     running_dnm = 0
@@ -3889,6 +4037,7 @@ def run_pipeline(args):
         dku = 0
         dka = 0
         informative_names = set()
+        informative_alt_names = set()
         all_variant_kmers = set()
         alt_variant_kmers = set()
         for read_name, kmers, supports_alt in read_kmers_list:
@@ -3902,6 +4051,7 @@ def run_pipeline(args):
                 informative_names.add(read_name)
                 if supports_alt:
                     dka += 1
+                    informative_alt_names.add(read_name)
 
         if dku > 0:
             running_dnm += 1
@@ -3935,6 +4085,8 @@ def run_pipeline(args):
         }
         if informative_names:
             informative_reads_by_variant[var_key] = informative_names
+        if informative_alt_names:
+            informative_alt_reads_by_variant[var_key] = informative_alt_names
 
         if args.debug_kmers:
             logger.info("Variant %s: DKU=%d DKT=%d DKA=%d", var_key, dku, dkt, dka)
@@ -3959,6 +4111,45 @@ def run_pipeline(args):
         n_variants - likely_dnm,
         _format_elapsed(time.monotonic() - step_start),
     )
+
+    # ── Kraken2 bacterial content flagging (VCF mode) ──────────────
+    kraken2_result = None
+    if kraken2_db is not None:
+        step_start = time.monotonic()
+        all_informative_names = set()
+        for names in informative_reads_by_variant.values():
+            all_informative_names.update(names)
+        logger.info(
+            "[Kraken2] Classifying %d informative reads for bacterial content",
+            len(all_informative_names),
+        )
+        kraken2_result = _run_kraken2_on_reads(
+            args.child, args.ref_fasta, all_informative_names,
+            kraken2_db, confidence=kraken2_confidence,
+            threads=args.threads,
+            informative_reads_by_variant=informative_reads_by_variant,
+        )
+        logger.info(
+            "[Kraken2] %s (%s)",
+            kraken2_result.summary(),
+            _format_elapsed(time.monotonic() - step_start),
+        )
+        bacterial_read_names = kraken2_result.bacterial_read_names
+        for var_key, ann in annotations.items():
+            dku_names = informative_reads_by_variant.get(var_key, set())
+            dka_names = informative_alt_reads_by_variant.get(var_key, set())
+
+            dku_bacterial = len(dku_names.intersection(bacterial_read_names))
+            dka_bacterial = len(dka_names.intersection(bacterial_read_names))
+
+            ann["dku_bacterial_fraction"] = (
+                round(dku_bacterial / len(dku_names), _BACTERIAL_FRACTION_PRECISION)
+                if dku_names else 0.0
+            )
+            ann["dka_bacterial_fraction"] = (
+                round(dka_bacterial / len(dka_names), _BACTERIAL_FRACTION_PRECISION)
+                if dka_names else 0.0
+            )
 
     # ── Step 5: Write outputs ──────────────────────────────────────
     step_start = time.monotonic()
@@ -3995,6 +4186,16 @@ def run_pipeline(args):
             "child_unique_kmers": child_unique_kmers,
             "variants_with_unique_reads": likely_dnm,
         }
+        if kraken2_result is not None:
+            metrics["kraken2"] = {
+                "total_reads_classified": kraken2_result.total,
+                "classified": kraken2_result.classified,
+                "unclassified": kraken2_result.unclassified,
+                "bacterial_reads": kraken2_result.bacterial_count,
+                "human_reads": kraken2_result.human_count,
+                "root_reads": kraken2_result.root_count,
+                "bacterial_fraction": kraken2_result.bacterial_fraction,
+            }
         with open(args.metrics, "w") as fh:
             json.dump(metrics, fh, indent=2)
         logger.info("[Step 5/5] Metrics written to: %s", args.metrics)

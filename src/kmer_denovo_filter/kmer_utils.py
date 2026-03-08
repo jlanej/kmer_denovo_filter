@@ -1,7 +1,9 @@
 """K-mer utility functions."""
 
 import logging
+import os
 import subprocess
+import tempfile
 
 import ahocorasick
 
@@ -239,6 +241,272 @@ class JellyfishKmerQuery:
     def __del__(self):
         self.close()
 
+
+# ── Kraken2-backed bacterial content classification ────────────────
+
+
+# Standard NCBI taxonomy ID for the Bacteria domain
+_BACTERIA_TAXID = 2
+
+
+class Kraken2Runner:
+    """Classify reads with kraken2 and tally bacterial content.
+
+    Wraps the ``kraken2`` binary in a subprocess-based interface
+    analogous to :class:`JellyfishKmerQuery`.  Reads are written to a
+    temporary FASTQ, classified, and the kraken2 per-read output is
+    parsed to count how many reads are classified as bacterial
+    (``taxid 2`` or any descendant in the LCA hierarchy).
+
+    The ``--confidence`` threshold (default 0.0) controls how strict
+    the LCA classification must be.  A value of 0.2 requires at least
+    20 % of k-mers in the read to agree on the assigned clade.
+
+    Usage::
+
+        kr = Kraken2Runner("/path/to/kraken2_db")
+        result = kr.classify_sequences({"read1": "ACGT...", "read2": ...})
+        print(result.bacterial_reads)  # set of read names
+        print(result.summary())        # human-readable counts
+    """
+
+    class Result:
+        """Container for a kraken2 classification run.
+
+        Attributes:
+            total: Total reads classified.
+            classified: Number of reads that received a taxonomic assignment.
+            unclassified: Number of reads with no assignment.
+            bacterial_read_names: Set of read names assigned to Bacteria
+                (taxid 2) or descendant taxa.
+            bacterial_count: Number of bacterial reads.
+            human_count: Number of reads assigned to Homo sapiens (taxid 9606)
+                or descendants.
+            root_count: Number of reads assigned to root (taxid 1) with no
+                more specific classification.
+        """
+
+        def __init__(self):
+            self.total = 0
+            self.classified = 0
+            self.unclassified = 0
+            self.bacterial_read_names = set()
+            self.bacterial_count = 0
+            self.human_count = 0
+            self.root_count = 0
+
+        def summary(self):
+            """Return a human-readable summary string."""
+            pct = (
+                f"{100 * self.bacterial_count / self.total:.1f}"
+                if self.total > 0
+                else "0.0"
+            )
+            return (
+                f"kraken2: {self.total} reads, "
+                f"{self.classified} classified, "
+                f"{self.bacterial_count} bacterial ({pct}%), "
+                f"{self.human_count} human, "
+                f"{self.root_count} root"
+            )
+
+        @property
+        def bacterial_fraction(self):
+            """Fraction of reads classified as bacterial (0.0–1.0)."""
+            if self.total == 0:
+                return 0.0
+            return round(self.bacterial_count / self.total, 4)
+
+    def __init__(self, db_path, *, confidence=0.0, threads=1):
+        self.db_path = db_path
+        self.confidence = confidence
+        self.threads = threads
+
+    # ── taxonomy helpers ───────────────────────────────────────────
+
+    @staticmethod
+    def _load_bacterial_taxids(db_path):
+        """Load the set of taxonomy IDs that descend from Bacteria.
+
+        Parses ``taxonomy/nodes.dmp`` within the kraken2 database
+        directory.  Any taxid whose lineage passes through taxid 2
+        (Bacteria) is included.
+
+        If the taxonomy directory is not present (e.g. a pre-built
+        database without nodes.dmp), returns ``None`` so that the
+        caller can emit a warning and fall back to direct-taxid-only
+        matching.
+        """
+        nodes_path = os.path.join(db_path, "taxonomy", "nodes.dmp")
+        if not os.path.isfile(nodes_path):
+            return None
+
+        parent_map = {}
+        try:
+            with open(nodes_path) as fh:
+                for line in fh:
+                    parts = line.split("\t|\t")
+                    if len(parts) < 3:
+                        continue
+                    child_id = int(parts[0].strip())
+                    parent_id = int(parts[1].strip())
+                    parent_map[child_id] = parent_id
+        except (OSError, ValueError):
+            return None
+
+        # Walk up from every node; cache membership
+        bacterial = set()
+        non_bacterial = set()
+
+        def _is_bacterial(taxid):
+            if taxid in bacterial:
+                return True
+            if taxid in non_bacterial:
+                return False
+            path = []
+            cur = taxid
+            while cur not in bacterial and cur not in non_bacterial:
+                if cur == _BACTERIA_TAXID:
+                    bacterial.update(path)
+                    bacterial.add(cur)
+                    return True
+                if cur == 1 or cur == 0 or cur not in parent_map:
+                    non_bacterial.update(path)
+                    non_bacterial.add(cur)
+                    return False
+                path.append(cur)
+                cur = parent_map[cur]
+            if cur in bacterial:
+                bacterial.update(path)
+                return True
+            non_bacterial.update(path)
+            return False
+
+        for taxid in parent_map:
+            _is_bacterial(taxid)
+
+        return bacterial
+
+    # ── classification ─────────────────────────────────────────────
+
+    def classify_sequences(self, sequences, tmpdir=None):
+        """Classify named sequences and return a :class:`Result`.
+
+        Args:
+            sequences: Dict mapping read name → sequence string,
+                **or** a list of ``(name, sequence)`` tuples.
+            tmpdir: Optional directory for temporary FASTQ file.
+
+        Returns:
+            A :class:`Kraken2Runner.Result` with tallied counts.
+        """
+        if isinstance(sequences, dict):
+            items = sequences.items()
+        else:
+            items = sequences
+
+        result = self.Result()
+
+        # Materialize into a list so we can count without consuming
+        items = list(items)
+        if not items:
+            return result
+
+        result.total = len(items)
+
+        # Write a temporary FASTQ
+        fd, fastq_path = tempfile.mkstemp(
+            suffix=".fq", prefix="kraken2_", dir=tmpdir,
+        )
+        try:
+            with os.fdopen(fd, "w") as fh:
+                for name, seq in items:
+                    qual = "I" * len(seq)  # dummy Phred 40
+                    fh.write(f"@{name}\n{seq}\n+\n{qual}\n")
+
+            # Build kraken2 command
+            cmd = [
+                "kraken2",
+                "--db", self.db_path,
+                "--threads", str(self.threads),
+                "--confidence", str(self.confidence),
+                "--output", "-",          # per-read output to stdout
+                "--report", "/dev/null",  # suppress summary report
+                fastq_path,
+            ]
+
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            stdout, stderr = proc.communicate()
+
+            if proc.returncode != 0:
+                logger.warning(
+                    "kraken2 exited with code %d: %s",
+                    proc.returncode,
+                    stderr.decode(errors="replace").strip()[:500],
+                )
+                return result
+
+            # Load bacterial taxid set for lineage-aware matching
+            bacterial_taxids = self._load_bacterial_taxids(self.db_path)
+            if bacterial_taxids is None:
+                logger.warning(
+                    "Kraken2 taxonomy lineage matching is unavailable "
+                    "(missing/unreadable taxonomy/nodes.dmp under DB: %s). "
+                    "Falling back to exact taxid==2 matching only; "
+                    "bacterial fractions may be severely undercounted.",
+                    self.db_path,
+                )
+
+            # Parse per-read output
+            # Format: C/U\tread_name\ttaxid\tlength\tkmers_string
+            for line in stdout.decode(errors="replace").split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 3:
+                    continue
+
+                status = parts[0]
+                read_name = parts[1]
+                try:
+                    taxid = int(parts[2])
+                except ValueError:
+                    continue
+
+                if status == "U":
+                    result.unclassified += 1
+                    continue
+
+                result.classified += 1
+
+                # Check bacterial assignment
+                is_bacterial = False
+                if bacterial_taxids is not None:
+                    is_bacterial = taxid in bacterial_taxids
+                else:
+                    # Fallback: only exact taxid 2
+                    is_bacterial = taxid == _BACTERIA_TAXID
+
+                if is_bacterial:
+                    result.bacterial_count += 1
+                    result.bacterial_read_names.add(read_name)
+                elif taxid == 9606:
+                    result.human_count += 1
+                elif taxid == 1:
+                    result.root_count += 1
+
+        finally:
+            try:
+                os.unlink(fastq_path)
+            except OSError:
+                pass
+
+        return result
 
 
 def read_supports_alt(

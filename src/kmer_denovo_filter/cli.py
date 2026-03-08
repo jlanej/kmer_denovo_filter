@@ -157,6 +157,19 @@ def parse_args(argv=None):
         "--debug-kmers", action="store_true", default=False,
         help="Enable per-variant debug output",
     )
+    parser.add_argument(
+        "--kraken2-db", default=None,
+        help="Path to a Kraken2 database for bacterial content flagging. "
+             "In VCF mode, informative reads are classified with kraken2 and "
+             "bacterial fraction annotations are added to the output VCF. "
+             "Currently ignored in discovery mode. Requires kraken2 to be on "
+             "PATH.",
+    )
+    parser.add_argument(
+        "--kraken2-confidence", type=float, default=0.0,
+        help="Kraken2 confidence threshold (0.0–1.0) for LCA "
+             "classification (default: 0.0)",
+    )
     return parser.parse_args(argv)
 
 
