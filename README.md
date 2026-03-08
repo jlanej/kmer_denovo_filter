@@ -77,10 +77,10 @@ The tool supports two modes:
 ## Prerequisites
 
 * Python ≥ 3.9
-* [samtools](https://www.htslib.org/) on `PATH`
-* [Jellyfish ≥ 2](https://github.com/gmarcais/Jellyfish) on `PATH`
+* [samtools](https://www.htslib.org/) on `PATH` [1]
+* [Jellyfish ≥ 2](https://github.com/gmarcais/Jellyfish) on `PATH` [2]
 * Optional for VCF-mode bacterial-fraction annotations:
-  * [Kraken2](https://github.com/DerrickWood/kraken2) on `PATH`
+  * [Kraken2](https://github.com/DerrickWood/kraken2) on `PATH` [3]
   * `kraken2-build` (to prepare/download a database)
 
 ## Installation
@@ -380,7 +380,7 @@ Human-readable overview including:
 #### SV breakpoints BEDPE (`{prefix}.sv.bedpe`)
 
 Tab-delimited [BEDPE](https://bedtools.readthedocs.io/en/latest/content/general-usage.html#bedpe-format)
-file listing linked SV breakpoint pairs identified from split-read and
+file [4] listing linked SV breakpoint pairs identified from split-read and
 discordant-pair evidence across discovery regions:
 
 | Column | Description |
@@ -401,7 +401,7 @@ When no linked breakpoints are found the file contains only the header line.
 
 Discovery mode applies filters at four levels, in this order:
 
-1. **K-mer–level** (Modules 1–2):
+1. **K-mer–level**:
    * `--min-child-count` — Minimum k-mer occurrences in the child
      BAM/CRAM (default 3). K-mers below this count are discarded.
    * Reference subtraction — K-mers present in the reference genome are
@@ -410,13 +410,10 @@ Discovery mode applies filters at four levels, in this order:
      parent are removed (default 0, meaning any parental occurrence
      removes the k-mer).
 
-   After filtering, a Jellyfish hash index is built from the surviving
-   proband-unique k-mers. This index is memory-mapped and shared across
-   workers via the OS page cache, so even with hundreds of millions of
-   k-mers, per-worker memory remains proportional to 1× the index file
-   (typically 2–10 GB), not N× the k-mer set.
+    After filtering, a Jellyfish hash index is built from the surviving
+    proband-unique k-mers and shared across workers via the OS page cache.
 
-2. **Read-level** (Module 3, anchoring):
+2. **Read-level** (anchoring):
    * `--min-distinct-kmers-per-read` — A read must carry at least this
      many distinct proband-unique k-mers to be considered informative.
      The default is `k/4` (e.g. 7 for k=31).  Reads below the threshold
@@ -469,7 +466,7 @@ docker run --rm -v $PWD:/data ghcr.io/jlanej/kmer_denovo_filter:latest \
 ## Running on HPC with Apptainer
 
 [Apptainer](https://apptainer.org/) (formerly Singularity) can pull the
-Docker image directly and run it on HPC clusters without root access.
+Docker image directly and run it on HPC clusters without root access [5].
 
 ### Pull the container image
 
@@ -577,3 +574,11 @@ apptainer exec --bind /data,/references "$SIF" kmer-denovo \
 pip install pytest
 pytest
 ```
+
+## References
+
+1. Danecek P, Bonfield JK, Liddle J, et al. Twelve years of SAMtools and BCFtools. *GigaScience*. 2021;10(2):giab008. https://doi.org/10.1093/gigascience/giab008
+2. Marçais G, Kingsford C. A fast, lock-free approach for efficient parallel counting of occurrences of k-mers. *Bioinformatics*. 2011;27(6):764-770. https://doi.org/10.1093/bioinformatics/btr011
+3. Wood DE, Lu J, Langmead B. Improved metagenomic analysis with Kraken 2. *Genome Biology*. 2019;20:257. https://doi.org/10.1186/s13059-019-1891-0
+4. Quinlan AR, Hall IM. BEDTools: a flexible suite of utilities for comparing genomic features. *Bioinformatics*. 2010;26(6):841-842. https://doi.org/10.1093/bioinformatics/btq033
+5. Kurtzer GM, Sochat V, Bauer MW. Singularity: Scientific containers for mobility of compute. *PLOS ONE*. 2017;12(5):e0177459. https://doi.org/10.1371/journal.pone.0177459
