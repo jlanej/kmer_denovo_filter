@@ -3711,10 +3711,7 @@ def run_discovery_pipeline(args):
             "bacterial_reads": kraken2_result.bacterial_count,
             "human_reads": kraken2_result.human_count,
             "root_reads": kraken2_result.root_count,
-            "bacterial_fraction": (
-                round(kraken2_result.bacterial_count / kraken2_result.total, 4)
-                if kraken2_result.total > 0 else 0.0
-            ),
+            "bacterial_fraction": kraken2_result.bacterial_fraction,
         }
 
     # ── Curated DNM region evaluation ─────────────────────────────
@@ -4130,10 +4127,7 @@ def run_pipeline(args):
                 "bacterial_reads": kraken2_result.bacterial_count,
                 "human_reads": kraken2_result.human_count,
                 "root_reads": kraken2_result.root_count,
-                "bacterial_fraction": (
-                    round(kraken2_result.bacterial_count / kraken2_result.total, 4)
-                    if kraken2_result.total > 0 else 0.0
-                ),
+                "bacterial_fraction": kraken2_result.bacterial_fraction,
             }
         with open(args.metrics, "w") as fh:
             json.dump(metrics, fh, indent=2)

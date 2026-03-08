@@ -45,6 +45,16 @@ class TestKraken2Result:
         assert "60 human" in s
         assert "10 root" in s
 
+    def test_bacterial_fraction_empty(self):
+        r = Kraken2Runner.Result()
+        assert r.bacterial_fraction == 0.0
+
+    def test_bacterial_fraction_with_counts(self):
+        r = Kraken2Runner.Result()
+        r.total = 200
+        r.bacterial_count = 50
+        assert r.bacterial_fraction == 0.25
+
 
 class TestKraken2RunnerInit:
     """Tests for Kraken2Runner constructor."""
@@ -164,6 +174,36 @@ class TestKraken2RunnerClassify:
         result = kr.classify_sequences({"r1": "ACGT"})
         assert result.total == 1
         assert result.classified == 0
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_classify_malformed_kmer_field(self, mock_popen):
+        """Malformed kmer information field is ignored during parsing."""
+        kraken2_output = (
+            "C\tread1\t2\t100\tGARBAGE_KMER_DATA!!!\n"
+            "C\tread2\t9606\t100\t\n"
+            "\n"
+            "short\n"
+            "C\tread3\tbadtaxid\t100\tfoo\n"
+        )
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (
+            kraken2_output.encode(), b""
+        )
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/fake/db")
+        with mock.patch.object(
+            Kraken2Runner, '_load_bacterial_taxids', return_value=None,
+        ):
+            result = kr.classify_sequences({
+                "read1": "ACGT", "read2": "ACGT", "read3": "ACGT",
+            })
+        # read1 classified bacterial, read2 classified human,
+        # read3 has bad taxid so skipped, short line skipped
+        assert result.classified == 2
+        assert result.bacterial_count == 1
+        assert result.human_count == 1
 
     @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
     def test_classify_list_input(self, mock_popen):

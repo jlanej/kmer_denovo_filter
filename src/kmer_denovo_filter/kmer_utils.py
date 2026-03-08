@@ -260,7 +260,7 @@ class Kraken2Runner:
 
     The ``--confidence`` threshold (default 0.0) controls how strict
     the LCA classification must be.  A value of 0.2 requires at least
-    20 %% of k-mers in the read to agree on the assigned clade.
+    20 % of k-mers in the read to agree on the assigned clade.
 
     Usage::
 
@@ -310,6 +310,13 @@ class Kraken2Runner:
                 f"{self.root_count} root"
             )
 
+        @property
+        def bacterial_fraction(self):
+            """Fraction of reads classified as bacterial (0.0–1.0)."""
+            if self.total == 0:
+                return 0.0
+            return round(self.bacterial_count / self.total, 4)
+
     def __init__(self, db_path, *, confidence=0.0, threads=1):
         self.db_path = db_path
         self.confidence = confidence
@@ -321,9 +328,9 @@ class Kraken2Runner:
     def _load_bacterial_taxids(db_path):
         """Load the set of taxonomy IDs that descend from Bacteria.
 
-        Parses the ``taxo.k2d``-adjacent ``taxonomy/nodes.dmp`` or
-        falls back to a simpler approach: any taxid whose lineage
-        passes through taxid 2 (Bacteria).
+        Parses ``taxonomy/nodes.dmp`` within the kraken2 database
+        directory.  Any taxid whose lineage passes through taxid 2
+        (Bacteria) is included.
 
         If the taxonomy directory is not present (e.g. a pre-built
         database without nodes.dmp), returns ``None`` so that the
@@ -399,7 +406,7 @@ class Kraken2Runner:
 
         result = self.Result()
 
-        # Materialise into a list so we can count without consuming
+        # Materialize into a list so we can count without consuming
         items = list(items)
         if not items:
             return result
