@@ -70,8 +70,9 @@ def _run_kraken2_on_reads(
         confidence: Kraken2 confidence threshold.
         threads: Number of threads for kraken2.
         tmpdir: Optional directory for temporary files.
-        informative_reads_by_variant: Optional dict mapping variant key
-            (chrom:pos, 0-based) to informative read-name sets. When
+        informative_reads_by_variant: Optional dict mapping internal
+            variant keys (``chrom:pos`` with 0-based ``pos`` as produced
+            by this pipeline) to informative read-name sets. When
             provided, only those loci are fetched from the BAM/CRAM to
             avoid a whole-file scan.
 
@@ -95,11 +96,19 @@ def _run_kraken2_on_reads(
             if not names:
                 continue
             chrom, sep, pos_str = var_key.rpartition(":")
-            if sep == "":
+            if not sep:
+                logger.warning(
+                    "[Kraken2] Skipping malformed variant key (missing ':'): %s",
+                    var_key,
+                )
                 continue
             try:
                 pos = int(pos_str)
             except ValueError:
+                logger.warning(
+                    "[Kraken2] Skipping malformed variant key (non-integer pos): %s",
+                    var_key,
+                )
                 continue
             target_names = set(names).intersection(read_names)
             if not target_names:

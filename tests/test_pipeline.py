@@ -305,6 +305,7 @@ class TestPipelineIntegration:
             informative_reads_by_variant={"chr1:50": {read_name}},
         )
 
+        assert set(captured) == {read_name}
         assert captured[read_name] == variant_seq
 
     def test_inherited_variant_no_unique(self, tmpdir):
