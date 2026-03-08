@@ -188,7 +188,7 @@ kmer-denovo \
 | `--threads` / `-t` | 4 | Number of threads for Jellyfish and parallel anchoring workers |
 | `--memory` | auto | Available memory in GB. On HPC (e.g. SLURM), set this to the allocated memory so worker counts and hash sizes are tuned correctly. When omitted, auto-detected from the system |
 | `--debug-kmers` | false | Enable per-variant debug output |
-| `--kraken2-db` | – | Optional Kraken2 database path. In VCF mode, enables DKU_BF/DKA_BF bacterial-fraction annotations. Ignored in discovery mode |
+| `--kraken2-db` | – | Optional Kraken2 database path. In VCF mode, enables DKU_BF/DKA_BF bacterial-fraction annotations. Ignored in discovery mode. **Memory note:** the standard Kraken2 DB typically needs ~50–100 GB RAM to load/classify; provision memory accordingly to avoid OOM |
 | `--kraken2-confidence` | 0.0 | Kraken2 LCA confidence threshold (0.0–1.0) |
 | **VCF mode** | | |
 | `--vcf` | – | Input VCF with candidate variants (activates VCF mode) |
