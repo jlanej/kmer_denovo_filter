@@ -666,8 +666,10 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                 ("Number", "1"),
                 ("Type", "Float"),
                 ("Description",
-                 "Fraction of DKU reads (reads with >=1 child-unique "
-                 "variant-spanning k-mer) classified as bacterial by kraken2"),
+                 "Fraction of unique DKU read names (fragments with >=1 "
+                 "child-unique variant-spanning k-mer) classified as bacterial "
+                 "by kraken2; denominator equals the number of unique fragments, "
+                 "which may be less than DKU when both mates span the locus"),
             ],
         )
         vcf_in.header.add_meta(
@@ -677,8 +679,9 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                 ("Number", "1"),
                 ("Type", "Float"),
                 ("Description",
-                 "Fraction of DKA reads (DKU reads that also support the "
-                 "alternate allele) classified as bacterial by kraken2"),
+                 "Fraction of unique DKA read names (DKU fragments that also "
+                 "support the alternate allele) classified as bacterial by "
+                 "kraken2; DKA names are always a subset of DKU names"),
             ],
         )
 
