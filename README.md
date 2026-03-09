@@ -268,6 +268,8 @@ libraries), use:
 
 This helper validates that required Kraken2 DB files are present, including
 `taxonomy/nodes.dmp` used for lineage-aware bacterial classification.
+If NCBI's rsync endpoint returns `Unknown module 'pub'`, the helper
+automatically retries with Kraken2's `--use-ftp` mode.
 
 You can also run the helper inside the published container:
 

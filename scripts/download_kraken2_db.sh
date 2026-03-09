@@ -75,7 +75,17 @@ mkdir -p "$DB_PATH"
 
 echo "[kraken2-db] Building standard Kraken2 database at: $DB_PATH"
 echo "[kraken2-db] Threads: $THREADS"
-kraken2-build --standard --db "$DB_PATH" --threads "$THREADS"
+build_log="$(mktemp -t kraken2-build.XXXXXX)"
+trap 'rm -f "$build_log"' EXIT
+if ! kraken2-build --standard --db "$DB_PATH" --threads "$THREADS" \
+    > >(tee "$build_log") 2> >(tee -a "$build_log" >&2); then
+    if grep -Fq "Unknown module 'pub'" "$build_log"; then
+        echo "[kraken2-db] NCBI rsync module 'pub' is unavailable; retrying with --use-ftp." >&2
+        kraken2-build --standard --db "$DB_PATH" --threads "$THREADS" --use-ftp
+    else
+        exit 1
+    fi
+fi
 
 # Validate key files expected by Kraken2Runner lineage-aware matching.
 for req in "hash.k2d" "opts.k2d" "taxo.k2d" "taxonomy/nodes.dmp"; do
