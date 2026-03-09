@@ -63,7 +63,7 @@ echo "$*" >> "{kb_args_log}"
     assert len(args) == 1
     assert "--standard" in args[0]
     assert str(db_path) in args[0]
-    # kraken2-build should NOT have been invoked
+    # kraken2-build should not have been invoked
     assert not kb_args_log.exists()
 
 

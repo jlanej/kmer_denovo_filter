@@ -84,7 +84,7 @@ echo "[kraken2-db] Threads: $THREADS"
 if command -v k2 >/dev/null 2>&1; then
     # Modern Kraken2 (≥ 2.17): k2 downloads via HTTP with built-in
     # retry and resume.  No rsync or --use-ftp workaround needed.
-    echo "[kraken2-db] Using k2 wrapper (HTTP downloads)."
+    echo "[kraken2-db] Using k2 wrapper (Kraken2 >= 2.17, HTTP downloads)."
     k2 build --standard --db "$DB_PATH" --threads "$THREADS"
 else
     # Legacy Kraken2: use --use-ftp so downloads go through wget
