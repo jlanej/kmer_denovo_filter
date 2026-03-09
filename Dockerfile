@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 
-ARG KRAKEN2_VERSION=v2.1.6
+ARG KRAKEN2_VERSION=v2.17.1
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
