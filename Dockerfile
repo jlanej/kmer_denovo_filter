@@ -5,6 +5,7 @@ RUN apt-get update && \
         samtools \
         jellyfish \
         kraken2 \
+        rsync \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
