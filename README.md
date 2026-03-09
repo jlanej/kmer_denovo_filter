@@ -81,7 +81,7 @@ The tool supports two modes:
 * [Jellyfish ≥ 2](https://github.com/gmarcais/Jellyfish) on `PATH` [2]
 * Optional for VCF-mode bacterial-fraction annotations:
   * [Kraken2](https://github.com/DerrickWood/kraken2) on `PATH` [3]
-  * `kraken2-build` and `rsync` (to prepare/download a database)
+  * `kraken2-build` (to prepare/download a database via FTP mode)
 
 ## Installation
 
@@ -268,8 +268,8 @@ libraries), use:
 
 This helper validates that required Kraken2 DB files are present, including
 `taxonomy/nodes.dmp` used for lineage-aware bacterial classification.
-If NCBI's rsync endpoint returns `Unknown module 'pub'`, the helper
-automatically retries with Kraken2's `--use-ftp` mode.
+The helper always uses Kraken2's `--use-ftp` mode to avoid NCBI rsync
+`Unknown module 'pub'` failures seen in prior retry-based attempts.
 
 You can also run the helper inside the published container:
 
@@ -446,7 +446,7 @@ provenance is self-documenting.
 
 A Docker image is published to GitHub Container Registry on every push to
 `main`. The image includes `samtools`, `jellyfish`, `kraken2`, and
-`kraken2-build` plus `rsync` for database downloads:
+`kraken2-build` for database downloads:
 
 ```bash
 # VCF mode

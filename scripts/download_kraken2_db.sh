@@ -64,7 +64,7 @@ if [[ -z "$THREADS" ]]; then
     fi
 fi
 
-for tool in kraken2-build rsync; do
+for tool in kraken2-build; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "Error: $tool not found on PATH" >&2
         exit 1
@@ -75,17 +75,8 @@ mkdir -p "$DB_PATH"
 
 echo "[kraken2-db] Building standard Kraken2 database at: $DB_PATH"
 echo "[kraken2-db] Threads: $THREADS"
-build_log="$(mktemp -t kraken2-build.XXXXXX)"
-trap 'rm -f "$build_log"' EXIT
-kraken2_status=0
-kraken2-build --standard --db "$DB_PATH" --threads "$THREADS" \
-    > >(tee "$build_log") 2> >(tee -a "$build_log" >&2) || kraken2_status=$?
-if grep -Eq "Unknown module ['\"]?pub['\"]?" "$build_log"; then
-    echo "[kraken2-db] NCBI rsync module 'pub' is unavailable; retrying with --use-ftp." >&2
-    kraken2-build --standard --db "$DB_PATH" --threads "$THREADS" --use-ftp
-elif [[ "$kraken2_status" -ne 0 ]]; then
-    exit "$kraken2_status"
-fi
+echo "[kraken2-db] Using FTP mode to avoid NCBI rsync module 'pub' failures." >&2
+kraken2-build --standard --db "$DB_PATH" --threads "$THREADS" --use-ftp
 
 # Validate key files expected by Kraken2Runner lineage-aware matching.
 for req in "hash.k2d" "opts.k2d" "taxo.k2d" "taxonomy/nodes.dmp"; do
