@@ -8,10 +8,10 @@ Usage:
 
 Downloads/builds a Kraken2 standard database (taxonomy + standard libraries).
 
-Requires the modern ``k2`` wrapper (Kraken2 ≥ 2.17).  ``k2`` downloads via
-HTTP with built-in retry/resume and does not require rsync or --use-ftp.
-Older Kraken2 installations that only ship ``kraken2-build`` are not
-supported; please upgrade to Kraken2 ≥ 2.17.
+Prefers the modern ``k2`` wrapper (Kraken2 ≥ 2.17) when available; falls
+back to ``kraken2-build`` for older installations.  In both cases
+KRAKEN2_USE_FTP=1 is exported so that Kraken2's internal download scripts
+use wget/FTP instead of rsync (rsync is not required).
 
 Options:
   --db PATH       Target Kraken2 database directory (required)
@@ -68,22 +68,34 @@ if [[ -z "$THREADS" ]]; then
     fi
 fi
 
-# Require the modern k2 wrapper (Kraken2 >= 2.17).
-if ! command -v k2 >/dev/null 2>&1; then
-    echo "Error: k2 not found on PATH. Kraken2 >= 2.17 is required." >&2
-    echo "Please upgrade Kraken2: https://github.com/DerrickWood/kraken2" >&2
-    exit 1
-fi
+# Export KRAKEN2_USE_FTP=1 so that Kraken2's internal download scripts
+# (download_taxonomy.sh, download_genomic_library.sh, etc.) use
+# wget/FTP instead of rsync.  This is the belt-and-suspenders fix for
+# environments where rsync is not available.
+export KRAKEN2_USE_FTP=1
 
 mkdir -p "$DB_PATH"
 
 echo "[kraken2-db] Building standard Kraken2 database at: $DB_PATH"
 echo "[kraken2-db] Threads: $THREADS"
 
-# Modern Kraken2 (>= 2.17): k2 downloads via HTTP with built-in
-# retry and resume.  No rsync or --use-ftp workaround needed.
-echo "[kraken2-db] Using k2 wrapper (Kraken2 >= 2.17, HTTP downloads)."
-k2 build --standard --db "$DB_PATH" --threads "$THREADS"
+if command -v k2 >/dev/null 2>&1; then
+    # Modern Kraken2 (>= 2.17): k2 downloads via HTTP with built-in
+    # retry and resume.  KRAKEN2_USE_FTP=1 is still exported above as
+    # an extra safeguard in case any internal helper falls back to rsync.
+    echo "[kraken2-db] Using k2 wrapper (Kraken2 >= 2.17, HTTP downloads)."
+    k2 build --standard --db "$DB_PATH" --threads "$THREADS"
+elif command -v kraken2-build >/dev/null 2>&1; then
+    # Legacy Kraken2 (< 2.17): use --use-ftp so wget is preferred over
+    # rsync for all downloads.  KRAKEN2_USE_FTP=1 (exported above) is
+    # the belt-and-suspenders fix honoured by internal helper scripts.
+    echo "[kraken2-db] k2 not found; falling back to kraken2-build --use-ftp."
+    kraken2-build --standard --db "$DB_PATH" --threads "$THREADS" --use-ftp
+else
+    echo "Error: neither k2 nor kraken2-build found on PATH." >&2
+    echo "Please install Kraken2: https://github.com/DerrickWood/kraken2" >&2
+    exit 1
+fi
 
 # Validate key files expected by Kraken2Runner lineage-aware matching.
 for req in "hash.k2d" "opts.k2d" "taxo.k2d" "taxonomy/nodes.dmp"; do
