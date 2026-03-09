@@ -7,6 +7,7 @@ RUN apt-get update && \
         build-essential \
         git \
         perl \
+        zlib1g-dev \
         samtools \
         jellyfish \
         wget \

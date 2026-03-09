@@ -6,5 +6,6 @@ def test_dockerfile_builds_kraken2_from_source() -> None:
     content = dockerfile.read_text(encoding="utf-8")
 
     assert "\n        kraken2 \\" not in content
+    assert "\n        zlib1g-dev \\" in content
     assert "install_kraken2.sh /usr/local/bin" in content
     assert "https://github.com/DerrickWood/kraken2.git" in content
