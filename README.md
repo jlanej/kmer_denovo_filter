@@ -81,7 +81,7 @@ The tool supports two modes:
 * [Jellyfish ≥ 2](https://github.com/gmarcais/Jellyfish) on `PATH` [2]
 * Optional for VCF-mode bacterial-fraction annotations:
   * [Kraken2](https://github.com/DerrickWood/kraken2) on `PATH` [3]
-  * `kraken2-build` (to prepare/download a database)
+  * `kraken2-build` and `rsync` (to prepare/download a database)
 
 ## Installation
 
@@ -235,7 +235,10 @@ and annotated with the following fields:
 * **DKU_BF** / **DKA_BF** *(optional; when `--kraken2-db` is provided in VCF mode)* –
   Fraction of DKU reads and DKA reads, respectively, that are classified as
   bacterial by kraken2. These support downstream filtering of likely
-  bacterial-contaminant evidence.
+  bacterial-contaminant evidence. To reduce over-flagging from shared
+  human homology, reads with explicit human taxid k-mer evidence in
+  Kraken2's per-read output are conservatively excluded from the
+  bacterial numerator.
 
 When `--proband-id` is provided and matches a sample in the input VCF,
 annotations are written as **FORMAT** (per-sample) fields on that sample.
@@ -441,7 +444,7 @@ provenance is self-documenting.
 
 A Docker image is published to GitHub Container Registry on every push to
 `main`. The image includes `samtools`, `jellyfish`, `kraken2`, and
-`kraken2-build`:
+`kraken2-build` plus `rsync` for database downloads:
 
 ```bash
 # VCF mode

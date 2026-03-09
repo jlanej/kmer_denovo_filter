@@ -7,7 +7,11 @@ from unittest import mock
 
 import pytest
 
-from kmer_denovo_filter.kmer_utils import Kraken2Runner, _BACTERIA_TAXID
+from kmer_denovo_filter.kmer_utils import (
+    Kraken2Runner,
+    _BACTERIA_TAXID,
+    _HUMAN_TAXID,
+)
 
 
 class TestKraken2Result:
@@ -333,8 +337,54 @@ class TestLoadBacterialTaxids:
             assert 1 not in bacterial     # Root
 
 
+class TestKrakenKmerTaxidParsing:
+    """Tests for parsing Kraken2 k-mer detail field."""
+
+    def test_extract_taxids_from_kmer_string(self):
+        parsed = Kraken2Runner._extract_taxids_from_kmer_string(
+            "562:12 A:6 0:3 |:| 9606:4 10239:2",
+        )
+        assert parsed == {0, 562, 9606, 10239}
+
+    def test_extract_taxids_from_empty_kmer_string(self):
+        assert Kraken2Runner._extract_taxids_from_kmer_string("") == set()
+
+
 class TestBacterialTaxidConstant:
     """Verify the bacterial taxid constant."""
 
     def test_bacteria_taxid(self):
         assert _BACTERIA_TAXID == 2
+
+    def test_human_taxid(self):
+        assert _HUMAN_TAXID == 9606
+
+
+class TestKrakenHomologyGuard:
+    """Ensure human-homologous reads are not over-flagged as bacterial."""
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_bacterial_assignment_with_human_kmers_not_flagged(
+        self, mock_popen,
+    ):
+        kraken2_output = (
+            "C\tread1\t562\t100\t562:8 9606:4\n"   # mixed; skip bacterial
+            "C\tread2\t562\t100\t562:10 0:2\n"     # bacterial only
+        )
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (kraken2_output.encode(), b"")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/fake/db")
+        with mock.patch.object(
+            Kraken2Runner, "_load_bacterial_taxids", return_value={2, 562},
+        ):
+            result = kr.classify_sequences({
+                "read1": "ACGTACGTACGT",
+                "read2": "ACGTACGTACGT",
+            })
+
+        assert result.bacterial_count == 1
+        assert "read1" not in result.bacterial_read_names
+        assert "read2" in result.bacterial_read_names

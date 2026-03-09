@@ -64,10 +64,12 @@ if [[ -z "$THREADS" ]]; then
     fi
 fi
 
-if ! command -v kraken2-build >/dev/null 2>&1; then
-    echo "Error: kraken2-build not found on PATH" >&2
-    exit 1
-fi
+for tool in kraken2-build rsync; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "Error: $tool not found on PATH" >&2
+        exit 1
+    fi
+done
 
 mkdir -p "$DB_PATH"
 

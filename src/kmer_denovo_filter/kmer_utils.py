@@ -247,6 +247,7 @@ class JellyfishKmerQuery:
 
 # Standard NCBI taxonomy ID for the Bacteria domain
 _BACTERIA_TAXID = 2
+_HUMAN_TAXID = 9606
 
 
 class Kraken2Runner:
@@ -387,6 +388,24 @@ class Kraken2Runner:
 
         return bacterial
 
+    @staticmethod
+    def _extract_taxids_from_kmer_string(kmer_string):
+        """Extract integer taxonomy IDs from kraken2 k-mer output field."""
+        if not kmer_string:
+            return set()
+
+        taxids = set()
+        # Paired-end output can include the '|:|' delimiter between mates.
+        for token in kmer_string.replace("|:|", " ").split():
+            taxid, _, _ = token.partition(":")
+            if not taxid:
+                continue
+            try:
+                taxids.add(int(taxid))
+            except ValueError:
+                continue
+        return taxids
+
     # ── classification ─────────────────────────────────────────────
 
     def classify_sequences(self, sequences, tmpdir=None):
@@ -477,6 +496,9 @@ class Kraken2Runner:
                     taxid = int(parts[2])
                 except ValueError:
                     continue
+                kmer_taxids = self._extract_taxids_from_kmer_string(
+                    parts[4] if len(parts) >= 5 else "",
+                )
 
                 if status == "U":
                     result.unclassified += 1
@@ -491,11 +513,16 @@ class Kraken2Runner:
                 else:
                     # Fallback: only exact taxid 2
                     is_bacterial = taxid == _BACTERIA_TAXID
+                # Be conservative: when Kraken2 exposes explicit human
+                # k-mer evidence for a read, avoid flagging it as
+                # bacterial even if the assigned LCA is in Bacteria.
+                if is_bacterial and _HUMAN_TAXID in kmer_taxids:
+                    is_bacterial = False
 
                 if is_bacterial:
                     result.bacterial_count += 1
                     result.bacterial_read_names.add(read_name)
-                elif taxid == 9606:
+                elif taxid == _HUMAN_TAXID:
                     result.human_count += 1
                 elif taxid == 1:
                     result.root_count += 1
