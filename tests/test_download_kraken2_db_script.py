@@ -19,11 +19,13 @@ def test_download_kraken2_db_uses_ftp_mode(tmp_path):
     fake_bin.mkdir()
     db_path = tmp_path / "db"
     args_log = tmp_path / "kraken2-build-args.log"
+    env_log = tmp_path / "kraken2-build-env.log"
     _write_executable(
         fake_bin / "kraken2-build",
         f"""#!/usr/bin/env bash
 set -euo pipefail
 echo "$*" >> "{args_log}"
+echo "KRAKEN2_USE_FTP=${{KRAKEN2_USE_FTP:-}}" >> "{env_log}"
 db=""
 while [[ $# -gt 0 ]]; do
   if [[ "$1" == "--db" ]]; then
@@ -53,6 +55,12 @@ touch "$db/hash.k2d" "$db/opts.k2d" "$db/taxo.k2d" "$db/taxonomy/nodes.dmp"
     assert len(args) == 1
     assert "--use-ftp" in args[0]
 
+    # Verify KRAKEN2_USE_FTP env var is exported so internal kraken2 scripts
+    # (download_taxonomy.sh, rsync_from_ncbi.pl) honour FTP mode even when
+    # the installed kraken2-build version doesn't propagate --use-ftp.
+    env_lines = env_log.read_text(encoding="utf-8").splitlines()
+    assert "KRAKEN2_USE_FTP=1" in env_lines
+
 
 def test_download_kraken2_db_does_not_retry_when_pub_module_error_is_logged(tmp_path):
     repo_root = Path(__file__).resolve().parent.parent
@@ -62,11 +70,13 @@ def test_download_kraken2_db_does_not_retry_when_pub_module_error_is_logged(tmp_
     fake_bin.mkdir()
     db_path = tmp_path / "db"
     args_log = tmp_path / "kraken2-build-args.log"
+    env_log = tmp_path / "kraken2-build-env.log"
     _write_executable(
         fake_bin / "kraken2-build",
         f"""#!/usr/bin/env bash
 set -euo pipefail
 echo "$*" >> "{args_log}"
+echo "KRAKEN2_USE_FTP=${{KRAKEN2_USE_FTP:-}}" >> "{env_log}"
 echo "Downloading nucleotide gb accession to taxon map...rsync: @ERROR: Unknown module 'pub'" >&2
 echo "rsync error: error starting client-server protocol (code 5) at main.c(1850) [Receiver=3.4.1]" >&2
 db=""
@@ -97,3 +107,8 @@ touch "$db/hash.k2d" "$db/opts.k2d" "$db/taxo.k2d" "$db/taxonomy/nodes.dmp"
     args = args_log.read_text(encoding="utf-8").splitlines()
     assert len(args) == 1
     assert "--use-ftp" in args[0]
+
+    # KRAKEN2_USE_FTP must be exported so even if kraken2-build internally
+    # invokes download_taxonomy.sh, that script will use wget not rsync.
+    env_lines = env_log.read_text(encoding="utf-8").splitlines()
+    assert "KRAKEN2_USE_FTP=1" in env_lines
