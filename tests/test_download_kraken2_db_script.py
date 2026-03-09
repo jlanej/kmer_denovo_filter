@@ -97,7 +97,7 @@ fi
 count=$((count+1))
 echo "$count" > "{attempts}"
 if [[ "$count" -eq 1 ]]; then
-  echo "Downloading nucleotide gb accession to taxon map...@error: Unknown module 'pub'" >&2
+  echo "Downloading nucleotide gb accession to taxon map...rsync: @ERROR: Unknown module 'pub'" >&2
   echo "rsync error: error starting client-server protocol (code 5) at main.c(1850) [Receiver=3.4.1]" >&2
   exit 0
 fi

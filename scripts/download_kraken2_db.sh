@@ -80,7 +80,7 @@ trap 'rm -f "$build_log"' EXIT
 kraken2_status=0
 kraken2-build --standard --db "$DB_PATH" --threads "$THREADS" \
     > >(tee "$build_log") 2> >(tee -a "$build_log" >&2) || kraken2_status=$?
-if grep -Eiq "unknown module ['\"]?pub['\"]?" "$build_log"; then
+if grep -Eq "Unknown module ['\"]?pub['\"]?" "$build_log"; then
     echo "[kraken2-db] NCBI rsync module 'pub' is unavailable; retrying with --use-ftp." >&2
     kraken2-build --standard --db "$DB_PATH" --threads "$THREADS" --use-ftp
 elif [[ "$kraken2_status" -ne 0 ]]; then
