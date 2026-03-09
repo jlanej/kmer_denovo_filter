@@ -11,7 +11,64 @@ def _write_executable(path: Path, content: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def test_download_kraken2_db_uses_ftp_mode(tmp_path):
+def test_download_kraken2_db_prefers_k2(tmp_path):
+    """When k2 is on PATH the script uses 'k2 build' (HTTP mode)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    script_path = repo_root / "scripts" / "download_kraken2_db.sh"
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    db_path = tmp_path / "db"
+    k2_args_log = tmp_path / "k2-args.log"
+    _write_executable(
+        fake_bin / "k2",
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+echo "$*" >> "{k2_args_log}"
+db=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "--db" ]]; then
+    db="$2"
+    shift 2
+  else
+    shift
+  fi
+done
+mkdir -p "$db/taxonomy"
+touch "$db/hash.k2d" "$db/opts.k2d" "$db/taxo.k2d" "$db/taxonomy/nodes.dmp"
+""",
+    )
+    # Also place a kraken2-build shim to verify it is NOT called.
+    kb_args_log = tmp_path / "kraken2-build-args.log"
+    _write_executable(
+        fake_bin / "kraken2-build",
+        f"""#!/usr/bin/env bash
+echo "$*" >> "{kb_args_log}"
+""",
+    )
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+
+    result = subprocess.run(
+        [str(script_path), "--db", str(db_path), "--threads", "2"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    # k2 should have been invoked
+    args = k2_args_log.read_text(encoding="utf-8").splitlines()
+    assert len(args) == 1
+    assert "--standard" in args[0]
+    assert str(db_path) in args[0]
+    # kraken2-build should not have been invoked
+    assert not kb_args_log.exists()
+
+
+def test_download_kraken2_db_falls_back_to_kraken2_build(tmp_path):
+    """Without k2, the script falls back to kraken2-build --use-ftp."""
     repo_root = Path(__file__).resolve().parent.parent
     script_path = repo_root / "scripts" / "download_kraken2_db.sh"
 
@@ -55,60 +112,31 @@ touch "$db/hash.k2d" "$db/opts.k2d" "$db/taxo.k2d" "$db/taxonomy/nodes.dmp"
     assert len(args) == 1
     assert "--use-ftp" in args[0]
 
-    # Verify KRAKEN2_USE_FTP env var is exported so internal kraken2 scripts
-    # (download_taxonomy.sh, rsync_from_ncbi.pl) honour FTP mode even when
-    # the installed kraken2-build version doesn't propagate --use-ftp.
+    # KRAKEN2_USE_FTP must be exported so internal kraken2 scripts use wget.
     env_lines = env_log.read_text(encoding="utf-8").splitlines()
     assert "KRAKEN2_USE_FTP=1" in env_lines
 
 
-def test_download_kraken2_db_does_not_retry_when_pub_module_error_is_logged(tmp_path):
+def test_download_kraken2_db_fails_without_any_build_tool(tmp_path):
+    """Script exits with an error when neither k2 nor kraken2-build is available."""
     repo_root = Path(__file__).resolve().parent.parent
     script_path = repo_root / "scripts" / "download_kraken2_db.sh"
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     db_path = tmp_path / "db"
-    args_log = tmp_path / "kraken2-build-args.log"
-    env_log = tmp_path / "kraken2-build-env.log"
-    _write_executable(
-        fake_bin / "kraken2-build",
-        f"""#!/usr/bin/env bash
-set -euo pipefail
-echo "$*" >> "{args_log}"
-echo "KRAKEN2_USE_FTP=${{KRAKEN2_USE_FTP:-}}" >> "{env_log}"
-echo "Downloading nucleotide gb accession to taxon map...rsync: @ERROR: Unknown module 'pub'" >&2
-echo "rsync error: error starting client-server protocol (code 5) at main.c(1850) [Receiver=3.4.1]" >&2
-db=""
-while [[ $# -gt 0 ]]; do
-  if [[ "$1" == "--db" ]]; then
-    db="$2"
-    shift 2
-  else
-    shift
-  fi
-done
-mkdir -p "$db/taxonomy"
-touch "$db/hash.k2d" "$db/opts.k2d" "$db/taxo.k2d" "$db/taxonomy/nodes.dmp"
-""",
-    )
 
     env = os.environ.copy()
-    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    # Keep /usr/bin (for bash, env, etc.) but remove everything else so
+    # neither k2 nor kraken2-build are found.
+    env["PATH"] = f"{fake_bin}:/usr/bin:/bin"
 
     result = subprocess.run(
-        [str(script_path), "--db", str(db_path), "--threads", "2"],
+        [str(script_path), "--db", str(db_path)],
         capture_output=True,
         text=True,
         env=env,
     )
 
-    assert result.returncode == 0, result.stderr
-    args = args_log.read_text(encoding="utf-8").splitlines()
-    assert len(args) == 1
-    assert "--use-ftp" in args[0]
-
-    # KRAKEN2_USE_FTP must be exported so even if kraken2-build internally
-    # invokes download_taxonomy.sh, that script will use wget not rsync.
-    env_lines = env_log.read_text(encoding="utf-8").splitlines()
-    assert "KRAKEN2_USE_FTP=1" in env_lines
+    assert result.returncode != 0
+    assert "neither k2 nor kraken2-build found" in result.stderr
