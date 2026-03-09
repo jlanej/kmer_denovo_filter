@@ -81,8 +81,7 @@ The tool supports two modes:
 * [Jellyfish ≥ 2](https://github.com/gmarcais/Jellyfish) on `PATH` [2]
 * Optional for VCF-mode bacterial-fraction annotations:
   * [Kraken2](https://github.com/DerrickWood/kraken2) on `PATH` [3]
-  * The `k2` wrapper (Kraken2 ≥ 2.17, recommended) or `kraken2-build` for
-    database preparation
+  * The `k2` wrapper (Kraken2 ≥ 2.17) is required for database preparation
 
 ## Installation
 
@@ -270,11 +269,10 @@ libraries), use:
 This helper validates that required Kraken2 DB files are present, including
 `taxonomy/nodes.dmp` used for lineage-aware bacterial classification.
 
-When the modern `k2` wrapper (Kraken2 ≥ 2.17) is on PATH, the script uses
-`k2 build` which downloads via HTTP with built-in retry and resume—no rsync
-or `--use-ftp` workaround is needed.  For older installations with only
-`kraken2-build`, the script falls back to `kraken2-build --use-ftp` to
-avoid NCBI rsync connectivity issues.
+The script requires the modern `k2` wrapper (Kraken2 ≥ 2.17), which
+downloads via HTTP with built-in retry and resume—no rsync or `--use-ftp`
+workaround is needed.  Older installations that only ship `kraken2-build`
+are not supported; please upgrade to Kraken2 ≥ 2.17.
 
 See the [Kraken2 manual](https://github.com/DerrickWood/kraken2/blob/master/docs/MANUAL.markdown)
 for full database build options.
@@ -460,8 +458,8 @@ provenance is self-documenting.
 ## Docker
 
 A Docker image is published to GitHub Container Registry on every push to
-`main`. The image includes `samtools`, `jellyfish`, `kraken2`,
-`kraken2-build`, and `wget` for database downloads.  The helper
+`main`. The image includes `samtools`, `jellyfish`, `kraken2`, and the `k2`
+wrapper (Kraken2 ≥ 2.17) for HTTP database downloads.  The helper
 script is available inside the container at `/app/scripts/download_kraken2_db.sh`:
 
 ```bash
@@ -520,9 +518,8 @@ apptainer exec kmer_denovo.sif kmer-denovo \
 
 ### Building the Kraken2 database via Apptainer
 
-The container includes `kraken2-build` and `wget`; the helper script
-prefers `k2 build` (HTTP) when available, otherwise uses
-`kraken2-build --use-ftp`:
+The container includes the `k2` wrapper (Kraken2 ≥ 2.17); the helper script
+uses `k2 build` for HTTP downloads:
 
 ```bash
 apptainer exec --bind /scratch kmer_denovo.sif \
