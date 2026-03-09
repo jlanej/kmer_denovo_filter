@@ -67,58 +67,8 @@ echo "$*" >> "{kb_args_log}"
     assert not kb_args_log.exists()
 
 
-def test_download_kraken2_db_falls_back_to_kraken2_build(tmp_path):
-    """Without k2, the script falls back to kraken2-build --use-ftp."""
-    repo_root = Path(__file__).resolve().parent.parent
-    script_path = repo_root / "scripts" / "download_kraken2_db.sh"
-
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    db_path = tmp_path / "db"
-    args_log = tmp_path / "kraken2-build-args.log"
-    env_log = tmp_path / "kraken2-build-env.log"
-    _write_executable(
-        fake_bin / "kraken2-build",
-        f"""#!/usr/bin/env bash
-set -euo pipefail
-echo "$*" >> "{args_log}"
-echo "KRAKEN2_USE_FTP=${{KRAKEN2_USE_FTP:-}}" >> "{env_log}"
-db=""
-while [[ $# -gt 0 ]]; do
-  if [[ "$1" == "--db" ]]; then
-    db="$2"
-    shift 2
-  else
-    shift
-  fi
-done
-mkdir -p "$db/taxonomy"
-touch "$db/hash.k2d" "$db/opts.k2d" "$db/taxo.k2d" "$db/taxonomy/nodes.dmp"
-""",
-    )
-
-    env = os.environ.copy()
-    env["PATH"] = f"{fake_bin}:{env['PATH']}"
-
-    result = subprocess.run(
-        [str(script_path), "--db", str(db_path), "--threads", "2"],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-
-    assert result.returncode == 0, result.stderr
-    args = args_log.read_text(encoding="utf-8").splitlines()
-    assert len(args) == 1
-    assert "--use-ftp" in args[0]
-
-    # KRAKEN2_USE_FTP must be exported so internal kraken2 scripts use wget.
-    env_lines = env_log.read_text(encoding="utf-8").splitlines()
-    assert "KRAKEN2_USE_FTP=1" in env_lines
-
-
-def test_download_kraken2_db_fails_without_any_build_tool(tmp_path):
-    """Script exits with an error when neither k2 nor kraken2-build is available."""
+def test_download_kraken2_db_fails_without_k2(tmp_path):
+    """Script exits with an error when k2 is not available."""
     repo_root = Path(__file__).resolve().parent.parent
     script_path = repo_root / "scripts" / "download_kraken2_db.sh"
 
@@ -128,7 +78,7 @@ def test_download_kraken2_db_fails_without_any_build_tool(tmp_path):
 
     env = os.environ.copy()
     # Keep /usr/bin (for bash, env, etc.) but remove everything else so
-    # neither k2 nor kraken2-build are found.
+    # k2 is not found.
     env["PATH"] = f"{fake_bin}:/usr/bin:/bin"
 
     result = subprocess.run(
@@ -139,4 +89,5 @@ def test_download_kraken2_db_fails_without_any_build_tool(tmp_path):
     )
 
     assert result.returncode != 0
-    assert "neither k2 nor kraken2-build found" in result.stderr
+    assert "k2 not found on PATH" in result.stderr
+    assert "Kraken2 >= 2.17" in result.stderr
