@@ -77,14 +77,14 @@ echo "[kraken2-db] Building standard Kraken2 database at: $DB_PATH"
 echo "[kraken2-db] Threads: $THREADS"
 build_log="$(mktemp -t kraken2-build.XXXXXX)"
 trap 'rm -f "$build_log"' EXIT
-if ! kraken2-build --standard --db "$DB_PATH" --threads "$THREADS" \
-    > >(tee "$build_log") 2> >(tee -a "$build_log" >&2); then
-    if grep -Fq "Unknown module 'pub'" "$build_log"; then
-        echo "[kraken2-db] NCBI rsync module 'pub' is unavailable; retrying with --use-ftp." >&2
-        kraken2-build --standard --db "$DB_PATH" --threads "$THREADS" --use-ftp
-    else
-        exit 1
-    fi
+kraken2_status=0
+kraken2-build --standard --db "$DB_PATH" --threads "$THREADS" \
+    > >(tee "$build_log") 2> >(tee -a "$build_log" >&2) || kraken2_status=$?
+if grep -Eq "Unknown module ['\"]?pub['\"]?" "$build_log"; then
+    echo "[kraken2-db] NCBI rsync module 'pub' is unavailable; retrying with --use-ftp." >&2
+    kraken2-build --standard --db "$DB_PATH" --threads "$THREADS" --use-ftp
+elif [[ "$kraken2_status" -ne 0 ]]; then
+    exit "$kraken2_status"
 fi
 
 # Validate key files expected by Kraken2Runner lineage-aware matching.
