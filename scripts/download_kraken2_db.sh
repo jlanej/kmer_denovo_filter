@@ -76,6 +76,13 @@ mkdir -p "$DB_PATH"
 echo "[kraken2-db] Building standard Kraken2 database at: $DB_PATH"
 echo "[kraken2-db] Threads: $THREADS"
 echo "[kraken2-db] Using FTP mode to avoid NCBI rsync module 'pub' failures." >&2
+
+# Export KRAKEN2_USE_FTP so that all internal kraken2 scripts
+# (download_taxonomy.sh, rsync_from_ncbi.pl, download_genomic_library.sh)
+# use wget/FTP instead of rsync, regardless of how the installed
+# kraken2-build version propagates the --use-ftp CLI flag.
+export KRAKEN2_USE_FTP=1
+
 kraken2-build --standard --db "$DB_PATH" --threads "$THREADS" --use-ftp
 
 # Validate key files expected by Kraken2Runner lineage-aware matching.

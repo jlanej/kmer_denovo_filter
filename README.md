@@ -268,8 +268,11 @@ libraries), use:
 
 This helper validates that required Kraken2 DB files are present, including
 `taxonomy/nodes.dmp` used for lineage-aware bacterial classification.
-The helper always uses Kraken2's `--use-ftp` mode to avoid NCBI rsync
-`Unknown module 'pub'` failures seen in prior retry-based attempts.
+The helper exports `KRAKEN2_USE_FTP=1` and passes `--use-ftp` to
+`kraken2-build`, forcing all NCBI downloads (taxonomy maps, genomic
+libraries) to use FTP/wget instead of rsync.  This avoids the NCBI rsync
+`Unknown module 'pub'` error that occurs in many HPC and container
+environments where outbound rsync is blocked.
 
 You can also run the helper inside the published container:
 
@@ -278,6 +281,13 @@ docker run --rm \
   -v "$PWD:/work" \
   ghcr.io/jlanej/kmer_denovo_filter:latest \
   bash /work/scripts/download_kraken2_db.sh --db /work/kraken2_db --threads 16
+```
+
+Or via Apptainer on HPC (see [Running on HPC with Apptainer](#running-on-hpc-with-apptainer)):
+
+```bash
+apptainer exec kmer_denovo.sif \
+  bash /app/scripts/download_kraken2_db.sh --db /scratch/kraken2_db --threads 16
 ```
 
 ### Discovery Mode Output
@@ -445,8 +455,9 @@ provenance is self-documenting.
 ## Docker
 
 A Docker image is published to GitHub Container Registry on every push to
-`main`. The image includes `samtools`, `jellyfish`, `kraken2`, and
-`kraken2-build` for database downloads:
+`main`. The image includes `samtools`, `jellyfish`, `kraken2`,
+`kraken2-build`, and `wget` for FTP-based database downloads.  The helper
+script is available inside the container at `/app/scripts/download_kraken2_db.sh`:
 
 ```bash
 # VCF mode
@@ -501,6 +512,23 @@ apptainer exec kmer_denovo.sif kmer-denovo \
   --out-prefix discovery_output \
   --threads 8
 ```
+
+### Building the Kraken2 database via Apptainer
+
+The container includes `kraken2-build` and `wget`; the helper script
+exports `KRAKEN2_USE_FTP=1` so all NCBI downloads use FTP instead of
+rsync (avoiding the `Unknown module 'pub'` rsync error common on HPC
+networks):
+
+```bash
+apptainer exec --bind /scratch kmer_denovo.sif \
+  bash /app/scripts/download_kraken2_db.sh \
+    --db /scratch/kraken2_db --threads 16
+```
+
+> **Note:** The standard Kraken2 database requires ~100 GB disk and
+> 50–100 GB RAM to build.  Ensure your scratch directory and job
+> allocation are sized accordingly.
 
 ### Example SLURM batch script
 

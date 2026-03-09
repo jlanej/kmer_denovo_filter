@@ -6,12 +6,14 @@ RUN apt-get update && \
         jellyfish \
         kraken2 \
         rsync \
+        wget \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY src/ src/
+COPY scripts/ scripts/
 
 RUN pip install --no-cache-dir .
 
