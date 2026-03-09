@@ -81,7 +81,8 @@ The tool supports two modes:
 * [Jellyfish ≥ 2](https://github.com/gmarcais/Jellyfish) on `PATH` [2]
 * Optional for VCF-mode bacterial-fraction annotations:
   * [Kraken2](https://github.com/DerrickWood/kraken2) on `PATH` [3]
-  * `kraken2-build` (to prepare/download a database via FTP mode)
+  * The `k2` wrapper (Kraken2 ≥ 2.17, recommended) or `kraken2-build` for
+    database preparation
 
 ## Installation
 
@@ -268,11 +269,15 @@ libraries), use:
 
 This helper validates that required Kraken2 DB files are present, including
 `taxonomy/nodes.dmp` used for lineage-aware bacterial classification.
-The helper exports `KRAKEN2_USE_FTP=1` and passes `--use-ftp` to
-`kraken2-build`, forcing all NCBI downloads (taxonomy maps, genomic
-libraries) to use FTP/wget instead of rsync.  This avoids the NCBI rsync
-`Unknown module 'pub'` error that occurs in many HPC and container
-environments where outbound rsync is blocked.
+
+When the modern `k2` wrapper (Kraken2 ≥ 2.17) is on PATH, the script uses
+`k2 build` which downloads via HTTP with built-in retry and resume—no rsync
+or `--use-ftp` workaround is needed.  For older installations with only
+`kraken2-build`, the script falls back to `kraken2-build --use-ftp` to
+avoid NCBI rsync connectivity issues.
+
+See the [Kraken2 manual](https://github.com/DerrickWood/kraken2/blob/master/docs/MANUAL.markdown)
+for full database build options.
 
 You can also run the helper inside the published container:
 
@@ -456,7 +461,7 @@ provenance is self-documenting.
 
 A Docker image is published to GitHub Container Registry on every push to
 `main`. The image includes `samtools`, `jellyfish`, `kraken2`,
-`kraken2-build`, and `wget` for FTP-based database downloads.  The helper
+`kraken2-build`, and `wget` for database downloads.  The helper
 script is available inside the container at `/app/scripts/download_kraken2_db.sh`:
 
 ```bash
@@ -516,9 +521,8 @@ apptainer exec kmer_denovo.sif kmer-denovo \
 ### Building the Kraken2 database via Apptainer
 
 The container includes `kraken2-build` and `wget`; the helper script
-exports `KRAKEN2_USE_FTP=1` so all NCBI downloads use FTP instead of
-rsync (avoiding the `Unknown module 'pub'` rsync error common on HPC
-networks):
+prefers `k2 build` (HTTP) when available, otherwise uses
+`kraken2-build --use-ftp`:
 
 ```bash
 apptainer exec --bind /scratch kmer_denovo.sif \

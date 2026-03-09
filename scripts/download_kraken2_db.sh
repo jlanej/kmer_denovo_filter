@@ -6,12 +6,18 @@ usage() {
 Usage:
   ./scripts/download_kraken2_db.sh --db /path/to/kraken_db [--threads N]
 
-Downloads/builds a Kraken2 standard database (taxonomy + standard libraries)
-using kraken2-build best-practice defaults.
+Downloads/builds a Kraken2 standard database (taxonomy + standard libraries).
+
+When the modern ``k2`` wrapper (Kraken2 ≥ 2.17) is on PATH, it is used
+automatically.  ``k2`` downloads via HTTP with built-in retry/resume and
+does not require rsync or the --use-ftp workaround.
+
+For older Kraken2 installations that only ship ``kraken2-build``, the
+script falls back to ``kraken2-build --standard --use-ftp``.
 
 Options:
   --db PATH       Target Kraken2 database directory (required)
-  --threads N     Threads for kraken2-build (default: nproc or 4)
+  --threads N     Threads for the build (default: nproc or 4)
   -h, --help      Show this help
 
 Examples:
@@ -64,26 +70,29 @@ if [[ -z "$THREADS" ]]; then
     fi
 fi
 
-for tool in kraken2-build; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-        echo "Error: $tool not found on PATH" >&2
-        exit 1
-    fi
-done
+# Require at least one build tool.
+if ! command -v k2 >/dev/null 2>&1 && ! command -v kraken2-build >/dev/null 2>&1; then
+    echo "Error: neither k2 nor kraken2-build found on PATH" >&2
+    exit 1
+fi
 
 mkdir -p "$DB_PATH"
 
 echo "[kraken2-db] Building standard Kraken2 database at: $DB_PATH"
 echo "[kraken2-db] Threads: $THREADS"
-echo "[kraken2-db] Using FTP mode to avoid NCBI rsync module 'pub' failures." >&2
 
-# Export KRAKEN2_USE_FTP so that all internal kraken2 scripts
-# (download_taxonomy.sh, rsync_from_ncbi.pl, download_genomic_library.sh)
-# use wget/FTP instead of rsync, regardless of how the installed
-# kraken2-build version propagates the --use-ftp CLI flag.
-export KRAKEN2_USE_FTP=1
-
-kraken2-build --standard --db "$DB_PATH" --threads "$THREADS" --use-ftp
+if command -v k2 >/dev/null 2>&1; then
+    # Modern Kraken2 (≥ 2.17): k2 downloads via HTTP with built-in
+    # retry and resume.  No rsync or --use-ftp workaround needed.
+    echo "[kraken2-db] Using k2 wrapper (HTTP downloads)."
+    k2 build --standard --db "$DB_PATH" --threads "$THREADS"
+else
+    # Legacy Kraken2: use --use-ftp so downloads go through wget
+    # instead of rsync, avoiding NCBI rsync connectivity issues.
+    echo "[kraken2-db] k2 not found; falling back to kraken2-build --use-ftp."
+    export KRAKEN2_USE_FTP=1
+    kraken2-build --standard --db "$DB_PATH" --threads "$THREADS" --use-ftp
+fi
 
 # Validate key files expected by Kraken2Runner lineage-aware matching.
 for req in "hash.k2d" "opts.k2d" "taxo.k2d" "taxonomy/nodes.dmp"; do
