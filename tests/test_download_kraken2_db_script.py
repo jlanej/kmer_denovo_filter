@@ -36,7 +36,7 @@ if [[ -f "{attempts}" ]]; then
 fi
 count=$((count+1))
 echo "$count" > "{attempts}"
-if [[ "$count" -eq 1 ]] && [[ "$*" != *"--use-ftp"* ]]; then
+if [[ "$count" -eq 1 ]]; then
   echo "Downloading nucleotide gb accession to taxon map...@ERROR: Unknown module 'pub'" >&2
   exit 1
 fi
