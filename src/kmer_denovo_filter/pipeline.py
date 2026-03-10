@@ -3792,13 +3792,12 @@ def run_discovery_pipeline(args):
     logger.info("[Module 4] Metrics written to: %s", metrics_path)
 
     logger.info("[Module 4] Writing summary: %s", summary_path)
-    summary_text = _write_discovery_summary(
+    _write_discovery_summary(
         summary_path, regions, region_reads, region_kmers, metrics,
         candidate_comparison=candidate_comparison,
         region_annotations=region_annotations,
         dnm_evaluation=dnm_evaluation,
     )
-    logger.info("\n%s", summary_text)
 
     logger.info(
         "[Module 4] Output complete (%s)",
@@ -4220,8 +4219,7 @@ def run_pipeline(args):
 
     if args.summary:
         logger.info("[Step 5/5] Writing summary: %s", args.summary)
-        summary_text = _write_summary(args.summary, variants, annotations)
-        logger.info("\n%s", summary_text)
+        _write_summary(args.summary, variants, annotations)
 
     logger.info(
         "[Step 5/5] Output complete (%s)",
