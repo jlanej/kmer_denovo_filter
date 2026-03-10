@@ -241,6 +241,8 @@ and annotated with the following fields:
   human homology, reads with explicit human taxid k-mer evidence in
   Kraken2's per-read output are conservatively excluded from the
   bacterial numerator.
+  See [Kraken2 Bacterial and Non-Human Content Detection](docs/kraken2_bacterial_detection.md)
+  for a detailed description of the classification method.
 
 When `--proband-id` is provided and matches a sample in the input VCF,
 annotations are written as **FORMAT** (per-sample) fields on that sample.
