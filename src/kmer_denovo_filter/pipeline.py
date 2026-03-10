@@ -2831,6 +2831,7 @@ def _parse_candidate_summary(summary_path, dka_dkt_min=0.25, dka_min=10):
                 parts = line.split()
                 if len(parts) < 12:
                     continue
+                # Columns: Variant R>A DKU DKT DKA DKU_DKT DKA_DKT ...
                 # e.g. "chr11:55003995" "T>C" "21" "46" "21" "0.4565" "0.4565" ...
                 variant = parts[0]  # chr:pos
                 ref_alt = parts[1]  # R>A
