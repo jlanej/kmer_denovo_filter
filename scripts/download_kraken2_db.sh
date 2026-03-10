@@ -89,10 +89,46 @@ echo "[kraken2-db] Extracting database..."
 tar -xzf "$TARBALL" -C "$DB_PATH"
 rm -f "$TARBALL"
 
+DB_VALIDATE_PATH="$DB_PATH"
+REQUIRED_DB_FILES=("hash.k2d" "opts.k2d" "taxo.k2d")
+
+has_required_db_files() {
+    local dir="$1"
+    for req in "${REQUIRED_DB_FILES[@]}"; do
+        if [[ ! -f "$dir/$req" ]]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+# Some pre-built tarballs may extract into a versioned subdirectory
+# (e.g. k2_NCBI_reference_20251007). Detect that layout dynamically.
+if ! has_required_db_files "$DB_PATH"; then
+    mapfile -t _db_candidates < <(find "$DB_PATH" -type f -name "hash.k2d" -exec dirname {} \; | sort -u)
+    _matching_candidates=()
+    for candidate in "${_db_candidates[@]}"; do
+        if has_required_db_files "$candidate"; then
+            _matching_candidates+=("$candidate")
+        fi
+    done
+
+    if [[ ${#_matching_candidates[@]} -eq 1 ]]; then
+        DB_VALIDATE_PATH="${_matching_candidates[0]}"
+    elif [[ ${#_matching_candidates[@]} -gt 1 ]]; then
+        echo "Error: multiple Kraken2 database directories found under $DB_PATH:" >&2
+        for candidate in "${_matching_candidates[@]}"; do
+            echo "  - $candidate" >&2
+        done
+        echo "Please set --db to the specific database directory." >&2
+        exit 1
+    fi
+fi
+
 # Validate key database files expected by kraken2.
-for req in "hash.k2d" "opts.k2d" "taxo.k2d"; do
-    if [[ ! -f "$DB_PATH/$req" ]]; then
-        echo "Error: missing required database file: $DB_PATH/$req" >&2
+for req in "${REQUIRED_DB_FILES[@]}"; do
+    if [[ ! -f "$DB_VALIDATE_PATH/$req" ]]; then
+        echo "Error: missing required database file: $DB_VALIDATE_PATH/$req" >&2
         exit 1
     fi
 done
@@ -100,7 +136,7 @@ done
 # taxonomy/nodes.dmp is used for lineage-aware bacterial classification.
 # Pre-built databases may omit it; warn but do not fail—Kraken2Runner
 # falls back to exact taxid==2 matching when it is absent.
-if [[ ! -f "$DB_PATH/taxonomy/nodes.dmp" ]]; then
+if [[ ! -f "$DB_VALIDATE_PATH/taxonomy/nodes.dmp" && ! -f "$DB_VALIDATE_PATH/nodes.dmp" ]]; then
     echo "[kraken2-db] Warning: taxonomy/nodes.dmp not found." >&2
     echo "[kraken2-db] Lineage-aware bacterial classification will" >&2
     echo "[kraken2-db] fall back to exact taxid==2 matching." >&2

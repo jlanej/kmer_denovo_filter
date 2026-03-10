@@ -177,3 +177,47 @@ tar -czf "$dest" -C "$db_dir" dummy.txt
 
     assert result.returncode != 0
     assert "missing required database file" in result.stderr
+
+
+def test_download_kraken2_db_accepts_versioned_subdirectory_layout(tmp_path):
+    """Script accepts extracted DB files under a versioned subdirectory."""
+    repo_root = Path(__file__).resolve().parent.parent
+    script_path = repo_root / "scripts" / "download_kraken2_db.sh"
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    db_path = tmp_path / "db"
+    # Fake wget that creates tarball with files under a nested versioned folder.
+    _write_executable(
+        fake_bin / "wget",
+        """#!/usr/bin/env bash
+set -euo pipefail
+dest=""
+for arg in "$@"; do
+  if [[ -n "${prev:-}" && "$prev" == "-O" ]]; then
+    dest="$arg"
+  fi
+  prev="$arg"
+done
+db_dir="$(dirname "$dest")"
+# Use a versioned-style directory name to mimic Kraken2 prebuilt bundles.
+mkdir -p "$db_dir/k2_NCBI_reference_test"
+touch "$db_dir/k2_NCBI_reference_test/hash.k2d" \
+      "$db_dir/k2_NCBI_reference_test/opts.k2d" \
+      "$db_dir/k2_NCBI_reference_test/taxo.k2d" \
+      "$db_dir/k2_NCBI_reference_test/nodes.dmp"
+tar -czf "$dest" -C "$db_dir" k2_NCBI_reference_test
+""",
+    )
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+
+    result = subprocess.run(
+        [str(script_path), "--db", str(db_path)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
