@@ -43,8 +43,8 @@ class TestParseCandidateSummary:
         candidates = _parse_candidate_summary(summary_path)
 
         # From the summary, three variants meet both criteria:
-        #   chr8:125785997 A>AGAG…  DKA=24 DKA_DKT=0.3000  (SV-like insertion)
-        #   chr11:55003995 T>C      DKA=24 DKA_DKT=0.4528
+        #   chr8:125785997 A>AGAG…  DKA=21 DKA_DKT=0.3281  (SV-like insertion)
+        #   chr11:55003995 T>C      DKA=21 DKA_DKT=0.4565
         #   chr11:55008577 C>T      DKA=13 DKA_DKT=0.3824
         assert len(candidates) == 3
 
@@ -71,7 +71,7 @@ class TestParseCandidateSummary:
     def test_custom_thresholds(self):
         """Should respect custom DKA_DKT and DKA thresholds."""
         summary_path = os.path.join(EXAMPLE_OUTPUT_DIR, "summary.txt")
-        # Very strict thresholds — only chr11:55003995 with DKA=24
+        # Very strict thresholds — only chr11:55003995 with DKA=21, DKA_DKT=0.4565
         candidates = _parse_candidate_summary(
             summary_path, dka_dkt_min=0.40, dka_min=20,
         )

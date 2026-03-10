@@ -294,15 +294,15 @@
     "candidates": [
       {
         "variant": "chr8:125785997 A>AGAGTTACAATGAGTGTTACTCTGAAGGAGGATGGACTTTAATG",
-        "dka": 22,
-        "dka_dkt": 0.3875,
+        "dka": 21,
+        "dka_dkt": 0.3281,
         "captured": true,
         "region": "chr8:125785801-125786483"
       },
       {
         "variant": "chr11:55003995 T>C",
-        "dka": 24,
-        "dka_dkt": 0.4528,
+        "dka": 21,
+        "dka_dkt": 0.4565,
         "captured": true,
         "region": "chr11:55003557-55004234"
       },

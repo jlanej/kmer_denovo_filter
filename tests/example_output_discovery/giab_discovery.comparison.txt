@@ -6,7 +6,7 @@
 CONCORDANT  (2 variants)
   VCF variant has k-mer signal AND overlaps a discovery region
 ------------------------------------------------------------
-  chr11:55003995 T>C  DKU=24  DKA=24  region=chr11:55003556-55004234  reads=26  unique_kmers=50  split_reads=0  class=SMALL
+  chr11:55003995 T>C  DKU=21  DKA=21  region=chr11:55003556-55004234  reads=26  unique_kmers=50  split_reads=0  class=SMALL
   chr11:55008577 C>T  DKU=13  DKA=13  region=chr11:55008333-55008814  reads=23  unique_kmers=62  split_reads=0  class=SMALL
 
 VCF_ONLY  (0 variants)
@@ -22,13 +22,13 @@ NO_SIGNAL  (20 variants)
   chr8:40037154 A>C  DKU=0  DKA=0
   chr8:70039608 C>T  DKU=0  DKA=0
   chr8:70042671 C>G  DKU=1  DKA=0
-  chr8:125785997 A>AGAGTTACAATGAGTGTTACTCTGAAGGAGGATGGACTTTAATG  DKU=31  DKA=22  +discovery=chr8:125785800-125786483  reads=34  unique_kmers=53  split_reads=0  class=SMALL
+  chr8:125785997 A>AGAGTTACAATGAGTGTTACTCTGAAGGAGGATGGACTTTAATG  DKU=29  DKA=21  +discovery=chr8:125785800-125786483  reads=34  unique_kmers=53  split_reads=0  class=SMALL
   chr10:50011697 T>C  DKU=1  DKA=1
   chr10:50012575 A>G  DKU=1  DKA=1
   chr10:50024332 C>T  DKU=0  DKA=0
   chr11:55000408 C>T  DKU=0  DKA=0  +discovery=chr11:54999699-55000452  reads=4  unique_kmers=36  split_reads=0  class=SMALL
-  chr11:55007083 G>T  DKU=2  DKA=2  +discovery=chr11:55006831-55007423  reads=5  unique_kmers=53  split_reads=0  class=SMALL
-  chr11:55007104 G>T  DKU=2  DKA=2  +discovery=chr11:55006831-55007423  reads=5  unique_kmers=53  split_reads=0  class=SMALL
+  chr11:55007083 G>T  DKU=1  DKA=1  +discovery=chr11:55006831-55007423  reads=5  unique_kmers=53  split_reads=0  class=SMALL
+  chr11:55007104 G>T  DKU=1  DKA=1  +discovery=chr11:55006831-55007423  reads=5  unique_kmers=53  split_reads=0  class=SMALL
   chr12:60008175 A>C  DKU=0  DKA=0
   chr15:35009535 C>T  DKU=1  DKA=1
   chr18:30028717 G>T  DKU=0  DKA=0  +discovery=chr18:30028533-30028794  reads=3  unique_kmers=11  split_reads=0  class=SMALL
@@ -36,7 +36,7 @@ NO_SIGNAL  (20 variants)
   chr19:15018720 G>A  DKU=0  DKA=0
   chr19:15035863 G>T  DKU=0  DKA=0
   chr19:15041681 C>T  DKU=1  DKA=1
-  chr22:25046402 T>C  DKU=2  DKA=1  +discovery=chr22:25046132-25046424  reads=3  unique_kmers=7  split_reads=0  class=SMALL
+  chr22:25046402 T>C  DKU=1  DKA=1  +discovery=chr22:25046132-25046424  reads=3  unique_kmers=7  split_reads=0  class=SMALL
 
 DISCOVERY_ONLY  (13 regions)
   Discovery region has no overlapping VCF variant

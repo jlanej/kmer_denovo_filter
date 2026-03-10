@@ -707,6 +707,76 @@ class TestPipelineIntegration:
         assert "MIN_PKC_ALT" in records[0].info
         vcf_out.close()
 
+    def test_decomposed_multiallelic_unique_annotations(self, tmpdir):
+        """Two VCF records at the same position with different ALTs should
+        each receive independent annotations (variant key includes ref:alt).
+        """
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        # Position 51 (1-based), ref_base at 0-based 50
+        ref_base = ref_seq[50]
+        # Pick two different ALT bases
+        alt_bases = [b for b in "ACGT" if b != ref_base]
+        alt1 = alt_bases[0]
+        alt2 = alt_bases[1]
+
+        # Child has alt1 at position 50 (de novo for alt1)
+        child_seq = list(ref_seq[40:80])
+        child_seq[10] = alt1
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [("read1", 40, child_seq, None)],
+        )
+
+        # Parents match reference
+        parent_seq = ref_seq[40:80]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom,
+                     [("mread1", 40, parent_seq, None)])
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(father_bam, ref_fa, chrom,
+                     [("fread1", 40, parent_seq, None)])
+
+        # Decomposed multiallelic: two records at the same position
+        in_vcf = os.path.join(tmpdir, "input.vcf")
+        _create_vcf(in_vcf, chrom, [
+            (51, ref_base, alt1),   # child carries this allele
+            (51, ref_base, alt2),   # child does NOT carry this allele
+        ])
+
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
+        args = parse_args([
+            "--child", child_bam,
+            "--mother", mother_bam,
+            "--father", father_bam,
+            "--ref-fasta", ref_fa,
+            "--vcf", in_vcf,
+            "--output", out_vcf,
+            "--kmer-size", "5",
+            "--proband-id", "HG002",
+        ])
+        run_pipeline(args)
+
+        vcf_out = pysam.VariantFile(out_vcf)
+        records = list(vcf_out)
+        assert len(records) == 2, "Both decomposed records should be present"
+
+        rec_alt1 = [r for r in records if r.alts and r.alts[0] == alt1]
+        rec_alt2 = [r for r in records if r.alts and r.alts[0] == alt2]
+        assert len(rec_alt1) == 1, f"Expected one record for ALT={alt1}"
+        assert len(rec_alt2) == 1, f"Expected one record for ALT={alt2}"
+
+        # alt1 record: child carries this allele → DKA > 0
+        assert rec_alt1[0].samples["HG002"]["DKA"] > 0
+        # alt2 record: child does NOT carry this allele → DKA == 0
+        assert rec_alt2[0].samples["HG002"]["DKA"] == 0
+        vcf_out.close()
+
 
 class TestFormatElapsed:
     """Unit tests for the _format_elapsed helper."""

@@ -167,8 +167,8 @@ per-variant fields:
 
 | Field | Description |
 |-------|-------------|
-| **DKU_BF** | Fraction of unique informative read *names* (fragments with ≥1 child-unique variant-spanning k-mer) that Kraken2 classified as bacterial. Denominator = number of unique fragment names (not raw alignment counts; may be less than the DKU read count when both mates span the locus and are counted separately). |
-| **DKA_BF** | Fraction of unique DKA read names (DKU fragments that also directly support the alternate allele) classified as bacterial. DKA names are always a subset of DKU names. |
+| **DKU_BF** | Fraction of DKU fragments classified as bacterial by Kraken2. Denominator = DKU (both are fragment-based, i.e. unique read names). Always in [0.0, 1.0]. |
+| **DKA_BF** | Fraction of DKA fragments (DKU fragments that also directly support the alternate allele) classified as bacterial. DKA fragments are always a subset of DKU. Always in [0.0, 1.0]. |
 
 These are per-variant fractions: each fraction is computed from the intersection
 of that variant's informative reads with the global set of bacterial read names
