@@ -200,6 +200,7 @@ for arg in "$@"; do
   prev="$arg"
 done
 db_dir="$(dirname "$dest")"
+# Use a versioned-style directory name to mimic Kraken2 prebuilt bundles.
 mkdir -p "$db_dir/k2_NCBI_reference_test"
 touch "$db_dir/k2_NCBI_reference_test/hash.k2d" \
       "$db_dir/k2_NCBI_reference_test/opts.k2d" \

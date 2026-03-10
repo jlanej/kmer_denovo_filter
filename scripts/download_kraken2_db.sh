@@ -90,14 +90,25 @@ tar -xzf "$TARBALL" -C "$DB_PATH"
 rm -f "$TARBALL"
 
 DB_VALIDATE_PATH="$DB_PATH"
+REQUIRED_DB_FILES=("hash.k2d" "opts.k2d" "taxo.k2d")
+
+has_required_db_files() {
+    local dir="$1"
+    for req in "${REQUIRED_DB_FILES[@]}"; do
+        if [[ ! -f "$dir/$req" ]]; then
+            return 1
+        fi
+    done
+    return 0
+}
 
 # Some pre-built tarballs may extract into a versioned subdirectory
 # (e.g. k2_NCBI_reference_20251007). Detect that layout dynamically.
-if [[ ! -f "$DB_PATH/hash.k2d" || ! -f "$DB_PATH/opts.k2d" || ! -f "$DB_PATH/taxo.k2d" ]]; then
-    mapfile -t _db_candidates < <(find "$DB_PATH" -type f -name "hash.k2d" -printf '%h\n' | sort -u)
+if ! has_required_db_files "$DB_PATH"; then
+    mapfile -t _db_candidates < <(find "$DB_PATH" -type f -name "hash.k2d" -exec dirname {} \; | sort -u)
     _matching_candidates=()
     for candidate in "${_db_candidates[@]}"; do
-        if [[ -f "$candidate/hash.k2d" && -f "$candidate/opts.k2d" && -f "$candidate/taxo.k2d" ]]; then
+        if has_required_db_files "$candidate"; then
             _matching_candidates+=("$candidate")
         fi
     done
@@ -115,7 +126,7 @@ if [[ ! -f "$DB_PATH/hash.k2d" || ! -f "$DB_PATH/opts.k2d" || ! -f "$DB_PATH/tax
 fi
 
 # Validate key database files expected by kraken2.
-for req in "hash.k2d" "opts.k2d" "taxo.k2d"; do
+for req in "${REQUIRED_DB_FILES[@]}"; do
     if [[ ! -f "$DB_VALIDATE_PATH/$req" ]]; then
         echo "Error: missing required database file: $DB_VALIDATE_PATH/$req" >&2
         exit 1
