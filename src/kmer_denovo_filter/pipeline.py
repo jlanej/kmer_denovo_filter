@@ -876,7 +876,6 @@ def _write_summary(summary_path, variants, annotations):
         alt = alts[0] if alts else "."
         var_key = f"{var['chrom']}:{var['pos']}:{ref}:{alt}"
         ann = annotations.get(var_key, {"dku": 0, "dkt": 0, "dka": 0, "dku_dkt": 0.0, "dka_dkt": 0.0, "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0, "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0})
-        alt = alts[0] if alts else "."
         label = f"{var['chrom']}:{var['pos'] + 1} {ref}>{alt}"
         call = "DE_NOVO" if ann["dku"] > 0 else "inherited"
         lines.append(f"  {label:<30s} {ann['dku']:>5d} {ann['dkt']:>5d} {ann['dka']:>5d} {ann['dku_dkt']:>8.4f} {ann['dka_dkt']:>8.4f} {ann['max_pkc']:>8d} {ann['avg_pkc']:>8.2f} {ann['min_pkc']:>8d} {ann['max_pkc_alt']:>12d} {ann['avg_pkc_alt']:>12.2f} {ann['min_pkc_alt']:>12d}  {call}")
