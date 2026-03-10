@@ -4,6 +4,8 @@ import logging
 import os
 import subprocess
 import tempfile
+import threading
+import time
 
 import ahocorasick
 
@@ -249,6 +251,27 @@ class JellyfishKmerQuery:
 _BACTERIA_TAXID = 2
 _HUMAN_TAXID = 9606
 
+# Interval between Kraken2 memory heartbeat log messages (seconds)
+_KRAKEN2_HEARTBEAT_INTERVAL = 30
+# Timeout when joining the heartbeat thread after Kraken2 completes (seconds)
+_KRAKEN2_HEARTBEAT_JOIN_TIMEOUT = 2
+
+
+def _read_proc_rss_kb(pid):
+    """Read RSS memory in kB for *pid* from ``/proc/{pid}/status``.
+
+    Returns ``None`` when the file is unavailable (non-Linux, or the
+    process has already exited).
+    """
+    try:
+        with open(f"/proc/{pid}/status") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except OSError:
+        pass
+    return None
+
 
 class Kraken2Runner:
     """Classify reads with kraken2 and tally bacterial content.
@@ -459,15 +482,51 @@ class Kraken2Runner:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
-            stdout, stderr = proc.communicate()
 
+            # Background thread: log RSS memory heartbeats while kraken2 runs
+            kraken2_start = time.monotonic()
+            stop_heartbeat = threading.Event()
+
+            def _heartbeat():
+                while not stop_heartbeat.wait(_KRAKEN2_HEARTBEAT_INTERVAL):
+                    rss = _read_proc_rss_kb(proc.pid)
+                    elapsed = time.monotonic() - kraken2_start
+                    if rss is not None:
+                        logger.info(
+                            "[Kraken2] heartbeat — %.0f s elapsed, "
+                            "RSS: %.1f GB",
+                            elapsed, rss / 1_048_576,
+                        )
+                    else:
+                        logger.info(
+                            "[Kraken2] heartbeat — %.0f s elapsed "
+                            "(memory info unavailable)",
+                            elapsed,
+                        )
+
+            heartbeat_thread = threading.Thread(
+                target=_heartbeat, daemon=True, name="kraken2-heartbeat",
+            )
+            heartbeat_thread.start()
+            try:
+                stdout, stderr = proc.communicate()
+            finally:
+                stop_heartbeat.set()
+                heartbeat_thread.join(timeout=_KRAKEN2_HEARTBEAT_JOIN_TIMEOUT)
+
+            elapsed = time.monotonic() - kraken2_start
             if proc.returncode != 0:
                 logger.warning(
-                    "kraken2 exited with code %d: %s",
-                    proc.returncode,
+                    "kraken2 exited with code %d after %.0f s: %s",
+                    proc.returncode, elapsed,
                     stderr.decode(errors="replace").strip()[:500],
                 )
                 return result
+
+            logger.info(
+                "[Kraken2] classification complete — %d reads in %.0f s",
+                result.total, elapsed,
+            )
 
             # Load bacterial taxid set for lineage-aware matching
             bacterial_taxids = self._load_bacterial_taxids(self.db_path)

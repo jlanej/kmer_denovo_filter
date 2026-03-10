@@ -183,6 +183,43 @@ class TestKraken2RunnerClassify:
         assert result.classified == 0
 
     @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_classify_nonzero_exit_logs_elapsed(self, mock_popen, caplog):
+        """Non-zero exit code warning should include elapsed time."""
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (b"", b"kraken2 OOM")
+        mock_proc.returncode = -9  # SIGKILL (OOM)
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/fake/db")
+        caplog.set_level("WARNING", logger="kmer_denovo_filter.kmer_utils")
+        result = kr.classify_sequences({"r1": "ACGT"})
+        assert result.total == 1
+        assert result.classified == 0
+        # Warning should include exit code and elapsed time
+        assert "-9" in caplog.text
+        assert "after" in caplog.text
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_classify_success_logs_completion(self, mock_popen, caplog):
+        """Successful classification should log a completion message."""
+        kraken2_output = "C\tread1\t9606\t100\t9606:20\n"
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (kraken2_output.encode(), b"")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/fake/db")
+        caplog.set_level("INFO", logger="kmer_denovo_filter.kmer_utils")
+        with mock.patch.object(
+            Kraken2Runner, "_load_bacterial_taxids", return_value=None,
+        ):
+            result = kr.classify_sequences({"read1": "ACGTACGT"})
+
+        assert result.total == 1
+        # Completion message should appear in logs
+        assert "classification complete" in caplog.text
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
     def test_classify_malformed_kmer_field(self, mock_popen):
         """Malformed kmer information field is ignored during parsing."""
         kraken2_output = (
