@@ -95,13 +95,15 @@ def _run_kraken2_on_reads(
         for var_key, names in informative_reads_by_variant.items():
             if not names:
                 continue
-            chrom, sep, pos_str = var_key.rpartition(":")
-            if not sep:
+            parts = var_key.split(":")
+            if len(parts) < 2:
                 logger.warning(
                     "[Kraken2] Skipping malformed variant key (missing ':'): %s",
                     var_key,
                 )
                 continue
+            chrom = parts[0]
+            pos_str = parts[1]
             try:
                 pos = int(pos_str)
             except ValueError:
@@ -297,7 +299,14 @@ def _collect_child_kmers(
         ref = var["ref"]
         alts = var["alts"]
         alt = alts[0] if alts else None
-        var_key = f"{chrom}:{pos}"
+        if alts and len(alts) > 1:
+            logger.warning(
+                "Multiallelic variant %s:%d has %d ALT alleles; "
+                "only the first ALT (%s) will be evaluated",
+                chrom, pos + 1, len(alts), alt,
+            )
+        alt_str = alt if alt is not None else "."
+        var_key = f"{chrom}:{pos}:{ref}:{alt_str}"
         if alt is not None and _is_symbolic(alt):
             logger.debug(
                 "Skipping variant %s:%d with symbolic allele %s",
@@ -691,7 +700,8 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
     vcf_out = pysam.VariantFile(output_vcf, "wz", header=vcf_in.header)
 
     for rec in vcf_in:
-        var_key = f"{rec.chrom}:{rec.start}"
+        alt_str = rec.alts[0] if rec.alts else "."
+        var_key = f"{rec.chrom}:{rec.start}:{rec.ref}:{alt_str}"
         if var_key in annotations:
             ann = annotations[var_key]
             if use_format:
@@ -769,8 +779,9 @@ def _write_informative_reads(
     # Collect unique regions to fetch
     regions = set()
     for var_key in informative_reads_by_variant:
-        chrom, pos_str = var_key.rsplit(":", 1)
-        pos = int(pos_str)
+        parts = var_key.split(":")
+        chrom = parts[0]
+        pos = int(parts[1])
         regions.add((chrom, pos))
 
     written = set()
@@ -860,10 +871,11 @@ def _write_summary(summary_path, variants, annotations):
     lines.append(f"  {'-------':<30s} {'---':>5s} {'---':>5s} {'---':>5s} {'-------':>8s} {'-------':>8s} {'-------':>8s} {'-------':>8s} {'-------':>8s} {'-----------':>12s} {'-----------':>12s} {'-----------':>12s}  ----")
 
     for var in variants:
-        var_key = f"{var['chrom']}:{var['pos']}"
-        ann = annotations.get(var_key, {"dku": 0, "dkt": 0, "dka": 0, "dku_dkt": 0.0, "dka_dkt": 0.0, "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0, "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0})
         ref = var["ref"]
         alts = var["alts"]
+        alt = alts[0] if alts else "."
+        var_key = f"{var['chrom']}:{var['pos']}:{ref}:{alt}"
+        ann = annotations.get(var_key, {"dku": 0, "dkt": 0, "dka": 0, "dku_dkt": 0.0, "dka_dkt": 0.0, "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0, "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0})
         alt = alts[0] if alts else "."
         label = f"{var['chrom']}:{var['pos'] + 1} {ref}>{alt}"
         call = "DE_NOVO" if ann["dku"] > 0 else "inherited"
@@ -4029,7 +4041,8 @@ def run_pipeline(args):
     )
 
     for idx, var in enumerate(variants, 1):
-        var_key = f"{var['chrom']}:{var['pos']}"
+        alt = var['alts'][0] if var['alts'] else "."
+        var_key = f"{var['chrom']}:{var['pos']}:{var['ref']}:{alt}"
         read_kmers_list = variant_read_kmers.get(var_key, [])
 
         dkt = len(read_kmers_list)
