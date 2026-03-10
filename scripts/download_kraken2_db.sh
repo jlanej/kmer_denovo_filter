@@ -1,36 +1,45 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# PrackenDB — curated Kraken2 database with one NCBI reference genome per
+# species.  Contains bacteria, archaea, protists, fungi, the human genome,
+# RefSeq viral genomes, and UniVec Core (as of October 7 2025).
+# https://ccb.jhu.edu/software/kraken2/index.shtml?t=downloads
+DEFAULT_URL="https://genome-idx.s3.amazonaws.com/kraken/k2_NCBI_reference_20251007.tar.gz"
+
 usage() {
-    cat <<'EOF'
+    cat <<EOF
 Usage:
-  ./scripts/download_kraken2_db.sh --db /path/to/kraken_db [--threads N]
+  ./scripts/download_kraken2_db.sh --db /path/to/kraken_db [--url URL]
 
-Downloads/builds a Kraken2 standard database (taxonomy + standard libraries).
+Downloads the pre-built PrackenDB Kraken2 database (NCBI reference
+assemblies, one genome per species) from the Kraken2 project.
 
-Requires the modern ``k2`` wrapper (Kraken2 ≥ 2.17).  ``k2`` downloads via
-HTTP with built-in retry/resume and does not require rsync or --use-ftp.
-Older Kraken2 installations that only ship ``kraken2-build`` are not
-supported; please upgrade to Kraken2 ≥ 2.17.
+The database contains all NCBI reference assemblies of bacteria, archaea,
+protists, and fungi (Oct 2025), plus the human genome, RefSeq viral
+genomes, and UniVec Core.  Because it keeps a single reference genome per
+species it is well suited for methods that count k-mers per species.
+
+See: https://ccb.jhu.edu/software/kraken2/index.shtml?t=downloads
 
 Options:
   --db PATH       Target Kraken2 database directory (required)
-  --threads N     Threads for the build (default: nproc or 4)
+  --url URL       Override the download URL
+                  (default: $DEFAULT_URL)
   -h, --help      Show this help
 
 Examples:
-  ./scripts/download_kraken2_db.sh --db /data/kraken2/standard --threads 16
+  ./scripts/download_kraken2_db.sh --db /data/kraken2/prackendb
 
-  docker run --rm \
-    -v "$PWD:/work" \
-    ghcr.io/jlanej/kmer_denovo_filter:latest \
-    bash /work/scripts/download_kraken2_db.sh --db /work/kraken2_db --threads 16
+  docker run --rm \\
+    -v "\$PWD:/work" \\
+    ghcr.io/jlanej/kmer_denovo_filter:latest \\
+    bash /work/scripts/download_kraken2_db.sh --db /work/kraken2_db
 EOF
 }
 
 DB_PATH=""
-ENV_THREADS="${THREADS:-}"
-THREADS=""
+URL="$DEFAULT_URL"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -38,8 +47,8 @@ while [[ $# -gt 0 ]]; do
             DB_PATH="${2:-}"
             shift 2
             ;;
-        --threads)
-            THREADS="${2:-}"
+        --url)
+            URL="${2:-}"
             shift 2
             ;;
         -h|--help)
@@ -60,37 +69,41 @@ if [[ -z "$DB_PATH" ]]; then
     exit 2
 fi
 
-if [[ -z "$THREADS" ]]; then
-    if [[ -n "$ENV_THREADS" ]]; then
-        THREADS="$ENV_THREADS"
-    else
-        THREADS="$(nproc 2>/dev/null || echo 4)"
-    fi
-fi
-
-# Require the modern k2 wrapper (Kraken2 >= 2.17).
-if ! command -v k2 >/dev/null 2>&1; then
-    echo "Error: k2 not found on PATH. Kraken2 >= 2.17 is required." >&2
-    echo "Please upgrade Kraken2: https://github.com/DerrickWood/kraken2" >&2
+# wget is used for the HTTP download.
+if ! command -v wget >/dev/null 2>&1; then
+    echo "Error: wget not found on PATH." >&2
+    echo "Install wget (e.g. apt-get install wget) and retry." >&2
     exit 1
 fi
 
 mkdir -p "$DB_PATH"
 
-echo "[kraken2-db] Building standard Kraken2 database at: $DB_PATH"
-echo "[kraken2-db] Threads: $THREADS"
+TARBALL="$DB_PATH/kraken2_db.tar.gz"
 
-# Modern Kraken2 (>= 2.17): k2 downloads via HTTP with built-in
-# retry and resume.  No rsync or --use-ftp workaround needed.
-echo "[kraken2-db] Using k2 wrapper (Kraken2 >= 2.17, HTTP downloads)."
-k2 build --standard --db "$DB_PATH" --threads "$THREADS"
+echo "[kraken2-db] Downloading PrackenDB to: $DB_PATH"
+echo "[kraken2-db] URL: $URL"
 
-# Validate key files expected by Kraken2Runner lineage-aware matching.
-for req in "hash.k2d" "opts.k2d" "taxo.k2d" "taxonomy/nodes.dmp"; do
+wget -O "$TARBALL" "$URL"
+
+echo "[kraken2-db] Extracting database..."
+tar -xzf "$TARBALL" -C "$DB_PATH"
+rm -f "$TARBALL"
+
+# Validate key database files expected by kraken2.
+for req in "hash.k2d" "opts.k2d" "taxo.k2d"; do
     if [[ ! -f "$DB_PATH/$req" ]]; then
         echo "Error: missing required database file: $DB_PATH/$req" >&2
         exit 1
     fi
 done
+
+# taxonomy/nodes.dmp is used for lineage-aware bacterial classification.
+# Pre-built databases may omit it; warn but do not fail—Kraken2Runner
+# falls back to exact taxid==2 matching when it is absent.
+if [[ ! -f "$DB_PATH/taxonomy/nodes.dmp" ]]; then
+    echo "[kraken2-db] Warning: taxonomy/nodes.dmp not found." >&2
+    echo "[kraken2-db] Lineage-aware bacterial classification will" >&2
+    echo "[kraken2-db] fall back to exact taxid==2 matching." >&2
+fi
 
 echo "[kraken2-db] Complete."

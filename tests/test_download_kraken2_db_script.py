@@ -5,45 +5,45 @@ import stat
 import subprocess
 from pathlib import Path
 
+PRACKENDB_URL = (
+    "https://genome-idx.s3.amazonaws.com/kraken/"
+    "k2_NCBI_reference_20251007.tar.gz"
+)
+
 
 def _write_executable(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
-def test_download_kraken2_db_prefers_k2(tmp_path):
-    """When k2 is on PATH the script uses 'k2 build' (HTTP mode)."""
+def test_download_kraken2_db_uses_wget(tmp_path):
+    """Script uses wget to download the PrackenDB tarball."""
     repo_root = Path(__file__).resolve().parent.parent
     script_path = repo_root / "scripts" / "download_kraken2_db.sh"
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     db_path = tmp_path / "db"
-    k2_args_log = tmp_path / "k2-args.log"
+    wget_args_log = tmp_path / "wget-args.log"
+    # Fake wget: log args, create DB files to satisfy validation.
     _write_executable(
-        fake_bin / "k2",
+        fake_bin / "wget",
         f"""#!/usr/bin/env bash
 set -euo pipefail
-echo "$*" >> "{k2_args_log}"
-db=""
-while [[ $# -gt 0 ]]; do
-  if [[ "$1" == "--db" ]]; then
-    db="$2"
-    shift 2
-  else
-    shift
+echo "$*" >> "{wget_args_log}"
+# Parse -O <dest> to find db directory.
+dest=""
+for arg in "$@"; do
+  if [[ -n "${{prev:-}}" && "$prev" == "-O" ]]; then
+    dest="$arg"
   fi
+  prev="$arg"
 done
-mkdir -p "$db/taxonomy"
-touch "$db/hash.k2d" "$db/opts.k2d" "$db/taxo.k2d" "$db/taxonomy/nodes.dmp"
-""",
-    )
-    # Also place a kraken2-build shim to verify it is NOT called.
-    kb_args_log = tmp_path / "kraken2-build-args.log"
-    _write_executable(
-        fake_bin / "kraken2-build",
-        f"""#!/usr/bin/env bash
-echo "$*" >> "{kb_args_log}"
+db_dir="$(dirname "$dest")"
+mkdir -p "$db_dir/taxonomy"
+touch "$db_dir/hash.k2d" "$db_dir/opts.k2d" "$db_dir/taxo.k2d" "$db_dir/taxonomy/nodes.dmp"
+# Create a dummy tarball so tar succeeds.
+tar -czf "$dest" -C "$db_dir" hash.k2d opts.k2d taxo.k2d taxonomy
 """,
     )
 
@@ -51,35 +51,81 @@ echo "$*" >> "{kb_args_log}"
     env["PATH"] = f"{fake_bin}:{env['PATH']}"
 
     result = subprocess.run(
-        [str(script_path), "--db", str(db_path), "--threads", "2"],
+        [str(script_path), "--db", str(db_path)],
         capture_output=True,
         text=True,
         env=env,
     )
 
     assert result.returncode == 0, result.stderr
-    # k2 should have been invoked
-    args = k2_args_log.read_text(encoding="utf-8").splitlines()
-    assert len(args) == 1
-    assert "--standard" in args[0]
-    assert str(db_path) in args[0]
-    # kraken2-build should not have been invoked
-    assert not kb_args_log.exists()
+    args = wget_args_log.read_text(encoding="utf-8").strip()
+    assert PRACKENDB_URL in args
+    assert "PrackenDB" in result.stdout
 
 
-def test_download_kraken2_db_fails_without_k2(tmp_path):
-    """Script exits with an error when k2 is not available."""
+def test_download_kraken2_db_custom_url(tmp_path):
+    """--url overrides the default PrackenDB URL."""
     repo_root = Path(__file__).resolve().parent.parent
     script_path = repo_root / "scripts" / "download_kraken2_db.sh"
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     db_path = tmp_path / "db"
+    wget_args_log = tmp_path / "wget-args.log"
+    custom_url = "https://example.com/custom_kraken2.tar.gz"
+    _write_executable(
+        fake_bin / "wget",
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+echo "$*" >> "{wget_args_log}"
+dest=""
+for arg in "$@"; do
+  if [[ -n "${{prev:-}}" && "$prev" == "-O" ]]; then
+    dest="$arg"
+  fi
+  prev="$arg"
+done
+db_dir="$(dirname "$dest")"
+mkdir -p "$db_dir/taxonomy"
+touch "$db_dir/hash.k2d" "$db_dir/opts.k2d" "$db_dir/taxo.k2d" "$db_dir/taxonomy/nodes.dmp"
+tar -czf "$dest" -C "$db_dir" hash.k2d opts.k2d taxo.k2d taxonomy
+""",
+    )
 
     env = os.environ.copy()
-    # Keep /usr/bin (for bash, env, etc.) but remove everything else so
-    # k2 is not found.
-    env["PATH"] = f"{fake_bin}:/usr/bin:/bin"
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+
+    result = subprocess.run(
+        [str(script_path), "--db", str(db_path), "--url", custom_url],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    args = wget_args_log.read_text(encoding="utf-8").strip()
+    assert custom_url in args
+    assert PRACKENDB_URL not in args
+
+
+def test_download_kraken2_db_fails_without_wget(tmp_path):
+    """Script exits with an error when wget is not available."""
+    repo_root = Path(__file__).resolve().parent.parent
+    script_path = repo_root / "scripts" / "download_kraken2_db.sh"
+
+    import shutil
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    db_path = tmp_path / "db"
+
+    # Symlink only bash so the script can run but wget is absent.
+    bash_path = shutil.which("bash")
+    if bash_path:
+        (fake_bin / "bash").symlink_to(bash_path)
+
+    env = os.environ.copy()
+    env["PATH"] = str(fake_bin)
 
     result = subprocess.run(
         [str(script_path), "--db", str(db_path)],
@@ -89,5 +135,45 @@ def test_download_kraken2_db_fails_without_k2(tmp_path):
     )
 
     assert result.returncode != 0
-    assert "k2 not found on PATH" in result.stderr
-    assert "Kraken2 >= 2.17" in result.stderr
+    assert "wget not found" in result.stderr
+
+
+def test_download_kraken2_db_fails_on_missing_db_files(tmp_path):
+    """Script fails when required database files are missing after extract."""
+    repo_root = Path(__file__).resolve().parent.parent
+    script_path = repo_root / "scripts" / "download_kraken2_db.sh"
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    db_path = tmp_path / "db"
+    # Fake wget that creates a tarball with only an empty file.
+    _write_executable(
+        fake_bin / "wget",
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+dest=""
+for arg in "$@"; do
+  if [[ -n "${{prev:-}}" && "$prev" == "-O" ]]; then
+    dest="$arg"
+  fi
+  prev="$arg"
+done
+db_dir="$(dirname "$dest")"
+mkdir -p "$db_dir"
+touch "$db_dir/dummy.txt"
+tar -czf "$dest" -C "$db_dir" dummy.txt
+""",
+    )
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+
+    result = subprocess.run(
+        [str(script_path), "--db", str(db_path)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "missing required database file" in result.stderr

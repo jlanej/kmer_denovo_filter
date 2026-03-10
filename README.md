@@ -81,7 +81,9 @@ The tool supports two modes:
 * [Jellyfish ≥ 2](https://github.com/gmarcais/Jellyfish) on `PATH` [2]
 * Optional for VCF-mode bacterial-fraction annotations:
   * [Kraken2](https://github.com/DerrickWood/kraken2) on `PATH` [3]
-  * The `k2` wrapper (Kraken2 ≥ 2.17) is required for database preparation
+  * A Kraken2 database — the helper script downloads the pre-built
+    [PrackenDB](https://ccb.jhu.edu/software/kraken2/index.shtml?t=downloads)
+    database (see [Kraken2 Database Setup Helper](#kraken2-database-setup-helper))
 
 ## Installation
 
@@ -239,6 +241,8 @@ and annotated with the following fields:
   human homology, reads with explicit human taxid k-mer evidence in
   Kraken2's per-read output are conservatively excluded from the
   bacterial numerator.
+  See [Kraken2 Bacterial and Non-Human Content Detection](docs/kraken2_bacterial_detection.md)
+  for a detailed description of the classification method.
 
 When `--proband-id` is provided and matches a sample in the input VCF,
 annotations are written as **FORMAT** (per-sample) fields on that sample.
@@ -259,20 +263,24 @@ and indexed for direct visualization in IGV.
 
 ### Kraken2 Database Setup Helper
 
-To build/download a complete Kraken2 standard database (taxonomy + standard
-libraries), use:
+To download the pre-built [PrackenDB](https://ccb.jhu.edu/software/kraken2/index.shtml?t=downloads)
+Kraken2 database (NCBI reference assemblies — one genome per species):
 
 ```bash
-./scripts/download_kraken2_db.sh --db /path/to/kraken2_db --threads 16
+./scripts/download_kraken2_db.sh --db /path/to/kraken2_db
 ```
+
+PrackenDB contains all NCBI reference assemblies of bacteria, archaea,
+protists, and fungi (as of October 2025), plus the human genome, RefSeq
+viral genomes, and UniVec Core.  Because it keeps a single reference
+genome per species it is well suited for methods that count k-mers per
+species.
 
 This helper validates that required Kraken2 DB files are present, including
 `taxonomy/nodes.dmp` used for lineage-aware bacterial classification.
 
-The script requires the modern `k2` wrapper (Kraken2 ≥ 2.17), which
-downloads via HTTP with built-in retry and resume—no rsync or `--use-ftp`
-workaround is needed.  Older installations that only ship `kraken2-build`
-are not supported; please upgrade to Kraken2 ≥ 2.17.
+The script requires only `wget` — it downloads and extracts a pre-built
+database archive and does not need `k2` or `kraken2-build`.
 
 See the [Kraken2 manual](https://github.com/DerrickWood/kraken2/blob/master/docs/MANUAL.markdown)
 for full database build options.
@@ -283,14 +291,14 @@ You can also run the helper inside the published container:
 docker run --rm \
   -v "$PWD:/work" \
   ghcr.io/jlanej/kmer_denovo_filter:latest \
-  bash /work/scripts/download_kraken2_db.sh --db /work/kraken2_db --threads 16
+  bash /work/scripts/download_kraken2_db.sh --db /work/kraken2_db
 ```
 
 Or via Apptainer on HPC (see [Running on HPC with Apptainer](#running-on-hpc-with-apptainer)):
 
 ```bash
 apptainer exec kmer_denovo.sif \
-  bash /app/scripts/download_kraken2_db.sh --db /scratch/kraken2_db --threads 16
+  bash /app/scripts/download_kraken2_db.sh --db /scratch/kraken2_db
 ```
 
 ### Discovery Mode Output
@@ -458,8 +466,8 @@ provenance is self-documenting.
 ## Docker
 
 A Docker image is published to GitHub Container Registry on every push to
-`main`. The image includes `samtools`, `jellyfish`, `kraken2`, and the `k2`
-wrapper (Kraken2 ≥ 2.17) for HTTP database downloads.  The helper
+`main`. The image includes `samtools`, `jellyfish`, `kraken2`, and `wget`
+for downloading the pre-built PrackenDB database.  The helper
 script is available inside the container at `/app/scripts/download_kraken2_db.sh`:
 
 ```bash
@@ -516,20 +524,20 @@ apptainer exec kmer_denovo.sif kmer-denovo \
   --threads 8
 ```
 
-### Building the Kraken2 database via Apptainer
+### Downloading the Kraken2 database via Apptainer
 
-The container includes the `k2` wrapper (Kraken2 ≥ 2.17); the helper script
-uses `k2 build` for HTTP downloads:
+The helper script downloads the pre-built PrackenDB database:
 
 ```bash
 apptainer exec --bind /scratch kmer_denovo.sif \
   bash /app/scripts/download_kraken2_db.sh \
-    --db /scratch/kraken2_db --threads 16
+    --db /scratch/kraken2_db
 ```
 
-> **Note:** The standard Kraken2 database requires ~100 GB disk and
-> 50–100 GB RAM to build.  Ensure your scratch directory and job
-> allocation are sized accordingly.
+> **Note:** The PrackenDB download is approximately 50 GB.  Ensure your
+> scratch directory and job allocation are sized accordingly.  At
+> runtime, Kraken2 loads the database into memory so provision
+> sufficient RAM as well.
 
 ### Example SLURM batch script
 
