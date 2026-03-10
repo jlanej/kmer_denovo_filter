@@ -561,8 +561,8 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
             ("Number", "1"),
             ("Type", "Integer"),
             ("Description",
-             "Number of child reads with at least one variant-spanning "
-             "k-mer unique to child (absent from both parents)"),
+             "Number of child fragments (unique read names) with at least one "
+             "variant-spanning k-mer unique to child (absent from both parents)"),
         ],
     )
     vcf_in.header.add_meta(
@@ -572,7 +572,7 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
             ("Number", "1"),
             ("Type", "Integer"),
             ("Description",
-             "Total child reads with variant-spanning k-mers"),
+             "Total child fragments (unique read names) with variant-spanning k-mers"),
         ],
     )
     vcf_in.header.add_meta(
@@ -582,8 +582,8 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
             ("Number", "1"),
             ("Type", "Integer"),
             ("Description",
-             "Number of child reads with at least one unique k-mer "
-             "that also exactly support the candidate allele"),
+             "Number of child fragments (unique read names) with at least one "
+             "unique k-mer that also exactly supports the candidate allele"),
         ],
     )
     vcf_in.header.add_meta(
@@ -593,7 +593,7 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
             ("Number", "1"),
             ("Type", "Float"),
             ("Description",
-             "Proportion of child reads with unique k-mers (DKU/DKT)"),
+             "Proportion of child fragments with unique k-mers (DKU/DKT)"),
         ],
     )
     vcf_in.header.add_meta(
@@ -603,7 +603,7 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
             ("Number", "1"),
             ("Type", "Float"),
             ("Description",
-             "Proportion of child reads with unique allele-supporting "
+             "Proportion of child fragments with unique allele-supporting "
              "k-mers (DKA/DKT)"),
         ],
     )
@@ -675,10 +675,8 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                 ("Number", "1"),
                 ("Type", "Float"),
                 ("Description",
-                 "Fraction of unique DKU read names (fragments with >=1 "
-                 "child-unique variant-spanning k-mer) classified as bacterial "
-                 "by kraken2; denominator equals the number of unique fragments, "
-                 "which may be less than DKU when both mates span the locus"),
+                 "Fraction of DKU fragments classified as bacterial by "
+                 "kraken2; denominator equals DKU (both are fragment-based)"),
             ],
         )
         vcf_in.header.add_meta(
@@ -688,9 +686,8 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                 ("Number", "1"),
                 ("Type", "Float"),
                 ("Description",
-                 "Fraction of unique DKA read names (DKU fragments that also "
-                 "support the alternate allele) classified as bacterial by "
-                 "kraken2; DKA names are always a subset of DKU names"),
+                 "Fraction of DKA fragments classified as bacterial by "
+                 "kraken2; DKA fragments are always a subset of DKU"),
             ],
         )
 
@@ -2834,13 +2831,14 @@ def _parse_candidate_summary(summary_path, dka_dkt_min=0.25, dka_min=10):
                 parts = line.split()
                 if len(parts) < 12:
                     continue
-                # e.g. "chr11:55003995" "T>C" "24" "53" "24" "0.4528" ...
+                # e.g. "chr11:55003995" "T>C" "21" "46" "21" "0.4565" "0.4565" ...
                 variant = parts[0]  # chr:pos
                 ref_alt = parts[1]  # R>A
                 dku = int(parts[2])
                 dkt = int(parts[3])
                 dka = int(parts[4])
-                dka_dkt = float(parts[5])
+                dku_dkt = float(parts[5])
+                dka_dkt = float(parts[6])
                 call = parts[-1]
                 chrom, pos_str = variant.rsplit(":", 1)
                 pos = int(pos_str)
@@ -4044,26 +4042,33 @@ def run_pipeline(args):
         var_key = f"{var['chrom']}:{var['pos']}:{var['ref']}:{alt}"
         read_kmers_list = variant_read_kmers.get(var_key, [])
 
-        dkt = len(read_kmers_list)
-        running_reads += dkt
-        dku = 0
-        dka = 0
+        # Collect unique fragment names for all spanning reads.
+        # When both mates of a paired-end read span the variant they
+        # share the same query_name and are counted as one fragment.
+        spanning_names = set()
         informative_names = set()
         informative_alt_names = set()
         all_variant_kmers = set()
         alt_variant_kmers = set()
         for read_name, kmers, supports_alt in read_kmers_list:
+            spanning_names.add(read_name)
             all_variant_kmers.update(kmers)
             if supports_alt:
                 alt_variant_kmers.update(kmers)
-            # A read is informative if it has at least one variant-spanning
-            # k-mer that is absent from both parents.
+            # A fragment is informative if at least one of its
+            # alignments has a variant-spanning k-mer absent from
+            # both parents.
             if not kmers.issubset(parent_kmer_set):
-                dku += 1
                 informative_names.add(read_name)
                 if supports_alt:
-                    dka += 1
                     informative_alt_names.add(read_name)
+
+        # DKT, DKU, DKA are all fragment-based (unique read names)
+        # so they are consistent with the BF denominators.
+        dkt = len(spanning_names)
+        dku = len(informative_names)
+        dka = len(informative_alt_names)
+        running_reads += dkt
 
         if dku > 0:
             running_dnm += 1

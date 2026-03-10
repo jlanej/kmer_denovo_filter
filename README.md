@@ -34,11 +34,11 @@ The tool supports two modes:
    filter is applied to parent reads. K-mer counts from both parents are
    summed into a single combined count.
 
-3. **Count proband-unique reads** – For each variant, a child read is counted
-   as *unique* when at least one of its variant-spanning k-mers is absent
-   from both parents. DKU and DKT count individual alignments: when both
-   mates of a paired-end read span the variant, each mate is counted
-   separately.
+3. **Count proband-unique fragments** – For each variant, a child fragment
+   is counted as *unique* when at least one of its variant-spanning k-mers
+   is absent from both parents. DKU, DKT, and DKA all count unique
+   fragment names: when both mates of a paired-end read span the variant,
+   they share a read name and are counted as one fragment.
 
 ### VCF-Free Discovery Mode
 
@@ -224,17 +224,19 @@ kmer-denovo \
 The output VCF is bgzipped (`.vcf.gz`) with a tabix index (`.vcf.gz.tbi`),
 and annotated with the following fields:
 
-* **DKU** – Number of child read alignments with at least one variant-spanning
-  k-mer unique to the child (absent from both parents). When both mates of a
-  paired-end read span the variant, each mate is counted separately.
-* **DKT** – Total child read alignments with variant-spanning k-mers.
-* **DKA** – Number of child read alignments with at least one unique k-mer
-  that also exactly support the first ALT allele. For multiallelic variants
-  only the first ALT allele is evaluated.
-* **DKU_DKT** – Proportion of child reads with unique k-mers (DKU / DKT).
-  A value of 1.0 means all reads spanning the variant carry child-unique
+* **DKU** – Number of child fragments (unique read names) with at least one
+  variant-spanning k-mer unique to the child (absent from both parents).
+  When both mates of a paired-end read span the variant, they share a
+  read name and are counted as one fragment.
+* **DKT** – Total child fragments (unique read names) with variant-spanning
+  k-mers.
+* **DKA** – Number of child fragments with at least one unique k-mer that
+  also exactly supports the first ALT allele. DKA ≤ DKU by construction.
+  For multiallelic variants only the first ALT allele is evaluated.
+* **DKU_DKT** – Proportion of child fragments with unique k-mers (DKU / DKT).
+  A value of 1.0 means all fragments spanning the variant carry child-unique
   k-mers. When DKT is 0 the value is 0.0.
-* **DKA_DKT** – Proportion of child reads with unique allele-supporting
+* **DKA_DKT** – Proportion of child fragments with unique allele-supporting
   k-mers (DKA / DKT). When DKT is 0 the value is 0.0.
 * **MAX_PKC** / **AVG_PKC** / **MIN_PKC** – Maximum, average (2 dp), and
   minimum combined k-mer count (summed across both parents) among
@@ -243,12 +245,11 @@ and annotated with the following fields:
 * **MAX_PKC_ALT** / **AVG_PKC_ALT** / **MIN_PKC_ALT** – Same as above but
   restricted to k-mers from reads that directly support the alternate allele.
 * **DKU_BF** / **DKA_BF** *(optional; when `--kraken2-db` is provided in VCF mode)* –
-  Fraction of unique DKU/DKA read *names* (fragments) classified as
-  bacterial by kraken2. The denominator is the number of unique fragment
-  names, which may be less than the DKU/DKA alignment count when both mates
-  span the locus. To reduce over-flagging from shared human homology, reads
-  with explicit human taxid k-mer evidence in Kraken2's per-read output are
-  conservatively excluded from the bacterial numerator.
+  Fraction of DKU/DKA fragments classified as bacterial by kraken2. Since
+  DKU, DKA, and the BF denominators all count unique fragment names, the
+  fractions are always in [0.0, 1.0]. To reduce over-flagging from shared
+  human homology, reads with explicit human taxid k-mer evidence in Kraken2's
+  per-read output are conservatively excluded from the bacterial numerator.
   See [Kraken2 Bacterial and Non-Human Content Detection](docs/kraken2_bacterial_detection.md)
   for a detailed description of the classification method.
 
@@ -479,12 +480,12 @@ provenance is self-documenting.
   is logged for each multiallelic record. To evaluate all alleles,
   decompose the VCF beforehand (e.g. `bcftools norm -m-`).
 
-* **DKU / DKT count alignments, not fragments** – DKU and DKT count
-  individual read alignments. When both mates of a paired-end read span
-  the variant, each mate is counted separately in DKU and DKT. By
-  contrast, the bacterial-fraction denominators (DKU_BF, DKA_BF) use
-  unique read *names* (fragments), so DKU_BF's denominator may be
-  smaller than DKU when both mates overlap the locus.
+* **Fragment-based counting** – DKU, DKT, and DKA all count unique
+  fragment names (read names). When both mates of a paired-end read span
+  the variant, they share a read name and are counted as one fragment.
+  The bacterial-fraction metrics (DKU_BF, DKA_BF) use the same
+  fragment-based denominator, so all counts and fractions are consistent
+  and DKU_BF / DKA_BF are always in [0.0, 1.0].
 
 * **PKC is a combined parental count** – MAX_PKC, AVG_PKC, and MIN_PKC
   represent the **sum** of mother and father k-mer counts for each
