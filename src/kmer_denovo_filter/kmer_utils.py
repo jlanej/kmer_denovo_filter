@@ -565,15 +565,18 @@ class Kraken2Runner:
                 )
                 return result
 
-            logger.info(
-                "[Kraken2] classification complete — %d reads in %.0f s "
-                "(peak RSS: %.1f GB)",
-                result.total, elapsed,
-                (
-                    peak_rss_kb[0] / 1_048_576
-                    if peak_rss_kb[0] is not None else 0.0
-                ),
-            )
+            if peak_rss_kb[0] is not None:
+                logger.info(
+                    "[Kraken2] classification complete — %d reads in %.0f s "
+                    "(peak RSS: %.1f GB)",
+                    result.total, elapsed, peak_rss_kb[0] / 1_048_576,
+                )
+            else:
+                logger.info(
+                    "[Kraken2] classification complete — %d reads in %.0f s "
+                    "(peak RSS: unavailable)",
+                    result.total, elapsed,
+                )
 
             # Load bacterial taxid set for lineage-aware matching
             bacterial_taxids = self._load_bacterial_taxids(self.db_path)

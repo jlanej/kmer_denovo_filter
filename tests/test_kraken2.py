@@ -385,7 +385,7 @@ class TestKraken2RunnerClassify:
         mock_popen.return_value = mock_proc
 
         # First heartbeat sample exceeds 10 GB cap.
-        mock_read_rss.return_value = 11 * 1_048_576
+        mock_read_rss.return_value = 11 * 1_048_576  # 11 GB in kB
 
         kr = Kraken2Runner("/my/db", max_rss_gb=10.0)
         caplog.set_level("INFO", logger="kmer_denovo_filter.kmer_utils")
