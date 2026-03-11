@@ -395,6 +395,49 @@ class TestLoadBacterialTaxids:
             assert 9606 not in bacterial  # Human
             assert 1 not in bacterial     # Root
 
+    def test_parses_root_level_nodes_dmp(self):
+        """nodes.dmp at the DB root (PrackenDB layout) is found."""
+        with tempfile.TemporaryDirectory() as db:
+            # PrackenDB places nodes.dmp directly in the DB directory,
+            # not under a taxonomy/ subdirectory.
+            nodes = os.path.join(db, "nodes.dmp")
+            with open(nodes, "w") as fh:
+                fh.write("1\t|\t1\t|\tno rank\t|\n")
+                fh.write("2\t|\t1\t|\tsuperkingdom\t|\n")
+                fh.write("562\t|\t2\t|\tspecies\t|\n")
+                fh.write("9606\t|\t1\t|\tspecies\t|\n")
+
+            bacterial = Kraken2Runner._load_bacterial_taxids(db)
+            assert bacterial is not None
+            assert 2 in bacterial       # Bacteria itself
+            assert 562 in bacterial     # E. coli (descendant)
+            assert 9606 not in bacterial  # Human
+            assert 1 not in bacterial     # Root
+
+    def test_taxonomy_subdir_preferred_over_root(self):
+        """taxonomy/nodes.dmp is preferred when both locations exist."""
+        with tempfile.TemporaryDirectory() as db:
+            # Create nodes.dmp in both locations with different content.
+            # taxonomy/ version has taxid 562 (E. coli).
+            tax_dir = os.path.join(db, "taxonomy")
+            os.makedirs(tax_dir)
+            with open(os.path.join(tax_dir, "nodes.dmp"), "w") as fh:
+                fh.write("1\t|\t1\t|\tno rank\t|\n")
+                fh.write("2\t|\t1\t|\tsuperkingdom\t|\n")
+                fh.write("562\t|\t2\t|\tspecies\t|\n")
+
+            # Root version has taxid 1280 (S. aureus) instead.
+            with open(os.path.join(db, "nodes.dmp"), "w") as fh:
+                fh.write("1\t|\t1\t|\tno rank\t|\n")
+                fh.write("2\t|\t1\t|\tsuperkingdom\t|\n")
+                fh.write("1280\t|\t2\t|\tspecies\t|\n")
+
+            bacterial = Kraken2Runner._load_bacterial_taxids(db)
+            assert bacterial is not None
+            # Should use taxonomy/ version (562 present, 1280 absent)
+            assert 562 in bacterial
+            assert 1280 not in bacterial
+
 
 class TestKrakenKmerTaxidParsing:
     """Tests for parsing Kraken2 k-mer detail field."""
