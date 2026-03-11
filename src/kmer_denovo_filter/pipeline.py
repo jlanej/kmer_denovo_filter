@@ -48,7 +48,7 @@ from kmer_denovo_filter.utils import (
 )
 
 logger = logging.getLogger(__name__)
-_BACTERIAL_FRACTION_PRECISION = 4
+_FRACTION_PRECISION = 4
 
 
 def _run_kraken2_on_reads(
@@ -60,7 +60,8 @@ def _run_kraken2_on_reads(
 
     Extracts sequences for *read_names* from *child_bam*, classifies them
     with kraken2, and returns a :class:`Kraken2Runner.Result` with tallied
-    bacterial / human / root counts.
+    bacterial / archaeal / fungal / protist / non-human / human / root
+    counts.
 
     Args:
         child_bam: Path to child BAM/CRAM.
@@ -531,15 +532,16 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
     as FORMAT fields on that sample.  Otherwise they are written as INFO
     fields.
 
-    When bacterial-fraction annotations are present in *annotations*,
-    DKU_BF and DKA_BF are also added.
+    When non-human fraction annotations are present in *annotations*,
+    DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF,
+    and DKU_NHF/DKA_NHF are also added.
 
     Returns:
         The actual output path (with ``.gz`` suffix).
     """
     vcf_in = pysam.VariantFile(input_vcf)
-    has_bacterial_fraction = any(
-        "dku_bacterial_fraction" in ann or "dka_bacterial_fraction" in ann
+    has_kraken_fractions = any(
+        "dku_bacterial_fraction" in ann or "dku_nonhuman_fraction" in ann
         for ann in annotations.values()
     )
 
@@ -672,7 +674,7 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
              "Minimum k-mer count in parents for alt-allele-supporting k-mers"),
         ],
     )
-    if has_bacterial_fraction:
+    if has_kraken_fractions:
         vcf_in.header.add_meta(
             category,
             items=[
@@ -692,6 +694,94 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                 ("Type", "Float"),
                 ("Description",
                  "Fraction of DKA fragments classified as bacterial by "
+                 "kraken2; DKA fragments are always a subset of DKU"),
+            ],
+        )
+        vcf_in.header.add_meta(
+            category,
+            items=[
+                ("ID", "DKU_AF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of DKU fragments classified as archaeal by "
+                 "kraken2; denominator equals DKU (both are fragment-based)"),
+            ],
+        )
+        vcf_in.header.add_meta(
+            category,
+            items=[
+                ("ID", "DKA_AF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of DKA fragments classified as archaeal by "
+                 "kraken2; DKA fragments are always a subset of DKU"),
+            ],
+        )
+        vcf_in.header.add_meta(
+            category,
+            items=[
+                ("ID", "DKU_FF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of DKU fragments classified as fungal by "
+                 "kraken2; denominator equals DKU (both are fragment-based)"),
+            ],
+        )
+        vcf_in.header.add_meta(
+            category,
+            items=[
+                ("ID", "DKA_FF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of DKA fragments classified as fungal by "
+                 "kraken2; DKA fragments are always a subset of DKU"),
+            ],
+        )
+        vcf_in.header.add_meta(
+            category,
+            items=[
+                ("ID", "DKU_PF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of DKU fragments classified as protist by "
+                 "kraken2; denominator equals DKU (both are fragment-based)"),
+            ],
+        )
+        vcf_in.header.add_meta(
+            category,
+            items=[
+                ("ID", "DKA_PF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of DKA fragments classified as protist by "
+                 "kraken2; DKA fragments are always a subset of DKU"),
+            ],
+        )
+        vcf_in.header.add_meta(
+            category,
+            items=[
+                ("ID", "DKU_NHF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of DKU fragments classified as non-human by "
+                 "kraken2; denominator equals DKU (both are fragment-based)"),
+            ],
+        )
+        vcf_in.header.add_meta(
+            category,
+            items=[
+                ("ID", "DKA_NHF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of DKA fragments classified as non-human by "
                  "kraken2; DKA fragments are always a subset of DKU"),
             ],
         )
@@ -718,12 +808,36 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                 rec.samples[proband_id]["MAX_PKC_ALT"] = ann["max_pkc_alt"]
                 rec.samples[proband_id]["AVG_PKC_ALT"] = ann["avg_pkc_alt"]
                 rec.samples[proband_id]["MIN_PKC_ALT"] = ann["min_pkc_alt"]
-                if has_bacterial_fraction:
+                if has_kraken_fractions:
                     rec.samples[proband_id]["DKU_BF"] = ann.get(
                         "dku_bacterial_fraction", 0.0,
                     )
                     rec.samples[proband_id]["DKA_BF"] = ann.get(
                         "dka_bacterial_fraction", 0.0,
+                    )
+                    rec.samples[proband_id]["DKU_AF"] = ann.get(
+                        "dku_archaeal_fraction", 0.0,
+                    )
+                    rec.samples[proband_id]["DKA_AF"] = ann.get(
+                        "dka_archaeal_fraction", 0.0,
+                    )
+                    rec.samples[proband_id]["DKU_FF"] = ann.get(
+                        "dku_fungal_fraction", 0.0,
+                    )
+                    rec.samples[proband_id]["DKA_FF"] = ann.get(
+                        "dka_fungal_fraction", 0.0,
+                    )
+                    rec.samples[proband_id]["DKU_PF"] = ann.get(
+                        "dku_protist_fraction", 0.0,
+                    )
+                    rec.samples[proband_id]["DKA_PF"] = ann.get(
+                        "dka_protist_fraction", 0.0,
+                    )
+                    rec.samples[proband_id]["DKU_NHF"] = ann.get(
+                        "dku_nonhuman_fraction", 0.0,
+                    )
+                    rec.samples[proband_id]["DKA_NHF"] = ann.get(
+                        "dka_nonhuman_fraction", 0.0,
                     )
             else:
                 rec.info["DKU"] = ann["dku"]
@@ -737,9 +851,17 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                 rec.info["MAX_PKC_ALT"] = ann["max_pkc_alt"]
                 rec.info["AVG_PKC_ALT"] = ann["avg_pkc_alt"]
                 rec.info["MIN_PKC_ALT"] = ann["min_pkc_alt"]
-                if has_bacterial_fraction:
+                if has_kraken_fractions:
                     rec.info["DKU_BF"] = ann.get("dku_bacterial_fraction", 0.0)
                     rec.info["DKA_BF"] = ann.get("dka_bacterial_fraction", 0.0)
+                    rec.info["DKU_AF"] = ann.get("dku_archaeal_fraction", 0.0)
+                    rec.info["DKA_AF"] = ann.get("dka_archaeal_fraction", 0.0)
+                    rec.info["DKU_FF"] = ann.get("dku_fungal_fraction", 0.0)
+                    rec.info["DKA_FF"] = ann.get("dka_fungal_fraction", 0.0)
+                    rec.info["DKU_PF"] = ann.get("dku_protist_fraction", 0.0)
+                    rec.info["DKA_PF"] = ann.get("dka_protist_fraction", 0.0)
+                    rec.info["DKU_NHF"] = ann.get("dku_nonhuman_fraction", 0.0)
+                    rec.info["DKA_NHF"] = ann.get("dka_nonhuman_fraction", 0.0)
         vcf_out.write(rec)
 
     vcf_out.close()
@@ -4135,7 +4257,7 @@ def run_pipeline(args):
         _format_elapsed(time.monotonic() - step_start),
     )
 
-    # ── Kraken2 bacterial content flagging (VCF mode) ──────────────
+    # ── Kraken2 non-human content flagging (VCF mode) ────────────────
     kraken2_result = None
     if kraken2_db is not None:
         step_start = time.monotonic()
@@ -4143,7 +4265,7 @@ def run_pipeline(args):
         for names in informative_reads_by_variant.values():
             all_informative_names.update(names)
         logger.info(
-            "[Kraken2] Classifying %d informative reads for bacterial content",
+            "[Kraken2] Classifying %d informative reads for non-human content",
             len(all_informative_names),
         )
         kraken2_result = _run_kraken2_on_reads(
@@ -4158,22 +4280,28 @@ def run_pipeline(args):
             kraken2_result.summary(),
             _format_elapsed(time.monotonic() - step_start),
         )
-        bacterial_read_names = kraken2_result.bacterial_read_names
         for var_key, ann in annotations.items():
             dku_names = informative_reads_by_variant.get(var_key, set())
             dka_names = informative_alt_reads_by_variant.get(var_key, set())
 
-            dku_bacterial = len(dku_names.intersection(bacterial_read_names))
-            dka_bacterial = len(dka_names.intersection(bacterial_read_names))
+            for label, read_set in (
+                ("bacterial", kraken2_result.bacterial_read_names),
+                ("archaeal", kraken2_result.archaeal_read_names),
+                ("fungal", kraken2_result.fungal_read_names),
+                ("protist", kraken2_result.protist_read_names),
+                ("nonhuman", kraken2_result.nonhuman_read_names),
+            ):
+                dku_count = len(dku_names.intersection(read_set))
+                dka_count = len(dka_names.intersection(read_set))
 
-            ann["dku_bacterial_fraction"] = (
-                round(dku_bacterial / len(dku_names), _BACTERIAL_FRACTION_PRECISION)
-                if dku_names else 0.0
-            )
-            ann["dka_bacterial_fraction"] = (
-                round(dka_bacterial / len(dka_names), _BACTERIAL_FRACTION_PRECISION)
-                if dka_names else 0.0
-            )
+                ann[f"dku_{label}_fraction"] = (
+                    round(dku_count / len(dku_names), _FRACTION_PRECISION)
+                    if dku_names else 0.0
+                )
+                ann[f"dka_{label}_fraction"] = (
+                    round(dka_count / len(dka_names), _FRACTION_PRECISION)
+                    if dka_names else 0.0
+                )
 
     # ── Step 5: Write outputs ──────────────────────────────────────
     step_start = time.monotonic()
@@ -4216,6 +4344,10 @@ def run_pipeline(args):
                 "classified": kraken2_result.classified,
                 "unclassified": kraken2_result.unclassified,
                 "bacterial_reads": kraken2_result.bacterial_count,
+                "archaeal_reads": kraken2_result.archaeal_count,
+                "fungal_reads": kraken2_result.fungal_count,
+                "protist_reads": kraken2_result.protist_count,
+                "nonhuman_reads": kraken2_result.nonhuman_count,
                 "human_reads": kraken2_result.human_count,
                 "root_reads": kraken2_result.root_count,
                 "bacterial_fraction": kraken2_result.bacterial_fraction,
