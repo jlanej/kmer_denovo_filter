@@ -244,11 +244,17 @@ class JellyfishKmerQuery:
         self.close()
 
 
-# ── Kraken2-backed bacterial content classification ────────────────
+# ── Kraken2-backed non-human content classification ────────────────
 
 
-# Standard NCBI taxonomy ID for the Bacteria domain
+# Standard NCBI taxonomy IDs for major clades
 _BACTERIA_TAXID = 2
+_ARCHAEA_TAXID = 2157
+_FUNGI_TAXID = 4751
+_EUKARYOTA_TAXID = 2759
+_METAZOA_TAXID = 33208
+_VIRIDIPLANTAE_TAXID = 33090
+_VIRUSES_TAXID = 10239
 _HUMAN_TAXID = 9606
 
 # Interval between Kraken2 memory heartbeat log messages (seconds)
@@ -274,13 +280,26 @@ def _read_proc_rss_kb(pid):
 
 
 class Kraken2Runner:
-    """Classify reads with kraken2 and tally bacterial content.
+    """Classify reads with kraken2 and tally non-human content.
 
     Wraps the ``kraken2`` binary in a subprocess-based interface
     analogous to :class:`JellyfishKmerQuery`.  Reads are written to a
     temporary FASTQ, classified, and the kraken2 per-read output is
     parsed to count how many reads are classified as bacterial
-    (``taxid 2`` or any descendant in the LCA hierarchy).
+    (``taxid 2``), archaeal (``taxid 2157``), fungal (``taxid 4751``),
+    protist (eukaryotic but not metazoan, fungal, or plant), viral
+    (``taxid 10239``), or non-human (any classified read definitively
+    outside the human lineage).  All non-human tallies apply a
+    conservative **human homology guard**: if a read's k-mer detail
+    string includes any k-mer that voted for human (taxid 9606), the
+    read is excluded from every non-human numerator.
+
+    Viral reads receive the same human homology guard as all other
+    non-human categories.  This is particularly important for viruses
+    that can integrate into the human genome (e.g. endogenous
+    retroviruses, HBV, HPV), whose integrated copies may share k-mers
+    with the human reference.  A read carrying both viral and human
+    k-mer evidence is conservatively excluded from the viral count.
 
     The ``--confidence`` threshold (default 0.0) controls how strict
     the LCA classification must be.  A value of 0.2 requires at least
@@ -290,8 +309,8 @@ class Kraken2Runner:
 
         kr = Kraken2Runner("/path/to/kraken2_db")
         result = kr.classify_sequences({"read1": "ACGT...", "read2": ...})
-        print(result.bacterial_reads)  # set of read names
-        print(result.summary())        # human-readable counts
+        print(result.bacterial_read_names)  # set of read names
+        print(result.summary())             # human-readable counts
     """
 
     class Result:
@@ -304,6 +323,24 @@ class Kraken2Runner:
             bacterial_read_names: Set of read names assigned to Bacteria
                 (taxid 2) or descendant taxa.
             bacterial_count: Number of bacterial reads.
+            archaeal_read_names: Set of read names assigned to Archaea
+                (taxid 2157) or descendant taxa.
+            archaeal_count: Number of archaeal reads.
+            fungal_read_names: Set of read names assigned to Fungi
+                (taxid 4751) or descendant taxa.
+            fungal_count: Number of fungal reads.
+            protist_read_names: Set of read names assigned to protist taxa
+                (eukaryotic but not metazoan, fungal, or plant).
+            protist_count: Number of protist reads.
+            viral_read_names: Set of read names assigned to Viruses
+                (taxid 10239) or descendant taxa.  Reads with any human
+                k-mer evidence are excluded (human homology guard), which
+                is particularly relevant for integrating viruses such as
+                endogenous retroviruses, HBV, and HPV.
+            viral_count: Number of viral reads (after human homology guard).
+            nonhuman_read_names: Set of read names definitively classified
+                as non-human (any clade outside the human lineage).
+            nonhuman_count: Number of non-human reads.
             human_count: Number of reads assigned to Homo sapiens (taxid 9606)
                 or descendants.
             root_count: Number of reads assigned to root (taxid 1) with no
@@ -316,6 +353,16 @@ class Kraken2Runner:
             self.unclassified = 0
             self.bacterial_read_names = set()
             self.bacterial_count = 0
+            self.archaeal_read_names = set()
+            self.archaeal_count = 0
+            self.fungal_read_names = set()
+            self.fungal_count = 0
+            self.protist_read_names = set()
+            self.protist_count = 0
+            self.viral_read_names = set()
+            self.viral_count = 0
+            self.nonhuman_read_names = set()
+            self.nonhuman_count = 0
             self.human_count = 0
             self.root_count = 0
 
@@ -326,10 +373,20 @@ class Kraken2Runner:
                 if self.total > 0
                 else "0.0"
             )
+            nh_pct = (
+                f"{100 * self.nonhuman_count / self.total:.1f}"
+                if self.total > 0
+                else "0.0"
+            )
             return (
                 f"kraken2: {self.total} reads, "
                 f"{self.classified} classified, "
                 f"{self.bacterial_count} bacterial ({pct}%), "
+                f"{self.archaeal_count} archaeal, "
+                f"{self.fungal_count} fungal, "
+                f"{self.protist_count} protist, "
+                f"{self.viral_count} viral, "
+                f"{self.nonhuman_count} non-human ({nh_pct}%), "
                 f"{self.human_count} human, "
                 f"{self.root_count} root"
             )
@@ -350,20 +407,16 @@ class Kraken2Runner:
     # ── taxonomy helpers ───────────────────────────────────────────
 
     @staticmethod
-    def _load_bacterial_taxids(db_path):
-        """Load the set of taxonomy IDs that descend from Bacteria.
+    def _load_parent_map(db_path):
+        """Parse ``nodes.dmp`` from *db_path* and return a parent map.
 
-        Parses ``taxonomy/nodes.dmp`` (or ``nodes.dmp`` at the database
-        root for pre-built archives like PrackenDB) within the kraken2
-        database directory.  Any taxid whose lineage passes through
-        taxid 2 (Bacteria) is included.
+        Tries ``taxonomy/nodes.dmp`` first, then ``nodes.dmp`` at the
+        database root (PrackenDB layout).
 
-        If neither location contains a readable ``nodes.dmp``, returns
-        ``None`` so that the caller can emit a warning and fall back to
-        direct-taxid-only matching.
+        Returns:
+            ``{child_taxid: parent_taxid}`` dict, or ``None`` if no
+            readable ``nodes.dmp`` is found.
         """
-        # Try the standard taxonomy/ subdirectory first, then fall back
-        # to a flat nodes.dmp in the database root (PrackenDB layout).
         nodes_path = os.path.join(db_path, "taxonomy", "nodes.dmp")
         if not os.path.isfile(nodes_path):
             nodes_path = os.path.join(db_path, "nodes.dmp")
@@ -382,39 +435,137 @@ class Kraken2Runner:
                     parent_map[child_id] = parent_id
         except (OSError, ValueError):
             return None
+        return parent_map
 
-        # Walk up from every node; cache membership
-        bacterial = set()
-        non_bacterial = set()
+    @staticmethod
+    def _descendants_of(parent_map, root_taxid):
+        """Return the set of taxids that descend from *root_taxid*.
 
-        def _is_bacterial(taxid):
-            if taxid in bacterial:
+        Walks the full taxonomy tree cached in *parent_map* (a
+        ``{child: parent}`` dict) and returns all taxids whose lineage
+        passes through *root_taxid* (inclusive).
+        """
+        members = set()
+        non_members = set()
+
+        def _is_member(taxid):
+            if taxid in members:
                 return True
-            if taxid in non_bacterial:
+            if taxid in non_members:
                 return False
             path = []
             cur = taxid
-            while cur not in bacterial and cur not in non_bacterial:
-                if cur == _BACTERIA_TAXID:
-                    bacterial.update(path)
-                    bacterial.add(cur)
+            while cur not in members and cur not in non_members:
+                if cur == root_taxid:
+                    members.update(path)
+                    members.add(cur)
                     return True
                 if cur == 1 or cur == 0 or cur not in parent_map:
-                    non_bacterial.update(path)
-                    non_bacterial.add(cur)
+                    non_members.update(path)
+                    non_members.add(cur)
                     return False
                 path.append(cur)
                 cur = parent_map[cur]
-            if cur in bacterial:
-                bacterial.update(path)
+            if cur in members:
+                members.update(path)
                 return True
-            non_bacterial.update(path)
+            non_members.update(path)
             return False
 
         for taxid in parent_map:
-            _is_bacterial(taxid)
+            _is_member(taxid)
+        return members
 
-        return bacterial
+    @staticmethod
+    def _ancestors_of(parent_map, taxid):
+        """Return the set of taxids on the lineage from *taxid* to root.
+
+        Walks upward through *parent_map* and collects every node
+        between *taxid* and root (inclusive).
+        """
+        ancestors = set()
+        cur = taxid
+        while cur in parent_map:
+            ancestors.add(cur)
+            parent = parent_map[cur]
+            if parent == cur:  # root
+                break
+            cur = parent
+        return ancestors
+
+    @staticmethod
+    def _load_bacterial_taxids(db_path):
+        """Load the set of taxonomy IDs that descend from Bacteria.
+
+        Parses ``taxonomy/nodes.dmp`` (or ``nodes.dmp`` at the database
+        root for pre-built archives like PrackenDB) within the kraken2
+        database directory.  Any taxid whose lineage passes through
+        taxid 2 (Bacteria) is included.
+
+        If neither location contains a readable ``nodes.dmp``, returns
+        ``None`` so that the caller can emit a warning and fall back to
+        direct-taxid-only matching.
+        """
+        parent_map = Kraken2Runner._load_parent_map(db_path)
+        if parent_map is None:
+            return None
+        return Kraken2Runner._descendants_of(parent_map, _BACTERIA_TAXID)
+
+    @staticmethod
+    def _load_all_taxid_sets(db_path):
+        """Load taxonomy and return descendant sets for all domains.
+
+        Returns a dict with keys ``bacterial``, ``archaeal``, ``fungal``,
+        ``protist``, ``viral``, ``human_lineage``, and ``human_clade``.
+        Each value is a set of NCBI taxonomy IDs.
+
+        ``protist`` is defined as eukaryotic taxa that are **not**
+        Metazoa, Fungi, or Viridiplantae.
+
+        ``viral`` contains all descendants of Viruses (taxid 10239).
+        Reads classified as viral are treated with particular care because
+        some viruses (e.g. endogenous retroviruses, HBV, HPV) can integrate
+        into the human genome. The human homology guard (checking for human
+        k-mer evidence in the per-read detail string) conservatively
+        excludes any read with both viral and human k-mer evidence from
+        the viral numerator.
+
+        ``human_lineage`` contains every taxid on the path from human
+        (9606) to root — these are taxonomic ranks too broad to be
+        confidently assigned as non-human.
+
+        ``human_clade`` contains human (9606) and any descendant
+        subspecies or populations.
+
+        Returns ``None`` when ``nodes.dmp`` is unavailable.
+        """
+        parent_map = Kraken2Runner._load_parent_map(db_path)
+        if parent_map is None:
+            return None
+
+        bacterial = Kraken2Runner._descendants_of(parent_map, _BACTERIA_TAXID)
+        archaeal = Kraken2Runner._descendants_of(parent_map, _ARCHAEA_TAXID)
+        fungal = Kraken2Runner._descendants_of(parent_map, _FUNGI_TAXID)
+        eukaryota = Kraken2Runner._descendants_of(parent_map, _EUKARYOTA_TAXID)
+        metazoa = Kraken2Runner._descendants_of(parent_map, _METAZOA_TAXID)
+        viridiplantae = Kraken2Runner._descendants_of(
+            parent_map, _VIRIDIPLANTAE_TAXID,
+        )
+        protist = eukaryota - metazoa - fungal - viridiplantae
+        viral = Kraken2Runner._descendants_of(parent_map, _VIRUSES_TAXID)
+
+        human_lineage = Kraken2Runner._ancestors_of(parent_map, _HUMAN_TAXID)
+        human_clade = Kraken2Runner._descendants_of(parent_map, _HUMAN_TAXID)
+
+        return {
+            "bacterial": bacterial,
+            "archaeal": archaeal,
+            "fungal": fungal,
+            "protist": protist,
+            "viral": viral,
+            "human_lineage": human_lineage,
+            "human_clade": human_clade,
+        }
 
     @staticmethod
     def _extract_taxids_from_kmer_string(kmer_string):
@@ -535,14 +686,14 @@ class Kraken2Runner:
                 result.total, elapsed,
             )
 
-            # Load bacterial taxid set for lineage-aware matching
-            bacterial_taxids = self._load_bacterial_taxids(self.db_path)
-            if bacterial_taxids is None:
+            # Load taxonomy sets for lineage-aware matching
+            taxid_sets = self._load_all_taxid_sets(self.db_path)
+            if taxid_sets is None:
                 logger.warning(
                     "Kraken2 taxonomy lineage matching is unavailable "
                     "(missing/unreadable taxonomy/nodes.dmp under DB: %s). "
-                    "Falling back to exact taxid==2 matching only; "
-                    "bacterial fractions may be severely undercounted.",
+                    "Falling back to exact taxid matching only; "
+                    "non-human fractions may be severely undercounted.",
                     self.db_path,
                 )
 
@@ -572,23 +723,70 @@ class Kraken2Runner:
 
                 result.classified += 1
 
-                # Check bacterial assignment
-                is_bacterial = False
-                if bacterial_taxids is not None:
-                    is_bacterial = taxid in bacterial_taxids
+                # Human homology guard: if any k-mer voted for human,
+                # conservatively exclude this read from ALL non-human
+                # numerators to avoid over-flagging human reads.
+                has_human_kmer = _HUMAN_TAXID in kmer_taxids
+
+                if taxid_sets is not None:
+                    is_bacterial = taxid in taxid_sets["bacterial"]
+                    is_archaeal = taxid in taxid_sets["archaeal"]
+                    is_fungal = taxid in taxid_sets["fungal"]
+                    is_protist = taxid in taxid_sets["protist"]
+                    is_viral = taxid in taxid_sets["viral"]
+                    is_human = taxid in taxid_sets["human_clade"]
+                    # Non-human: any taxid NOT on the human lineage and
+                    # NOT a human descendant.  Reads classified at broad
+                    # ranks that include human (e.g. Eukaryota, root)
+                    # are conservatively excluded.
+                    is_nonhuman = (
+                        taxid not in taxid_sets["human_lineage"]
+                        and taxid not in taxid_sets["human_clade"]
+                    )
                 else:
-                    # Fallback: only exact taxid 2
+                    # Fallback: only exact taxid matching
                     is_bacterial = taxid == _BACTERIA_TAXID
-                # Be conservative: when Kraken2 exposes explicit human
-                # k-mer evidence for a read, avoid flagging it as
-                # bacterial even if the assigned LCA is in Bacteria.
-                if is_bacterial and _HUMAN_TAXID in kmer_taxids:
+                    is_archaeal = taxid == _ARCHAEA_TAXID
+                    is_fungal = taxid == _FUNGI_TAXID
+                    is_protist = False  # cannot determine without tree
+                    is_viral = taxid == _VIRUSES_TAXID
+                    is_human = taxid == _HUMAN_TAXID
+                    is_nonhuman = taxid not in (_HUMAN_TAXID, 1)
+
+                # Apply human homology guard to all non-human categories.
+                # This is especially important for viral reads: viruses
+                # that integrate into the human genome (e.g. endogenous
+                # retroviruses, HBV, HPV) produce reads that carry both
+                # viral and human k-mers.  Excluding any read with human
+                # k-mer evidence from the viral count avoids over-flagging
+                # such integrated sequences as exogenous viral contamination.
+                if has_human_kmer:
                     is_bacterial = False
+                    is_archaeal = False
+                    is_fungal = False
+                    is_protist = False
+                    is_viral = False
+                    is_nonhuman = False
 
                 if is_bacterial:
                     result.bacterial_count += 1
                     result.bacterial_read_names.add(read_name)
-                elif taxid == _HUMAN_TAXID:
+                if is_archaeal:
+                    result.archaeal_count += 1
+                    result.archaeal_read_names.add(read_name)
+                if is_fungal:
+                    result.fungal_count += 1
+                    result.fungal_read_names.add(read_name)
+                if is_protist:
+                    result.protist_count += 1
+                    result.protist_read_names.add(read_name)
+                if is_viral:
+                    result.viral_count += 1
+                    result.viral_read_names.add(read_name)
+                if is_nonhuman:
+                    result.nonhuman_count += 1
+                    result.nonhuman_read_names.add(read_name)
+                if is_human:
                     result.human_count += 1
                 elif taxid == 1:
                     result.root_count += 1

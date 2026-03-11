@@ -83,7 +83,7 @@ The tool supports two modes:
 * Python ≥ 3.9
 * [samtools](https://www.htslib.org/) on `PATH` [1]
 * [Jellyfish ≥ 2](https://github.com/gmarcais/Jellyfish) on `PATH` [2]
-* Optional for VCF-mode bacterial-fraction annotations:
+* Optional for VCF-mode non-human fraction annotations:
   * [Kraken2](https://github.com/DerrickWood/kraken2) on `PATH` [3]
   * A Kraken2 database — the helper script downloads the pre-built
     [PrackenDB](https://ccb.jhu.edu/software/kraken2/index.shtml?t=downloads)
@@ -194,7 +194,7 @@ kmer-denovo \
 | `--threads` / `-t` | 4 | Number of threads for Jellyfish and parallel anchoring workers |
 | `--memory` | auto | Available memory in GB. On HPC (e.g. SLURM), set this to the allocated memory so worker counts and hash sizes are tuned correctly. When omitted, auto-detected from the system |
 | `--debug-kmers` | false | Enable per-variant debug output |
-| `--kraken2-db` | – | Optional Kraken2 database path. In VCF mode, enables DKU_BF/DKA_BF bacterial-fraction annotations. Ignored in discovery mode. **Memory note:** the standard Kraken2 DB typically needs ~50–100 GB RAM to load/classify; provision memory accordingly to avoid OOM |
+| `--kraken2-db` | – | Optional Kraken2 database path. In VCF mode, enables non-human fraction annotations (DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF, DKU_VF/DKA_VF, DKU_NHF/DKA_NHF). Ignored in discovery mode. **Memory note:** the standard Kraken2 DB typically needs ~50–100 GB RAM to load/classify; provision memory accordingly to avoid OOM |
 | `--kraken2-confidence` | 0.0 | Kraken2 LCA confidence threshold (0.0–1.0) |
 | `--kraken2-memory-mapping` | false | Passes Kraken2 `--memory-mapping` so DB files are memory-mapped from disk to reduce RAM footprint (usually slower, but helpful on RAM-constrained nodes) |
 | **VCF mode** | | |
@@ -246,12 +246,26 @@ and annotated with the following fields:
 * **MAX_PKC_ALT** / **AVG_PKC_ALT** / **MIN_PKC_ALT** – Same as above but
   restricted to k-mers from reads that directly support the alternate allele.
 * **DKU_BF** / **DKA_BF** *(optional; when `--kraken2-db` is provided in VCF mode)* –
-  Fraction of DKU/DKA fragments classified as bacterial by kraken2. Since
-  DKU, DKA, and the BF denominators all count unique fragment names, the
-  fractions are always in [0.0, 1.0]. To reduce over-flagging from shared
+  Fraction of DKU/DKA fragments classified as bacterial by Kraken2.
+* **DKU_AF** / **DKA_AF** – Fraction classified as archaeal.
+* **DKU_FF** / **DKA_FF** – Fraction classified as fungal.
+* **DKU_PF** / **DKA_PF** – Fraction classified as protist
+  (eukaryotic but not metazoan, fungal, or plant).
+* **DKU_VF** / **DKA_VF** – Fraction classified as viral (RefSeq viral
+  genomes are included in PrackenDB). Reads with any human k-mer evidence
+  are conservatively excluded — this specifically handles viruses that can
+  integrate into the human genome (e.g. endogenous retroviruses, HBV, HPV),
+  ensuring integrated viral sequences are not counted as exogenous contamination.
+* **DKU_NHF** / **DKA_NHF** – Consolidated non-human fraction: any read
+  definitively classified outside the human lineage.
+
+  Since DKU, DKA, and the fraction denominators all count unique fragment names,
+  every fraction is always in [0.0, 1.0]. To reduce over-flagging from shared
   human homology, reads with explicit human taxid k-mer evidence in Kraken2's
-  per-read output are conservatively excluded from the bacterial numerator.
-  See [Kraken2 Bacterial and Non-Human Content Detection](docs/kraken2_bacterial_detection.md)
+  per-read output are conservatively excluded from **all** non-human numerators.
+  Reads classified at ambiguous taxonomic ranks that include human (e.g.
+  Eukaryota, Metazoa, root) are also excluded from the non-human fraction.
+  See [Kraken2 Non-Human Content Detection](docs/kraken2_bacterial_detection.md)
   for a detailed description of the classification method.
 
 When `--proband-id` is provided and matches a sample in the input VCF,
@@ -280,14 +294,16 @@ Kraken2 database (NCBI reference assemblies — one genome per species):
 ./scripts/download_kraken2_db.sh --db /path/to/kraken2_db
 ```
 
-PrackenDB contains all NCBI reference assemblies of bacteria, archaea,
-protists, and fungi (as of October 2025), plus the human genome, RefSeq
-viral genomes, and UniVec Core.  Because it keeps a single reference
-genome per species it is well suited for methods that count k-mers per
-species.
+PrackenDB contains all NCBI reference assemblies (GenBank and RefSeq)
+of bacteria, archaea, protists, and fungi as of October 7, 2025, plus
+the human genome, RefSeq viral genomes, and UniVec Core.  A key
+difference from other Kraken2 databases is that PrackenDB has only a
+single reference genome per species (with a couple of exceptions such
+as normal and pathogenic *E. coli*), which is useful for methods that
+count k-mers per species.
 
 This helper validates that required Kraken2 DB files are present, including
-`taxonomy/nodes.dmp` used for lineage-aware bacterial classification.
+`taxonomy/nodes.dmp` used for lineage-aware non-human classification.
 
 The script requires only `wget` — it downloads and extracts a pre-built
 database archive and does not need `k2` or `kraken2-build`.
@@ -484,9 +500,10 @@ provenance is self-documenting.
 * **Fragment-based counting** – DKU, DKT, and DKA all count unique
   fragment names (read names). When both mates of a paired-end read span
   the variant, they share a read name and are counted as one fragment.
-  The bacterial-fraction metrics (DKU_BF, DKA_BF) use the same
+  The non-human fraction metrics (DKU_BF, DKA_BF, DKU_AF, DKA_AF,
+  DKU_FF, DKA_FF, DKU_PF, DKA_PF, DKU_NHF, DKA_NHF) use the same
   fragment-based denominator, so all counts and fractions are consistent
-  and DKU_BF / DKA_BF are always in [0.0, 1.0].
+  and all fraction values are always in [0.0, 1.0].
 
 * **PKC is a combined parental count** – MAX_PKC, AVG_PKC, and MIN_PKC
   represent the **sum** of mother and father k-mer counts for each

@@ -204,7 +204,7 @@ class TestPipelineIntegration:
         bam_info.close()
 
     def test_vcf_kraken2_bacterial_fraction_annotations(self, tmpdir, monkeypatch):
-        """VCF mode writes DKU_BF and DKA_BF when kraken2 is enabled."""
+        """VCF mode writes DKU_BF/DKA_BF and all non-human fraction fields."""
         chrom = "chr1"
         ref_fa = os.path.join(tmpdir, "ref.fa")
         ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
@@ -241,6 +241,8 @@ class TestPipelineIntegration:
             result.classified = 1
             result.bacterial_count = 1
             result.bacterial_read_names.add("read1")
+            result.nonhuman_count = 1
+            result.nonhuman_read_names.add("read1")
             return result
 
         monkeypatch.setattr(pipeline_mod, "_check_tool", _mock_check_tool)
@@ -264,10 +266,31 @@ class TestPipelineIntegration:
         with pysam.VariantFile(out_vcf) as vcf_out:
             rec = next(iter(vcf_out))
             sample = rec.samples["HG002"]
+            # Bacterial fraction
             assert "DKU_BF" in sample
             assert "DKA_BF" in sample
             assert sample["DKU_BF"] == pytest.approx(1.0)
             assert sample["DKA_BF"] == pytest.approx(1.0)
+            # Archaeal fraction (0 — no archaeal reads)
+            assert "DKU_AF" in sample
+            assert "DKA_AF" in sample
+            assert sample["DKU_AF"] == pytest.approx(0.0)
+            # Fungal fraction (0)
+            assert "DKU_FF" in sample
+            assert "DKA_FF" in sample
+            # Protist fraction (0)
+            assert "DKU_PF" in sample
+            assert "DKA_PF" in sample
+            # Viral fraction (0)
+            assert "DKU_VF" in sample
+            assert "DKA_VF" in sample
+            assert sample["DKU_VF"] == pytest.approx(0.0)
+            assert sample["DKA_VF"] == pytest.approx(0.0)
+            # Non-human fraction (1.0 — same as bacterial here)
+            assert "DKU_NHF" in sample
+            assert "DKA_NHF" in sample
+            assert sample["DKU_NHF"] == pytest.approx(1.0)
+            assert sample["DKA_NHF"] == pytest.approx(1.0)
 
     def test_kraken2_read_extraction_uses_variant_locus(self, tmpdir, monkeypatch):
         """Kraken2 read extraction uses locus-targeted fetches when available."""
