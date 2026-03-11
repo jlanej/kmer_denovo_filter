@@ -1,25 +1,28 @@
-# Kraken2 Bacterial and Non-Human Content Detection
+# Kraken2 Non-Human Content Detection
 
 This document describes how `kmer-denovo` uses [Kraken2](https://github.com/DerrickWood/kraken2)
-to detect bacterial and non-human content in the child's sequencing reads, and
-why Kraken2's k-mer–based classification approach is well suited to that goal.
+to detect non-human content — bacteria, archaea, fungi, protists, and other
+non-human organisms — in the child's sequencing reads, and why Kraken2's
+k-mer–based classification approach is well suited to that goal.
 
 ---
 
-## Why Bacterial Content Detection Matters
+## Why Non-Human Content Detection Matters
 
 `kmer-denovo` identifies *de novo* variants by looking for k-mers present in a
-child but absent from both parents. When the child's sample contains bacterial
-contamination, sequencing reads from bacteria can carry k-mers that are truly
-absent from parental genomes — not because a *de novo* mutation occurred, but
-simply because the bacterial sequence has no counterpart in the human reference
-or in the parents. Without a contamination check, these reads would be
-indistinguishable from genuine *de novo* signals.
+child but absent from both parents. When the child's sample contains non-human
+contamination (bacterial, archaeal, fungal, protist, or other), sequencing
+reads from these organisms can carry k-mers that are truly absent from parental
+genomes — not because a *de novo* mutation occurred, but simply because the
+non-human sequence has no counterpart in the human reference or in the parents.
+Without a contamination check, these reads would be indistinguishable from
+genuine *de novo* signals.
 
-Reads flagged as bacterial can be used to compute **DKU_BF** and **DKA_BF**
-(bacterial-fraction annotations), which indicate what proportion of the
-informative reads supporting a candidate variant appear to derive from a
-bacterial organism rather than from the human child genome. A high bacterial
+Reads flagged as non-human can be used to compute per-domain fraction
+annotations (e.g. **DKU_BF**, **DKU_AF**, **DKU_FF**, **DKU_PF**) and a
+consolidated **DKU_NHF** (non-human fraction), which indicate what proportion
+of the informative reads supporting a candidate variant appear to derive from
+a non-human organism rather than from the human child genome. A high non-human
 fraction is a strong indicator of a false-positive *de novo* call.
 
 ---
@@ -69,18 +72,20 @@ Kraken2 uses a **k-mer–based taxonomic classification** algorithm
 `kmer-denovo` downloads **PrackenDB** — a curated, pre-built Kraken2 database
 published by the Kraken2 project
 ([CCB JHU downloads](https://ccb.jhu.edu/software/kraken2/index.shtml?t=downloads)).
-PrackenDB contains exactly one NCBI reference genome per species, covering:
 
-- All NCBI reference assemblies: bacteria, archaea, protists, fungi
-- The human genome (GRCh38)
-- RefSeq viral genomes
-- UniVec Core (sequencing adapter / vector contamination sequences)
+As of January 2026, PrackenDB contains all NCBI reference assemblies (GenBank
+and RefSeq) of bacteria, archaea, protists, and fungi as of October 7, 2025.
+It also includes the human genome, RefSeq viral genomes, and UniVec Core. A
+key difference from other Kraken2 databases is that PrackenDB has only a single
+reference genome per species (with a couple of exceptions such as normal and
+pathogenic *E. coli*), which is useful for methods that count k-mers per
+species.
 
 **Why one genome per species matters**: Because each species contributes exactly
-one reference, a k-mer that appears in multiple bacterial species is LCA-elevated
-to a genus or family node — not to an unrelated non-bacterial lineage. This
-preserves the specificity of bacterial classification while avoiding inflation
-from redundant genomes. It also makes k-mer counting per species unambiguous.
+one reference, a k-mer that appears in multiple species is LCA-elevated to a
+genus or family node — not to an unrelated lineage. This preserves the
+specificity of classification while avoiding inflation from redundant genomes.
+It also makes k-mer counting per species unambiguous.
 
 ---
 
@@ -97,91 +102,156 @@ are the reads that support candidate *de novo* variants.
 Only informative reads are passed to Kraken2 (not the entire BAM). The pipeline
 extracts their sequences from the child BAM/CRAM and writes a temporary FASTQ.
 This is substantially more efficient than classifying all reads, and ensures
-the bacterial-fraction annotations are computed on exactly the reads contributing
-to each variant's evidence.
+the fraction annotations are computed on exactly the reads contributing to each
+variant's evidence.
 
 ```python
 kr = Kraken2Runner(kraken2_db, confidence=confidence, threads=threads)
 result = kr.classify_sequences(sequences, tmpdir=tmpdir)
 ```
 
-### Step 3 — Lineage-aware bacterial classification
+### Step 3 — Lineage-aware multi-domain classification
 
-Kraken2 assigns each read a single taxid. A read is counted as **bacterial** if
-that taxid falls anywhere within the Bacteria domain (NCBI taxid 2). This is
-determined by traversing the NCBI taxonomy tree loaded from
-`taxonomy/nodes.dmp` in the database directory:
+Kraken2 assigns each read a single taxid. The pipeline classifies each read
+into one or more biological domains by traversing the NCBI taxonomy tree loaded
+from `taxonomy/nodes.dmp` (or `nodes.dmp` at the database root for PrackenDB)
+in the database directory.
+
+The following domain-specific taxid sets are computed:
+
+| Domain | Root taxid | Description |
+|--------|-----------|-------------|
+| **Bacteria** | 2 | All descendants of the Bacteria domain |
+| **Archaea** | 2157 | All descendants of the Archaea domain |
+| **Fungi** | 4751 | All descendants of the Fungi kingdom |
+| **Protist** | (computed) | Eukaryota (2759) descendants **minus** Metazoa (33208), Fungi (4751), and Viridiplantae (33090) descendants |
 
 ```python
-bacterial_taxids = Kraken2Runner._load_bacterial_taxids(db_path)
-# bacterial_taxids is the set of ALL taxids that descend from taxid 2
-is_bacterial = taxid in bacterial_taxids
+taxid_sets = Kraken2Runner._load_all_taxid_sets(db_path)
+# taxid_sets["bacterial"] = set of ALL taxids descending from taxid 2
+# taxid_sets["archaeal"]  = set of ALL taxids descending from taxid 2157
+# taxid_sets["fungal"]    = set of ALL taxids descending from taxid 4751
+# taxid_sets["protist"]   = eukaryota - metazoa - fungi - viridiplantae
 ```
 
 This lineage-aware check correctly classifies reads assigned to a specific
-bacterial genus, family, or order — not just reads whose LCA happens to be the
-root Bacteria node (taxid 2). Without this tree traversal, reads assigned to
-*Escherichia coli* (taxid 562) or *Staphylococcus aureus* (taxid 1280) would
-be missed, because those taxids are not equal to 2.
+genus, family, or order — not just reads whose LCA happens to be the domain
+root. Without this tree traversal, reads assigned to *Escherichia coli*
+(taxid 562) or *Staphylococcus aureus* (taxid 1280) would be missed because
+those taxids are not equal to 2.
 
 If `taxonomy/nodes.dmp` is missing or unreadable, `Kraken2Runner` logs a
-warning and falls back to exact taxid==2 matching only. This is a less sensitive
-fallback: reads assigned to specific bacterial species below the root Bacteria
-node will be missed. The download script warns when `nodes.dmp` is absent after
-extraction; PrackenDB does include this file.
+warning and falls back to exact taxid matching only (taxid == 2 for bacteria,
+taxid == 2157 for archaea, etc.). This is a less sensitive fallback: reads
+assigned to specific species below the domain root will be missed. The download
+script warns when `nodes.dmp` is absent after extraction; PrackenDB does
+include this file.
 
 ### Step 4 — Human homology guard
 
-Some bacterial k-mers share sequence with the human genome (e.g. highly
+Some non-human k-mers share sequence with the human genome (e.g. highly
 conserved ribosomal sequences, mobile genetic elements, or horizontal gene
 transfer events). A read that contains such shared k-mers could be assigned a
-bacterial LCA by Kraken2 even though it actually originated from human DNA.
+non-human LCA by Kraken2 even though it actually originated from human DNA.
 
-To reduce false flagging, `kmer-denovo` applies a **human homology guard**:
+To reduce false flagging, `kmer-denovo` applies a **human homology guard** to
+**all** non-human categories (bacterial, archaeal, fungal, protist, and
+consolidated non-human):
 
 ```python
 # kmer_taxids = taxids voting in the per-read kmer_detail_string
-if is_bacterial and _HUMAN_TAXID in kmer_taxids:
+has_human_kmer = _HUMAN_TAXID in kmer_taxids
+
+# Applied to EVERY non-human category:
+if has_human_kmer:
     is_bacterial = False
+    is_archaeal = False
+    is_fungal = False
+    is_protist = False
+    is_nonhuman = False
 ```
 
 If Kraken2's per-read k-mer detail string includes any k-mer that voted for
-human (taxid 9606), the read is conservatively excluded from the bacterial
-numerator. This means:
+human (taxid 9606), the read is conservatively excluded from **every**
+non-human numerator. This means:
 
 - A read assigned to *Bacteria* LCA but with some human k-mer evidence →
-  **not counted as bacterial**
+  **not counted as bacterial or non-human**
+- A read assigned to *Archaea* LCA with some human k-mer evidence →
+  **not counted as archaeal or non-human**
 - A read assigned to *Bacteria* LCA with no human k-mer evidence →
-  **counted as bacterial**
+  **counted as bacterial and non-human**
 
-This is deliberately conservative: it may slightly undercount bacterial reads
+This is deliberately conservative: it may slightly undercount non-human reads
 that happen to contain a human-matching k-mer, but it avoids over-flagging
-human reads with bacterial-like k-mers as contamination.
+human reads with non-human-like k-mers as contamination.
+
+### Step 5 — Conservative non-human fraction (NHF)
+
+In addition to domain-specific fractions, the pipeline computes a consolidated
+**non-human fraction** (DKU_NHF / DKA_NHF). A read is counted as "non-human"
+only if:
+
+1. It is classified (not unclassified)
+2. Its assigned taxid is **not** on the human lineage (the path from
+   taxid 9606 up to root) — this excludes ambiguous ranks like Eukaryota
+   (2759), Metazoa (33208), or root (1) where the read could plausibly
+   be human
+3. Its assigned taxid is **not** a descendant of human (9606) — this
+   excludes human subspecies and populations
+4. It has **no human k-mer evidence** in the k-mer detail string (the
+   human homology guard)
+
+This conservative definition means:
+
+- A read classified as *E. coli* (562) with no human k-mers → **counted as non-human** ✓
+- A read classified as *Bacteria* (2) with no human k-mers → **counted as non-human** ✓
+- A read classified as *Eukaryota* (2759) → **not counted as non-human** (ambiguous ancestor of human)
+- A read classified as *Metazoa* (33208) → **not counted as non-human** (ancestor of human)
+- A read classified as *Drosophila melanogaster* (7227) → **counted as non-human** ✓ (not in human lineage)
+- A read classified as *Homo sapiens* (9606) → **not counted as non-human**
 
 ---
 
 ## Output Annotations
 
-The bacterial classification results are added to the output VCF as two
-per-variant fields:
+The classification results are added to the output VCF as per-variant fields:
+
+### Domain-specific fractions
 
 | Field | Description |
 |-------|-------------|
-| **DKU_BF** | Fraction of DKU fragments classified as bacterial by Kraken2. Denominator = DKU (both are fragment-based, i.e. unique read names). Always in [0.0, 1.0]. |
-| **DKA_BF** | Fraction of DKA fragments (DKU fragments that also directly support the alternate allele) classified as bacterial. DKA fragments are always a subset of DKU. Always in [0.0, 1.0]. |
+| **DKU_BF** | Fraction of DKU fragments classified as **bacterial** by Kraken2. Denominator = DKU (both are fragment-based, i.e. unique read names). Always in [0.0, 1.0]. |
+| **DKA_BF** | Fraction of DKA fragments (DKU fragments that also directly support the alternate allele) classified as **bacterial**. DKA fragments are always a subset of DKU. Always in [0.0, 1.0]. |
+| **DKU_AF** | Fraction of DKU fragments classified as **archaeal** by Kraken2. |
+| **DKA_AF** | Fraction of DKA fragments classified as **archaeal**. |
+| **DKU_FF** | Fraction of DKU fragments classified as **fungal** by Kraken2. |
+| **DKA_FF** | Fraction of DKA fragments classified as **fungal**. |
+| **DKU_PF** | Fraction of DKU fragments classified as **protist** by Kraken2. |
+| **DKA_PF** | Fraction of DKA fragments classified as **protist**. |
+
+### Consolidated non-human fraction
+
+| Field | Description |
+|-------|-------------|
+| **DKU_NHF** | Fraction of DKU fragments classified as **non-human** by Kraken2 (consolidated across all non-human domains). |
+| **DKA_NHF** | Fraction of DKA fragments classified as **non-human**. |
 
 These are per-variant fractions: each fraction is computed from the intersection
-of that variant's informative reads with the global set of bacterial read names
-returned by Kraken2.
+of that variant's informative reads with the global set of domain-specific or
+non-human read names returned by Kraken2.
 
 **Interpretation**:
 
-- `DKU_BF` close to `1.0` — essentially all evidence for this variant comes
-  from reads classified as bacterial; strong indicator of contamination artifact
-- `DKA_BF` close to `1.0` — reads that directly support the alternate allele
-  sequence are predominantly bacterial; high-confidence contamination flag
-- `DKU_BF` and `DKA_BF` both near `0.0` — no detectable bacterial content
-  among the supporting reads; the candidate variant is more likely genuine
+- `DKU_NHF` close to `1.0` — essentially all evidence for this variant comes
+  from reads classified as non-human; strong indicator of contamination artifact
+- `DKU_BF` close to `1.0` — specifically bacterial contamination
+- `DKA_NHF` close to `1.0` — reads that directly support the alternate allele
+  sequence are predominantly non-human; high-confidence contamination flag
+- All fractions near `0.0` — no detectable non-human content among the
+  supporting reads; the candidate variant is more likely genuine
+- `DKU_NHF` ≥ `DKU_BF` — the non-human fraction is always at least as large as
+  any individual domain fraction, since it consolidates all non-human categories
 
 ---
 
@@ -189,8 +259,8 @@ returned by Kraken2.
 
 | Property | Benefit |
 |----------|---------|
-| **K-mer–based, alignment-free** | No need to align reads to a bacterial reference; classification runs in seconds even for thousands of reads |
-| **Taxonomic LCA over the full tree** | Correctly identifies reads from any bacterium, not just species explicitly in the database — a read from an unknown strain will be classified at the correct genus or family |
+| **K-mer–based, alignment-free** | No need to align reads to a non-human reference; classification runs in seconds even for thousands of reads |
+| **Taxonomic LCA over the full tree** | Correctly identifies reads from any bacterium, archaeon, fungus, or protist — not just species explicitly in the database — a read from an unknown strain will be classified at the correct genus or family |
 | **Per-read k-mer detail output** | Enables the human homology guard: per-read k-mer votes reveal when a classified read also matches human sequence |
 | **PrackenDB coverage** | One genome per species across all NCBI reference bacteria, archaea, protists, fungi, human, and viruses — captures a broad contamination landscape |
 | **Confidence threshold** | `--kraken2-confidence` allows tuning sensitivity vs. specificity without rerunning the database build |
@@ -202,7 +272,7 @@ returned by Kraken2.
 
 | CLI argument | Default | Effect |
 |---|---|---|
-| `--kraken2-db` | *(disabled)* | Path to the Kraken2 database directory; enables DKU_BF/DKA_BF annotations in VCF mode |
+| `--kraken2-db` | *(disabled)* | Path to the Kraken2 database directory; enables non-human fraction annotations (DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF, DKU_NHF/DKA_NHF) in VCF mode |
 | `--kraken2-confidence` | `0.0` | LCA confidence threshold (0.0–1.0); higher values reduce sensitivity, increase specificity |
 
 See [Kraken2 Database Setup Helper](../README.md#kraken2-database-setup-helper)
