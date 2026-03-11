@@ -302,6 +302,14 @@ single reference genome per species (with a couple of exceptions such
 as normal and pathogenic *E. coli*), which is useful for methods that
 count k-mers per species.
 
+> **Kraken2 k-mer size:** Kraken2 uses a k-mer length that is baked into
+> the database at build time and stored in the database's `opts.k2d` file.
+> The PrackenDB pre-built database uses Kraken2's default **k = 35**
+> (35-mers).  This is distinct from the Jellyfish k-mer size (`--kmer-size`,
+> default 31) used for de-novo variant k-mer counting.  The pipeline reads
+> the database k-mer length from `opts.k2d` at startup and logs it as
+> `[Kraken2] database k-mer length: 35`.
+
 This helper validates that required Kraken2 DB files are present, including
 `taxonomy/nodes.dmp` used for lineage-aware non-human classification.
 

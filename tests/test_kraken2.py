@@ -1,6 +1,7 @@
 """Tests for Kraken2Runner non-human content classification."""
 
 import os
+import struct
 import subprocess
 import tempfile
 from unittest import mock
@@ -105,6 +106,49 @@ class TestKraken2RunnerInit:
         assert kr.confidence == 0.2
         assert kr.threads == 8
         assert kr.memory_mapping is True
+
+
+class TestReadKmerLength:
+    """Tests for Kraken2Runner.read_kmer_length()."""
+
+    def test_reads_kmer_length_from_opts_k2d(self, tmp_path):
+        db_dir = tmp_path / "mydb"
+        db_dir.mkdir()
+        # Write a minimal opts.k2d: first 8 bytes = k (uint64_t LE)
+        k = 35
+        (db_dir / "opts.k2d").write_bytes(struct.pack("<Q", k) + b"\x00" * 56)
+        assert Kraken2Runner.read_kmer_length(str(db_dir)) == 35
+
+    def test_reads_kmer_length_from_versioned_subdir(self, tmp_path):
+        db_dir = tmp_path / "prackendb"
+        db_dir.mkdir()
+        sub_dir = db_dir / "k2_NCBI_reference_20251007"
+        sub_dir.mkdir()
+        k = 35
+        (sub_dir / "opts.k2d").write_bytes(struct.pack("<Q", k) + b"\x00" * 56)
+        assert Kraken2Runner.read_kmer_length(str(db_dir)) == 35
+
+    def test_returns_none_when_opts_k2d_missing(self, tmp_path):
+        db_dir = tmp_path / "emptydb"
+        db_dir.mkdir()
+        assert Kraken2Runner.read_kmer_length(str(db_dir)) is None
+
+    def test_returns_none_for_nonexistent_path(self, tmp_path):
+        assert Kraken2Runner.read_kmer_length(str(tmp_path / "no_such_dir")) is None
+
+    def test_ignores_implausible_kmer_length(self, tmp_path):
+        db_dir = tmp_path / "baddb"
+        db_dir.mkdir()
+        # Value 0 is out of the 1–256 sanity range
+        (db_dir / "opts.k2d").write_bytes(struct.pack("<Q", 0) + b"\x00" * 56)
+        assert Kraken2Runner.read_kmer_length(str(db_dir)) is None
+
+    def test_returns_none_for_truncated_opts_k2d(self, tmp_path):
+        db_dir = tmp_path / "truncdb"
+        db_dir.mkdir()
+        # Only 4 bytes — too short to parse a uint64_t
+        (db_dir / "opts.k2d").write_bytes(b"\x23\x00\x00\x00")
+        assert Kraken2Runner.read_kmer_length(str(db_dir)) is None
 
 
 class TestKraken2RunnerClassify:
