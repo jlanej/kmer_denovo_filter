@@ -52,7 +52,7 @@ def mini_kraken2_db(tmp_path_factory):
     The database is created once per test session and shared across all
     integration tests.  It uses a minimal taxonomy (root → Bacteria →
     E. coli, root → Eukaryota → Homo sapiens) and two short reference
-    sequences (2 000 bp each).
+    sequences (2000 bp each).
     """
     db = str(tmp_path_factory.mktemp("mini_kraken2_db"))
 
@@ -139,7 +139,7 @@ def mini_kraken2_db(tmp_path_factory):
                 f"{taxid}\t|\t{name}\t|\t\t|\tscientific name\t|\n"
             )
 
-    # ── Reference sequences (2 000 bp each) ──────────────────────
+    # ── Reference sequences (2000 bp each) ──────────────────────
     ecoli_seq = _gen_seq(2000, seed_val=_ECOLI_TAXID)
     human_seq = _gen_seq(2000, seed_val=_HUMAN_TAXID)
 
