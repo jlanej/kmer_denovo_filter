@@ -281,6 +281,11 @@ class TestPipelineIntegration:
             # Protist fraction (0)
             assert "DKU_PF" in sample
             assert "DKA_PF" in sample
+            # Viral fraction (0)
+            assert "DKU_VF" in sample
+            assert "DKA_VF" in sample
+            assert sample["DKU_VF"] == pytest.approx(0.0)
+            assert sample["DKA_VF"] == pytest.approx(0.0)
             # Non-human fraction (1.0 — same as bacterial here)
             assert "DKU_NHF" in sample
             assert "DKA_NHF" in sample

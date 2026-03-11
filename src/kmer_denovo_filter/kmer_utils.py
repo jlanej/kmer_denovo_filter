@@ -254,6 +254,7 @@ _FUNGI_TAXID = 4751
 _EUKARYOTA_TAXID = 2759
 _METAZOA_TAXID = 33208
 _VIRIDIPLANTAE_TAXID = 33090
+_VIRUSES_TAXID = 10239
 _HUMAN_TAXID = 9606
 
 # Interval between Kraken2 memory heartbeat log messages (seconds)
@@ -286,12 +287,19 @@ class Kraken2Runner:
     temporary FASTQ, classified, and the kraken2 per-read output is
     parsed to count how many reads are classified as bacterial
     (``taxid 2``), archaeal (``taxid 2157``), fungal (``taxid 4751``),
-    protist (eukaryotic but not metazoan, fungal, or plant), or
-    non-human (any classified read definitively outside the human
-    lineage).  All non-human tallies apply a conservative **human
-    homology guard**: if a read's k-mer detail string includes any
-    k-mer that voted for human (taxid 9606), the read is excluded
-    from every non-human numerator.
+    protist (eukaryotic but not metazoan, fungal, or plant), viral
+    (``taxid 10239``), or non-human (any classified read definitively
+    outside the human lineage).  All non-human tallies apply a
+    conservative **human homology guard**: if a read's k-mer detail
+    string includes any k-mer that voted for human (taxid 9606), the
+    read is excluded from every non-human numerator.
+
+    Viral reads receive the same human homology guard as all other
+    non-human categories.  This is particularly important for viruses
+    that can integrate into the human genome (e.g. endogenous
+    retroviruses, HBV, HPV), whose integrated copies may share k-mers
+    with the human reference.  A read carrying both viral and human
+    k-mer evidence is conservatively excluded from the viral count.
 
     The ``--confidence`` threshold (default 0.0) controls how strict
     the LCA classification must be.  A value of 0.2 requires at least
@@ -324,6 +332,12 @@ class Kraken2Runner:
             protist_read_names: Set of read names assigned to protist taxa
                 (eukaryotic but not metazoan, fungal, or plant).
             protist_count: Number of protist reads.
+            viral_read_names: Set of read names assigned to Viruses
+                (taxid 10239) or descendant taxa.  Reads with any human
+                k-mer evidence are excluded (human homology guard), which
+                is particularly relevant for integrating viruses such as
+                endogenous retroviruses, HBV, and HPV.
+            viral_count: Number of viral reads (after human homology guard).
             nonhuman_read_names: Set of read names definitively classified
                 as non-human (any clade outside the human lineage).
             nonhuman_count: Number of non-human reads.
@@ -345,6 +359,8 @@ class Kraken2Runner:
             self.fungal_count = 0
             self.protist_read_names = set()
             self.protist_count = 0
+            self.viral_read_names = set()
+            self.viral_count = 0
             self.nonhuman_read_names = set()
             self.nonhuman_count = 0
             self.human_count = 0
@@ -369,6 +385,7 @@ class Kraken2Runner:
                 f"{self.archaeal_count} archaeal, "
                 f"{self.fungal_count} fungal, "
                 f"{self.protist_count} protist, "
+                f"{self.viral_count} viral, "
                 f"{self.nonhuman_count} non-human ({nh_pct}%), "
                 f"{self.human_count} human, "
                 f"{self.root_count} root"
@@ -499,11 +516,19 @@ class Kraken2Runner:
         """Load taxonomy and return descendant sets for all domains.
 
         Returns a dict with keys ``bacterial``, ``archaeal``, ``fungal``,
-        ``protist``, ``human_lineage``, and ``human_clade``.  Each value
-        is a set of NCBI taxonomy IDs.
+        ``protist``, ``viral``, ``human_lineage``, and ``human_clade``.
+        Each value is a set of NCBI taxonomy IDs.
 
         ``protist`` is defined as eukaryotic taxa that are **not**
         Metazoa, Fungi, or Viridiplantae.
+
+        ``viral`` contains all descendants of Viruses (taxid 10239).
+        Reads classified as viral are treated with particular care because
+        some viruses (e.g. endogenous retroviruses, HBV, HPV) can integrate
+        into the human genome. The human homology guard (checking for human
+        k-mer evidence in the per-read detail string) conservatively
+        excludes any read with both viral and human k-mer evidence from
+        the viral numerator.
 
         ``human_lineage`` contains every taxid on the path from human
         (9606) to root — these are taxonomic ranks too broad to be
@@ -527,6 +552,7 @@ class Kraken2Runner:
             parent_map, _VIRIDIPLANTAE_TAXID,
         )
         protist = eukaryota - metazoa - fungal - viridiplantae
+        viral = Kraken2Runner._descendants_of(parent_map, _VIRUSES_TAXID)
 
         human_lineage = Kraken2Runner._ancestors_of(parent_map, _HUMAN_TAXID)
         human_clade = Kraken2Runner._descendants_of(parent_map, _HUMAN_TAXID)
@@ -536,6 +562,7 @@ class Kraken2Runner:
             "archaeal": archaeal,
             "fungal": fungal,
             "protist": protist,
+            "viral": viral,
             "human_lineage": human_lineage,
             "human_clade": human_clade,
         }
@@ -706,6 +733,7 @@ class Kraken2Runner:
                     is_archaeal = taxid in taxid_sets["archaeal"]
                     is_fungal = taxid in taxid_sets["fungal"]
                     is_protist = taxid in taxid_sets["protist"]
+                    is_viral = taxid in taxid_sets["viral"]
                     is_human = taxid in taxid_sets["human_clade"]
                     # Non-human: any taxid NOT on the human lineage and
                     # NOT a human descendant.  Reads classified at broad
@@ -721,15 +749,23 @@ class Kraken2Runner:
                     is_archaeal = taxid == _ARCHAEA_TAXID
                     is_fungal = taxid == _FUNGI_TAXID
                     is_protist = False  # cannot determine without tree
+                    is_viral = taxid == _VIRUSES_TAXID
                     is_human = taxid == _HUMAN_TAXID
                     is_nonhuman = taxid not in (_HUMAN_TAXID, 1)
 
-                # Apply human homology guard to all non-human categories
+                # Apply human homology guard to all non-human categories.
+                # This is especially important for viral reads: viruses
+                # that integrate into the human genome (e.g. endogenous
+                # retroviruses, HBV, HPV) produce reads that carry both
+                # viral and human k-mers.  Excluding any read with human
+                # k-mer evidence from the viral count avoids over-flagging
+                # such integrated sequences as exogenous viral contamination.
                 if has_human_kmer:
                     is_bacterial = False
                     is_archaeal = False
                     is_fungal = False
                     is_protist = False
+                    is_viral = False
                     is_nonhuman = False
 
                 if is_bacterial:
@@ -744,6 +780,9 @@ class Kraken2Runner:
                 if is_protist:
                     result.protist_count += 1
                     result.protist_read_names.add(read_name)
+                if is_viral:
+                    result.viral_count += 1
+                    result.viral_read_names.add(read_name)
                 if is_nonhuman:
                     result.nonhuman_count += 1
                     result.nonhuman_read_names.add(read_name)

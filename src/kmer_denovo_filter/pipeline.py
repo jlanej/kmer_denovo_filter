@@ -766,6 +766,31 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
         vcf_in.header.add_meta(
             category,
             items=[
+                ("ID", "DKU_VF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of DKU fragments classified as viral by "
+                 "kraken2; denominator equals DKU (both are fragment-based). "
+                 "Reads with any human k-mer evidence are excluded, which "
+                 "conservatively handles viruses that integrate into human "
+                 "DNA (e.g. endogenous retroviruses, HBV, HPV)"),
+            ],
+        )
+        vcf_in.header.add_meta(
+            category,
+            items=[
+                ("ID", "DKA_VF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of DKA fragments classified as viral by "
+                 "kraken2; DKA fragments are always a subset of DKU"),
+            ],
+        )
+        vcf_in.header.add_meta(
+            category,
+            items=[
                 ("ID", "DKU_NHF"),
                 ("Number", "1"),
                 ("Type", "Float"),
@@ -833,6 +858,12 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                     rec.samples[proband_id]["DKA_PF"] = ann.get(
                         "dka_protist_fraction", 0.0,
                     )
+                    rec.samples[proband_id]["DKU_VF"] = ann.get(
+                        "dku_viral_fraction", 0.0,
+                    )
+                    rec.samples[proband_id]["DKA_VF"] = ann.get(
+                        "dka_viral_fraction", 0.0,
+                    )
                     rec.samples[proband_id]["DKU_NHF"] = ann.get(
                         "dku_nonhuman_fraction", 0.0,
                     )
@@ -860,6 +891,8 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                     rec.info["DKA_FF"] = ann.get("dka_fungal_fraction", 0.0)
                     rec.info["DKU_PF"] = ann.get("dku_protist_fraction", 0.0)
                     rec.info["DKA_PF"] = ann.get("dka_protist_fraction", 0.0)
+                    rec.info["DKU_VF"] = ann.get("dku_viral_fraction", 0.0)
+                    rec.info["DKA_VF"] = ann.get("dka_viral_fraction", 0.0)
                     rec.info["DKU_NHF"] = ann.get("dku_nonhuman_fraction", 0.0)
                     rec.info["DKA_NHF"] = ann.get("dka_nonhuman_fraction", 0.0)
         vcf_out.write(rec)
@@ -4289,6 +4322,7 @@ def run_pipeline(args):
                 ("archaeal", kraken2_result.archaeal_read_names),
                 ("fungal", kraken2_result.fungal_read_names),
                 ("protist", kraken2_result.protist_read_names),
+                ("viral", kraken2_result.viral_read_names),
                 ("nonhuman", kraken2_result.nonhuman_read_names),
             ):
                 dku_count = len(dku_names.intersection(read_set))
@@ -4347,6 +4381,7 @@ def run_pipeline(args):
                 "archaeal_reads": kraken2_result.archaeal_count,
                 "fungal_reads": kraken2_result.fungal_count,
                 "protist_reads": kraken2_result.protist_count,
+                "viral_reads": kraken2_result.viral_count,
                 "nonhuman_reads": kraken2_result.nonhuman_count,
                 "human_reads": kraken2_result.human_count,
                 "root_reads": kraken2_result.root_count,

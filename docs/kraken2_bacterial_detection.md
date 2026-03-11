@@ -11,19 +11,20 @@ k-mer–based classification approach is well suited to that goal.
 
 `kmer-denovo` identifies *de novo* variants by looking for k-mers present in a
 child but absent from both parents. When the child's sample contains non-human
-contamination (bacterial, archaeal, fungal, protist, or other), sequencing
-reads from these organisms can carry k-mers that are truly absent from parental
-genomes — not because a *de novo* mutation occurred, but simply because the
-non-human sequence has no counterpart in the human reference or in the parents.
-Without a contamination check, these reads would be indistinguishable from
-genuine *de novo* signals.
+contamination (bacterial, archaeal, fungal, protist, viral, or other),
+sequencing reads from these organisms can carry k-mers that are truly absent
+from parental genomes — not because a *de novo* mutation occurred, but simply
+because the non-human sequence has no counterpart in the human reference or in
+the parents. Without a contamination check, these reads would be
+indistinguishable from genuine *de novo* signals.
 
 Reads flagged as non-human can be used to compute per-domain fraction
-annotations (e.g. **DKU_BF**, **DKU_AF**, **DKU_FF**, **DKU_PF**) and a
-consolidated **DKU_NHF** (non-human fraction), which indicate what proportion
-of the informative reads supporting a candidate variant appear to derive from
-a non-human organism rather than from the human child genome. A high non-human
-fraction is a strong indicator of a false-positive *de novo* call.
+annotations (e.g. **DKU_BF**, **DKU_AF**, **DKU_FF**, **DKU_PF**,
+**DKU_VF**) and a consolidated **DKU_NHF** (non-human fraction), which
+indicate what proportion of the informative reads supporting a candidate
+variant appear to derive from a non-human organism rather than from the human
+child genome. A high non-human fraction is a strong indicator of a
+false-positive *de novo* call.
 
 ---
 
@@ -125,6 +126,7 @@ The following domain-specific taxid sets are computed:
 | **Archaea** | 2157 | All descendants of the Archaea domain |
 | **Fungi** | 4751 | All descendants of the Fungi kingdom |
 | **Protist** | (computed) | Eukaryota (2759) descendants **minus** Metazoa (33208), Fungi (4751), and Viridiplantae (33090) descendants |
+| **Viruses** | 10239 | All descendants of the Viruses superkingdom (PrackenDB includes RefSeq viral genomes) |
 
 ```python
 taxid_sets = Kraken2Runner._load_all_taxid_sets(db_path)
@@ -132,6 +134,7 @@ taxid_sets = Kraken2Runner._load_all_taxid_sets(db_path)
 # taxid_sets["archaeal"]  = set of ALL taxids descending from taxid 2157
 # taxid_sets["fungal"]    = set of ALL taxids descending from taxid 4751
 # taxid_sets["protist"]   = eukaryota - metazoa - fungi - viridiplantae
+# taxid_sets["viral"]     = set of ALL taxids descending from taxid 10239
 ```
 
 This lineage-aware check correctly classifies reads assigned to a specific
@@ -155,7 +158,7 @@ transfer events). A read that contains such shared k-mers could be assigned a
 non-human LCA by Kraken2 even though it actually originated from human DNA.
 
 To reduce false flagging, `kmer-denovo` applies a **human homology guard** to
-**all** non-human categories (bacterial, archaeal, fungal, protist, and
+**all** non-human categories (bacterial, archaeal, fungal, protist, viral, and
 consolidated non-human):
 
 ```python
@@ -168,6 +171,7 @@ if has_human_kmer:
     is_archaeal = False
     is_fungal = False
     is_protist = False
+    is_viral = False
     is_nonhuman = False
 ```
 
@@ -179,12 +183,39 @@ non-human numerator. This means:
   **not counted as bacterial or non-human**
 - A read assigned to *Archaea* LCA with some human k-mer evidence →
   **not counted as archaeal or non-human**
+- A read assigned to a virus with some human k-mer evidence →
+  **not counted as viral or non-human**
 - A read assigned to *Bacteria* LCA with no human k-mer evidence →
   **counted as bacterial and non-human**
 
 This is deliberately conservative: it may slightly undercount non-human reads
 that happen to contain a human-matching k-mer, but it avoids over-flagging
 human reads with non-human-like k-mers as contamination.
+
+#### Viral reads and human DNA integration
+
+Viruses receive the same human homology guard as all other domains, but the
+guard is **especially important** for viral reads because some viruses can
+integrate into or co-evolve with the human genome:
+
+- **Endogenous retroviruses (ERVs)** — ERV sequences make up ~8% of the human
+  genome. Reads from known ERV loci are already covered by the human reference
+  and will be classified as human (not viral) by Kraken2 without any special
+  handling. Exogenous retroviruses or novel ERV insertions may share k-mers
+  with both viral references and the human reference, making the human homology
+  guard essential.
+- **HBV and HPV** — Hepatitis B virus and human papillomavirus can integrate
+  into host chromosomes. A read spanning an integration junction would contain
+  both viral and human k-mers, and the human homology guard conservatively
+  excludes it from the viral count.
+- **UniVec Core** — PrackenDB includes UniVec Core (sequencing vector and
+  adapter sequences). While not biologically viral, these are treated the same
+  way: reads with human k-mer evidence are excluded.
+
+In practice, reads from stably integrated viral sequences are expected to
+produce human k-mer evidence and be excluded from the viral count, meaning
+**DKU_VF reflects only reads from exogenous, non-integrated viral contamination**.
+This is the conservative behavior intended by the design.
 
 ### Step 5 — Conservative non-human fraction (NHF)
 
@@ -229,6 +260,8 @@ The classification results are added to the output VCF as per-variant fields:
 | **DKA_FF** | Fraction of DKA fragments classified as **fungal**. |
 | **DKU_PF** | Fraction of DKU fragments classified as **protist** by Kraken2. |
 | **DKA_PF** | Fraction of DKA fragments classified as **protist**. |
+| **DKU_VF** | Fraction of DKU fragments classified as **viral** by Kraken2 (RefSeq viral genomes in PrackenDB). Reads with any human k-mer evidence are conservatively excluded, which handles viruses that can integrate into human DNA. |
+| **DKA_VF** | Fraction of DKA fragments classified as **viral**. |
 
 ### Consolidated non-human fraction
 
@@ -246,6 +279,8 @@ non-human read names returned by Kraken2.
 - `DKU_NHF` close to `1.0` — essentially all evidence for this variant comes
   from reads classified as non-human; strong indicator of contamination artifact
 - `DKU_BF` close to `1.0` — specifically bacterial contamination
+- `DKU_VF` close to `1.0` — specifically exogenous viral contamination (reads
+  with integrated-virus k-mer signatures are excluded via the human homology guard)
 - `DKA_NHF` close to `1.0` — reads that directly support the alternate allele
   sequence are predominantly non-human; high-confidence contamination flag
 - All fractions near `0.0` — no detectable non-human content among the
@@ -272,7 +307,7 @@ non-human read names returned by Kraken2.
 
 | CLI argument | Default | Effect |
 |---|---|---|
-| `--kraken2-db` | *(disabled)* | Path to the Kraken2 database directory; enables non-human fraction annotations (DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF, DKU_NHF/DKA_NHF) in VCF mode |
+| `--kraken2-db` | *(disabled)* | Path to the Kraken2 database directory; enables non-human fraction annotations (DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF, DKU_VF/DKA_VF, DKU_NHF/DKA_NHF) in VCF mode |
 | `--kraken2-confidence` | `0.0` | LCA confidence threshold (0.0–1.0); higher values reduce sensitivity, increase specificity |
 
 See [Kraken2 Database Setup Helper](../README.md#kraken2-database-setup-helper)

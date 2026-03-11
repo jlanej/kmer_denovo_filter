@@ -194,7 +194,7 @@ kmer-denovo \
 | `--threads` / `-t` | 4 | Number of threads for Jellyfish and parallel anchoring workers |
 | `--memory` | auto | Available memory in GB. On HPC (e.g. SLURM), set this to the allocated memory so worker counts and hash sizes are tuned correctly. When omitted, auto-detected from the system |
 | `--debug-kmers` | false | Enable per-variant debug output |
-| `--kraken2-db` | – | Optional Kraken2 database path. In VCF mode, enables non-human fraction annotations (DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF, DKU_NHF/DKA_NHF). Ignored in discovery mode. **Memory note:** the standard Kraken2 DB typically needs ~50–100 GB RAM to load/classify; provision memory accordingly to avoid OOM |
+| `--kraken2-db` | – | Optional Kraken2 database path. In VCF mode, enables non-human fraction annotations (DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF, DKU_VF/DKA_VF, DKU_NHF/DKA_NHF). Ignored in discovery mode. **Memory note:** the standard Kraken2 DB typically needs ~50–100 GB RAM to load/classify; provision memory accordingly to avoid OOM |
 | `--kraken2-confidence` | 0.0 | Kraken2 LCA confidence threshold (0.0–1.0) |
 | `--kraken2-memory-mapping` | false | Passes Kraken2 `--memory-mapping` so DB files are memory-mapped from disk to reduce RAM footprint (usually slower, but helpful on RAM-constrained nodes) |
 | **VCF mode** | | |
@@ -251,6 +251,11 @@ and annotated with the following fields:
 * **DKU_FF** / **DKA_FF** – Fraction classified as fungal.
 * **DKU_PF** / **DKA_PF** – Fraction classified as protist
   (eukaryotic but not metazoan, fungal, or plant).
+* **DKU_VF** / **DKA_VF** – Fraction classified as viral (RefSeq viral
+  genomes are included in PrackenDB). Reads with any human k-mer evidence
+  are conservatively excluded — this specifically handles viruses that can
+  integrate into the human genome (e.g. endogenous retroviruses, HBV, HPV),
+  ensuring integrated viral sequences are not counted as exogenous contamination.
 * **DKU_NHF** / **DKA_NHF** – Consolidated non-human fraction: any read
   definitively classified outside the human lineage.
 
