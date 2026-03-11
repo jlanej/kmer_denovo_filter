@@ -324,12 +324,11 @@ class TestPipelineIntegration:
 
             def __init__(
                 self, _db_path, *, confidence=0.0, threads=1,
-                memory_mapping=False, max_rss_gb=None,
+                memory_mapping=False,
             ):
                 assert confidence == 0.0
                 assert threads == 1
                 captured["memory_mapping"] = memory_mapping
-                assert max_rss_gb is None
 
             def classify_sequences(self, _sequences, tmpdir=None):
                 return self.Result()
@@ -345,44 +344,6 @@ class TestPipelineIntegration:
         )
 
         assert captured["memory_mapping"] is True
-
-    def test_kraken2_max_rss_cap_is_forwarded(self, tmpdir, monkeypatch):
-        """Kraken2 max RSS option is forwarded to the runner."""
-        chrom = "chr1"
-        ref_fa = os.path.join(tmpdir, "ref.fa")
-        _create_ref_fasta(ref_fa, chrom, 200)
-        child_bam = os.path.join(tmpdir, "child.bam")
-        _create_bam(child_bam, ref_fa, chrom, [("read1", 50, "A" * 40, None)])
-
-        captured = {"max_rss_gb": None}
-        real_result_cls = pipeline_mod.Kraken2Runner.Result
-
-        class _FakeKraken2Runner:
-            Result = real_result_cls
-
-            def __init__(
-                self, _db_path, *, confidence=0.0, threads=1,
-                memory_mapping=False, max_rss_gb=None,
-            ):
-                assert confidence == 0.0
-                assert threads == 1
-                assert memory_mapping is False
-                captured["max_rss_gb"] = max_rss_gb
-
-            def classify_sequences(self, _sequences, tmpdir=None):
-                return self.Result()
-
-        monkeypatch.setattr(pipeline_mod, "Kraken2Runner", _FakeKraken2Runner)
-
-        pipeline_mod._run_kraken2_on_reads(
-            child_bam=child_bam,
-            ref_fasta=ref_fa,
-            read_names={"read1"},
-            kraken2_db=os.path.join(tmpdir, "kraken_db"),
-            max_rss_gb=9.5,
-        )
-
-        assert captured["max_rss_gb"] == 9.5
 
     def test_inherited_variant_no_unique(self, tmpdir):
         """When the variant is also in a parent, DKU should be 0."""
@@ -1019,12 +980,6 @@ class TestValidateInputs:
         args = self._make_args(tmpdir, threads=0)
         with pytest.raises(SystemExit):
             _validate_inputs(args)
-
-    def test_nonpositive_kraken2_max_rss_gb(self, tmpdir):
-        args = self._make_args(tmpdir, kraken2_max_rss_gb=0.0)
-        with pytest.raises(SystemExit):
-            _validate_inputs(args)
-
 
 class TestProgressLogging:
     """Tests verifying structured progress messages are logged."""

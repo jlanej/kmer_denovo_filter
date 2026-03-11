@@ -236,7 +236,3 @@ class TestParseArgs:
     def test_kraken2_memory_mapping_flag(self):
         args = parse_args(self.REQUIRED_ARGS + ["--kraken2-memory-mapping"])
         assert args.kraken2_memory_mapping is True
-
-    def test_kraken2_max_rss_gb(self):
-        args = parse_args(self.REQUIRED_ARGS + ["--kraken2-max-rss-gb", "12.5"])
-        assert args.kraken2_max_rss_gb == 12.5

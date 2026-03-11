@@ -196,8 +196,7 @@ kmer-denovo \
 | `--debug-kmers` | false | Enable per-variant debug output |
 | `--kraken2-db` | – | Optional Kraken2 database path. In VCF mode, enables DKU_BF/DKA_BF bacterial-fraction annotations. Ignored in discovery mode. **Memory note:** the standard Kraken2 DB typically needs ~50–100 GB RAM to load/classify; provision memory accordingly to avoid OOM |
 | `--kraken2-confidence` | 0.0 | Kraken2 LCA confidence threshold (0.0–1.0) |
-| `--kraken2-memory-mapping` | false | Passes Kraken2 `--memory-mapping` so DB files are memory-mapped from disk to reduce RAM footprint (usually slower, but helpful on RAM-constrained nodes) |
-| `--kraken2-max-rss-gb` | – | Optional RSS cap for the Kraken2 subprocess. Heartbeats log current/peak RSS and Kraken2 is terminated if observed RSS exceeds this cap |
+| `--kraken2-memory-mapping` | false | Passes Kraken2 `--memory-mapping` so DB files are memory-mapped from disk instead of preloaded into process-local RAM. Logs include estimated `.k2d` footprint and RSS behavior expectations |
 | **VCF mode** | | |
 | `--vcf` | – | Input VCF with candidate variants (activates VCF mode) |
 | `--output` / `-o` | – | Output annotated VCF (required with `--vcf`) |

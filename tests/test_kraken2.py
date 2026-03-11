@@ -3,12 +3,10 @@
 import os
 import subprocess
 import tempfile
-import time
 from unittest import mock
 
 import pytest
 
-import kmer_denovo_filter.kmer_utils as kmer_utils_mod
 from kmer_denovo_filter.kmer_utils import (
     Kraken2Runner,
     _BACTERIA_TAXID,
@@ -71,17 +69,14 @@ class TestKraken2RunnerInit:
         assert kr.confidence == 0.0
         assert kr.threads == 1
         assert kr.memory_mapping is False
-        assert kr.max_rss_gb is None
 
     def test_custom_params(self):
         kr = Kraken2Runner(
             "/db", confidence=0.2, threads=8, memory_mapping=True,
-            max_rss_gb=8.0,
         )
         assert kr.confidence == 0.2
         assert kr.threads == 8
         assert kr.memory_mapping is True
-        assert kr.max_rss_gb == 8.0
 
 
 class TestKraken2RunnerClassify:
@@ -368,32 +363,25 @@ class TestKraken2RunnerClassify:
         assert "--memory-mapping" in cmd
 
     @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
-    @mock.patch("kmer_denovo_filter.kmer_utils._read_proc_rss_kb")
-    def test_rss_cap_triggers_terminate(
-        self, mock_read_rss, mock_popen, monkeypatch, caplog,
-    ):
-        """Kraken2 process is terminated when observed RSS exceeds cap."""
-        monkeypatch.setattr(kmer_utils_mod, "_KRAKEN2_HEARTBEAT_INTERVAL", 0.01)
-
-        def _communicate():
-            time.sleep(0.04)
-            return (b"", b"")
+    def test_memory_mapping_logs_db_footprint(self, mock_popen, caplog, tmp_path):
+        """Memory-mapping mode logs DB footprint and RSS expectation."""
+        for name in ("hash.k2d", "opts.k2d", "taxo.k2d"):
+            (tmp_path / name).write_bytes(b"x" * 1024)
 
         mock_proc = mock.MagicMock()
-        mock_proc.communicate.side_effect = _communicate
-        mock_proc.returncode = -15
+        mock_proc.communicate.return_value = (b"", b"")
+        mock_proc.returncode = 0
         mock_popen.return_value = mock_proc
 
-        # First heartbeat sample exceeds 10 GB cap.
-        mock_read_rss.return_value = 11 * 1_048_576  # 11 GB in kB
-
-        kr = Kraken2Runner("/my/db", max_rss_gb=10.0)
+        kr = Kraken2Runner(str(tmp_path), memory_mapping=True)
         caplog.set_level("INFO", logger="kmer_denovo_filter.kmer_utils")
-        result = kr.classify_sequences({"r1": "ACGT"})
+        with mock.patch.object(
+            Kraken2Runner, "_load_bacterial_taxids", return_value=None,
+        ):
+            kr.classify_sequences({"r1": "ACGT"})
 
-        assert result.total == 1
-        assert mock_proc.terminate.called
-        assert "RSS cap exceeded" in caplog.text
+        assert "memory-mapping DB footprint" in caplog.text
+        assert "memory-mapping expectation" in caplog.text
 
 
 class TestLoadBacterialTaxids:
