@@ -341,11 +341,15 @@ class Kraken2Runner:
                 return 0.0
             return round(self.bacterial_count / self.total, 4)
 
-    def __init__(self, db_path, *, confidence=0.0, threads=1, memory_mapping=False):
+    def __init__(
+        self, db_path, *, confidence=0.0, threads=1,
+        memory_mapping=False, max_rss_gb=None,
+    ):
         self.db_path = db_path
         self.confidence = confidence
         self.threads = threads
         self.memory_mapping = memory_mapping
+        self.max_rss_gb = max_rss_gb
 
     # ── taxonomy helpers ───────────────────────────────────────────
 
@@ -489,17 +493,52 @@ class Kraken2Runner:
             # Background thread: log RSS memory heartbeats while kraken2 runs
             kraken2_start = time.monotonic()
             stop_heartbeat = threading.Event()
+            max_rss_kb = (
+                int(self.max_rss_gb * 1_048_576)
+                if self.max_rss_gb is not None else None
+            )
+            peak_rss_kb = [None]
+            previous_rss_kb = [None]
+
+            if self.memory_mapping:
+                logger.info(
+                    "[Kraken2] memory-mapping enabled; RSS can grow while "
+                    "database pages are faulted from disk",
+                )
+            if max_rss_kb is not None:
+                logger.info(
+                    "[Kraken2] RSS cap enabled at %.1f GB",
+                    self.max_rss_gb,
+                )
 
             def _heartbeat():
                 while not stop_heartbeat.wait(_KRAKEN2_HEARTBEAT_INTERVAL):
                     rss = _read_proc_rss_kb(proc.pid)
                     elapsed = time.monotonic() - kraken2_start
                     if rss is not None:
+                        if peak_rss_kb[0] is None or rss > peak_rss_kb[0]:
+                            peak_rss_kb[0] = rss
+                        if max_rss_kb is not None and rss > max_rss_kb:
+                            logger.error(
+                                "[Kraken2] RSS cap exceeded (%.1f GB > %.1f GB); "
+                                "terminating kraken2 process",
+                                rss / 1_048_576, max_rss_kb / 1_048_576,
+                            )
+                            try:
+                                proc.terminate()
+                            except OSError:
+                                pass
                         logger.info(
                             "[Kraken2] heartbeat — %.0f s elapsed, "
-                            "RSS: %.1f GB",
+                            "RSS: %.1f GB (peak: %.1f GB, delta: %+0.1f GB)",
                             elapsed, rss / 1_048_576,
+                            peak_rss_kb[0] / 1_048_576,
+                            (
+                                0.0 if previous_rss_kb[0] is None
+                                else (rss - previous_rss_kb[0]) / 1_048_576
+                            ),
                         )
+                        previous_rss_kb[0] = rss
                     else:
                         logger.info(
                             "[Kraken2] heartbeat — %.0f s elapsed "
@@ -527,8 +566,13 @@ class Kraken2Runner:
                 return result
 
             logger.info(
-                "[Kraken2] classification complete — %d reads in %.0f s",
+                "[Kraken2] classification complete — %d reads in %.0f s "
+                "(peak RSS: %.1f GB)",
                 result.total, elapsed,
+                (
+                    peak_rss_kb[0] / 1_048_576
+                    if peak_rss_kb[0] is not None else 0.0
+                ),
             )
 
             # Load bacterial taxid set for lineage-aware matching

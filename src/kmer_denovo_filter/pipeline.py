@@ -55,6 +55,7 @@ def _run_kraken2_on_reads(
     child_bam, ref_fasta, read_names, kraken2_db,
     confidence=0.0, threads=1, tmpdir=None,
     informative_reads_by_variant=None, memory_mapping=False,
+    max_rss_gb=None,
 ):
     """Classify child reads with kraken2 and return a result summary.
 
@@ -77,6 +78,7 @@ def _run_kraken2_on_reads(
             avoid a whole-file scan.
         memory_mapping: Whether to pass ``--memory-mapping`` to Kraken2
             to reduce RAM usage by memory-mapping DB files.
+        max_rss_gb: Optional RSS cap in GB for the Kraken2 subprocess.
 
     Returns:
         A :class:`Kraken2Runner.Result`.
@@ -145,6 +147,7 @@ def _run_kraken2_on_reads(
         confidence=confidence,
         threads=threads,
         memory_mapping=memory_mapping,
+        max_rss_gb=max_rss_gb,
     )
     return kr.classify_sequences(sequences, tmpdir=tmpdir)
 
@@ -229,6 +232,11 @@ def _validate_inputs(args):
     if args.threads < 1:
         errors.append(
             f"--threads must be >= 1, got {args.threads}"
+        )
+    kraken2_max_rss_gb = getattr(args, "kraken2_max_rss_gb", None)
+    if kraken2_max_rss_gb is not None and kraken2_max_rss_gb <= 0:
+        errors.append(
+            f"--kraken2-max-rss-gb must be > 0, got {kraken2_max_rss_gb}"
         )
 
     # Discovery-mode-specific validation
@@ -3855,6 +3863,7 @@ def run_pipeline(args):
     kraken2_db = getattr(args, "kraken2_db", None)
     kraken2_confidence = getattr(args, "kraken2_confidence", 0.0)
     kraken2_memory_mapping = getattr(args, "kraken2_memory_mapping", False)
+    kraken2_max_rss_gb = getattr(args, "kraken2_max_rss_gb", None)
     if kraken2_db is not None:
         if not _check_tool("kraken2"):
             logger.error("kraken2 not found in PATH (required by --kraken2-db)")
@@ -3896,6 +3905,13 @@ def run_pipeline(args):
     )
     logger.info("  Proband ID:        %s", args.proband_id or "(not set)")
     logger.info("  Kraken2 DB:        %s", kraken2_db or "(disabled)")
+    logger.info(
+        "  Kraken2 RSS cap:   %s",
+        (
+            f"{kraken2_max_rss_gb:.1f} GB"
+            if kraken2_max_rss_gb is not None else "(disabled)"
+        ),
+    )
     logger.info("=" * 60)
 
     # ── Step 1: Parse VCF ──────────────────────────────────────────
@@ -4152,6 +4168,7 @@ def run_pipeline(args):
             threads=args.threads,
             informative_reads_by_variant=informative_reads_by_variant,
             memory_mapping=kraken2_memory_mapping,
+            max_rss_gb=kraken2_max_rss_gb,
         )
         logger.info(
             "[Kraken2] %s (%s)",

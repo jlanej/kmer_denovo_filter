@@ -175,6 +175,12 @@ def parse_args(argv=None):
         help="Enable Kraken2 --memory-mapping to reduce RAM usage by mapping "
              "database files from disk (may run slower)",
     )
+    parser.add_argument(
+        "--kraken2-max-rss-gb", type=float, default=None,
+        help="Optional RSS cap (GB) for the Kraken2 subprocess. When set, "
+             "the runner emits heartbeat diagnostics and terminates Kraken2 "
+             "if observed RSS exceeds this cap.",
+    )
     return parser.parse_args(argv)
 
 
