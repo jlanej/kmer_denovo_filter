@@ -170,6 +170,11 @@ def parse_args(argv=None):
         help="Kraken2 confidence threshold (0.0–1.0) for LCA "
              "classification (default: 0.0)",
     )
+    parser.add_argument(
+        "--kraken2-memory-mapping", action="store_true", default=False,
+        help="Enable Kraken2 --memory-mapping to reduce RAM usage by mapping "
+             "database files from disk (may run slower)",
+    )
     return parser.parse_args(argv)
 
 

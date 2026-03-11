@@ -68,11 +68,15 @@ class TestKraken2RunnerInit:
         assert kr.db_path == "/fake/db"
         assert kr.confidence == 0.0
         assert kr.threads == 1
+        assert kr.memory_mapping is False
 
     def test_custom_params(self):
-        kr = Kraken2Runner("/db", confidence=0.2, threads=8)
+        kr = Kraken2Runner(
+            "/db", confidence=0.2, threads=8, memory_mapping=True,
+        )
         assert kr.confidence == 0.2
         assert kr.threads == 8
+        assert kr.memory_mapping is True
 
 
 class TestKraken2RunnerClassify:
@@ -339,6 +343,24 @@ class TestKraken2RunnerClassify:
         assert "0.3" in cmd
         assert "--threads" in cmd
         assert "4" in cmd
+        assert "--memory-mapping" not in cmd
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_command_includes_memory_mapping_when_enabled(self, mock_popen):
+        """Verify memory-mapping flag is passed to kraken2 when enabled."""
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (b"", b"")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/my/db", memory_mapping=True)
+        with mock.patch.object(
+            Kraken2Runner, '_load_bacterial_taxids', return_value=None,
+        ):
+            kr.classify_sequences({"r1": "ACGT"})
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--memory-mapping" in cmd
 
 
 class TestLoadBacterialTaxids:

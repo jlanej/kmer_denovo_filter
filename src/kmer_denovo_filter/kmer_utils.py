@@ -341,10 +341,11 @@ class Kraken2Runner:
                 return 0.0
             return round(self.bacterial_count / self.total, 4)
 
-    def __init__(self, db_path, *, confidence=0.0, threads=1):
+    def __init__(self, db_path, *, confidence=0.0, threads=1, memory_mapping=False):
         self.db_path = db_path
         self.confidence = confidence
         self.threads = threads
+        self.memory_mapping = memory_mapping
 
     # ── taxonomy helpers ───────────────────────────────────────────
 
@@ -474,8 +475,10 @@ class Kraken2Runner:
                 "--confidence", str(self.confidence),
                 "--output", "-",          # per-read output to stdout
                 "--report", "/dev/null",  # suppress summary report
-                fastq_path,
             ]
+            if self.memory_mapping:
+                cmd.append("--memory-mapping")
+            cmd.append(fastq_path)
 
             proc = subprocess.Popen(
                 cmd,

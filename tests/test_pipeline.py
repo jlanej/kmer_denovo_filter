@@ -308,6 +308,43 @@ class TestPipelineIntegration:
         assert set(captured) == {read_name}
         assert captured[read_name] == variant_seq
 
+    def test_kraken2_memory_mapping_is_forwarded(self, tmpdir, monkeypatch):
+        """Kraken2 memory-mapping option is forwarded to the runner."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        _create_ref_fasta(ref_fa, chrom, 200)
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(child_bam, ref_fa, chrom, [("read1", 50, "A" * 40, None)])
+
+        captured = {"memory_mapping": None}
+        real_result_cls = pipeline_mod.Kraken2Runner.Result
+
+        class _FakeKraken2Runner:
+            Result = real_result_cls
+
+            def __init__(
+                self, _db_path, *, confidence=0.0, threads=1,
+                memory_mapping=False,
+            ):
+                assert confidence == 0.0
+                assert threads == 1
+                captured["memory_mapping"] = memory_mapping
+
+            def classify_sequences(self, _sequences, tmpdir=None):
+                return self.Result()
+
+        monkeypatch.setattr(pipeline_mod, "Kraken2Runner", _FakeKraken2Runner)
+
+        pipeline_mod._run_kraken2_on_reads(
+            child_bam=child_bam,
+            ref_fasta=ref_fa,
+            read_names={"read1"},
+            kraken2_db=os.path.join(tmpdir, "kraken_db"),
+            memory_mapping=True,
+        )
+
+        assert captured["memory_mapping"] is True
+
     def test_inherited_variant_no_unique(self, tmpdir):
         """When the variant is also in a parent, DKU should be 0."""
         chrom = "chr1"
