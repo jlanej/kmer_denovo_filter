@@ -2,6 +2,7 @@
 
 import logging
 import os
+import struct
 import subprocess
 import tempfile
 import threading
@@ -404,6 +405,55 @@ class Kraken2Runner:
         self.threads = threads
         self.memory_mapping = memory_mapping
 
+    # ── database introspection ─────────────────────────────────────
+
+    @staticmethod
+    def read_kmer_length(db_path):
+        """Return the k-mer length stored in a Kraken2 database.
+
+        Kraken2 databases store build-time options (including the k-mer
+        length ``k``) in ``opts.k2d`` as a binary ``IndexOptions`` struct.
+        The first field of that struct is ``k`` (a ``size_t``, 8 bytes on
+        64-bit platforms), so reading the first 8 bytes as a little-endian
+        unsigned 64-bit integer gives the k-mer length used by the database.
+
+        The PrackenDB pre-built database
+        (``k2_NCBI_reference_20251007.tar.gz``) is built with Kraken2's
+        default k-mer length of **35**.
+
+        Args:
+            db_path: Path to the Kraken2 database directory (must contain
+                ``opts.k2d``, or a versioned subdirectory that does).
+
+        Returns:
+            The k-mer length as an integer, or ``None`` when ``opts.k2d``
+            cannot be found or parsed.
+        """
+        # Look for opts.k2d directly in db_path, then one level deeper
+        # (PrackenDB extracts into a versioned subdirectory).
+        candidate_dirs = [db_path]
+        try:
+            for entry in os.scandir(db_path):
+                if entry.is_dir():
+                    candidate_dirs.append(entry.path)
+        except OSError:
+            pass
+
+        for d in candidate_dirs:
+            opts_path = os.path.join(d, "opts.k2d")
+            if not os.path.isfile(opts_path):
+                continue
+            try:
+                with open(opts_path, "rb") as fh:
+                    data = fh.read(8)
+                if len(data) == 8:
+                    (k,) = struct.unpack("<Q", data)
+                    if 1 <= k <= 256:  # sanity-check the value
+                        return k
+            except OSError:
+                pass
+        return None
+
     # ── taxonomy helpers ───────────────────────────────────────────
 
     @staticmethod
@@ -611,6 +661,17 @@ class Kraken2Runner:
             return result
 
         result.total = len(items)
+
+        # Log the database k-mer length so users can see which k-mer size
+        # Kraken2 will use for LCA classification.
+        kmer_len = self.read_kmer_length(self.db_path)
+        if kmer_len is not None:
+            logger.info("[Kraken2] database k-mer length: %d", kmer_len)
+        else:
+            logger.debug(
+                "[Kraken2] could not read k-mer length from opts.k2d "
+                "(db_path: %s)", self.db_path,
+            )
 
         # Write a temporary FASTQ
         fd, fastq_path = tempfile.mkstemp(
