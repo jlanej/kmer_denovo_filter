@@ -353,18 +353,22 @@ class Kraken2Runner:
     def _load_bacterial_taxids(db_path):
         """Load the set of taxonomy IDs that descend from Bacteria.
 
-        Parses ``taxonomy/nodes.dmp`` within the kraken2 database
-        directory.  Any taxid whose lineage passes through taxid 2
-        (Bacteria) is included.
+        Parses ``taxonomy/nodes.dmp`` (or ``nodes.dmp`` at the database
+        root for pre-built archives like PrackenDB) within the kraken2
+        database directory.  Any taxid whose lineage passes through
+        taxid 2 (Bacteria) is included.
 
-        If the taxonomy directory is not present (e.g. a pre-built
-        database without nodes.dmp), returns ``None`` so that the
-        caller can emit a warning and fall back to direct-taxid-only
-        matching.
+        If neither location contains a readable ``nodes.dmp``, returns
+        ``None`` so that the caller can emit a warning and fall back to
+        direct-taxid-only matching.
         """
+        # Try the standard taxonomy/ subdirectory first, then fall back
+        # to a flat nodes.dmp in the database root (PrackenDB layout).
         nodes_path = os.path.join(db_path, "taxonomy", "nodes.dmp")
         if not os.path.isfile(nodes_path):
-            return None
+            nodes_path = os.path.join(db_path, "nodes.dmp")
+            if not os.path.isfile(nodes_path):
+                return None
 
         parent_map = {}
         try:
@@ -473,7 +477,7 @@ class Kraken2Runner:
                 "--db", self.db_path,
                 "--threads", str(self.threads),
                 "--confidence", str(self.confidence),
-                "--output", "-",          # per-read output to stdout
+                "--output", "/dev/stdout", # per-read output to stdout
                 "--report", "/dev/null",  # suppress summary report
             ]
             if self.memory_mapping:
