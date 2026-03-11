@@ -38,6 +38,7 @@ class TestParseArgs:
         assert args.ref_jf is None
         assert args.min_child_count == 3
         assert args.out_prefix is None
+        assert args.kraken2_memory_mapping is False
 
     def test_custom_kmer_size(self):
         args = parse_args(self.REQUIRED_ARGS + ["--kmer-size", "25"])
@@ -232,3 +233,6 @@ class TestParseArgs:
         args = parse_args(self.REQUIRED_ARGS + ["--tmp-dir", "/scratch/tmp"])
         assert args.tmp_dir == "/scratch/tmp"
 
+    def test_kraken2_memory_mapping_flag(self):
+        args = parse_args(self.REQUIRED_ARGS + ["--kraken2-memory-mapping"])
+        assert args.kraken2_memory_mapping is True

@@ -54,7 +54,7 @@ _BACTERIAL_FRACTION_PRECISION = 4
 def _run_kraken2_on_reads(
     child_bam, ref_fasta, read_names, kraken2_db,
     confidence=0.0, threads=1, tmpdir=None,
-    informative_reads_by_variant=None,
+    informative_reads_by_variant=None, memory_mapping=False,
 ):
     """Classify child reads with kraken2 and return a result summary.
 
@@ -75,6 +75,8 @@ def _run_kraken2_on_reads(
             by this pipeline) to informative read-name sets. When
             provided, only those loci are fetched from the BAM/CRAM to
             avoid a whole-file scan.
+        memory_mapping: Whether to pass ``--memory-mapping`` to Kraken2
+            to reduce RAM usage by memory-mapping DB files.
 
     Returns:
         A :class:`Kraken2Runner.Result`.
@@ -139,7 +141,10 @@ def _run_kraken2_on_reads(
         return Kraken2Runner.Result()
 
     kr = Kraken2Runner(
-        kraken2_db, confidence=confidence, threads=threads,
+        kraken2_db,
+        confidence=confidence,
+        threads=threads,
+        memory_mapping=memory_mapping,
     )
     return kr.classify_sequences(sequences, tmpdir=tmpdir)
 
@@ -3849,6 +3854,7 @@ def run_pipeline(args):
 
     kraken2_db = getattr(args, "kraken2_db", None)
     kraken2_confidence = getattr(args, "kraken2_confidence", 0.0)
+    kraken2_memory_mapping = getattr(args, "kraken2_memory_mapping", False)
     if kraken2_db is not None:
         if not _check_tool("kraken2"):
             logger.error("kraken2 not found in PATH (required by --kraken2-db)")
@@ -4145,6 +4151,7 @@ def run_pipeline(args):
             kraken2_db, confidence=kraken2_confidence,
             threads=args.threads,
             informative_reads_by_variant=informative_reads_by_variant,
+            memory_mapping=kraken2_memory_mapping,
         )
         logger.info(
             "[Kraken2] %s (%s)",
