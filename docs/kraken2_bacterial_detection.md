@@ -1,9 +1,9 @@
 # Kraken2 Non-Human Content Detection
 
 This document describes how `kmer-denovo` uses [Kraken2](https://github.com/DerrickWood/kraken2)
-to detect non-human content — bacteria, archaea, fungi, protists, and other
-non-human organisms — in the child's sequencing reads, and why Kraken2's
-k-mer–based classification approach is well suited to that goal.
+to detect non-human content — bacteria, archaea, fungi, protists, viruses,
+and synthetic sequencing vectors — in the child's sequencing reads, and why
+Kraken2's k-mer–based classification approach is well suited to that goal.
 
 ---
 
@@ -20,11 +20,14 @@ indistinguishable from genuine *de novo* signals.
 
 Reads flagged as non-human can be used to compute per-domain fraction
 annotations (e.g. **DKU_BF**, **DKU_AF**, **DKU_FF**, **DKU_PF**,
-**DKU_VF**, **DKU_UCF**) and a consolidated **DKU_NHF** (non-human fraction),
-which indicate what proportion of the informative reads supporting a candidate
+**DKU_VF**) and a consolidated **DKU_NHF** (non-human fraction), which
+indicate what proportion of the informative reads supporting a candidate
 variant appear to derive from a non-human organism rather than from the human
-child genome. A high non-human fraction is a strong indicator of a
-false-positive *de novo* call.
+child genome.  **DKU_UCF** separately tracks the fraction of reads classified
+as UniVec Core (synthetic vectors/adapters); these reads are excluded from
+DKU_NHF because they are artificial constructs, not biological contamination.
+A high non-human fraction is a strong indicator of a false-positive *de novo*
+call.
 
 ---
 

@@ -309,17 +309,18 @@ class Kraken2Runner:
     with the human reference.  A read carrying both viral and human
     k-mer evidence is conservatively excluded from the viral count.
 
-    **UniVec Core exclusion**: PrackenDB includes UniVec Core (taxid
+    **UniVec Core handling**: PrackenDB includes UniVec Core (taxid
     81077), a curated set of synthetic sequencing-vector and adapter
     sequences.  These are artificial constructs and do not represent
     genuine biological contamination.  Reads classified under UniVec
-    Core are explicitly excluded from the consolidated non-human
-    fraction (NHF) so that vector library-preparation artefacts —
-    or human reads whose k-mers happen to match vector sequences —
-    are not errantly counted as microbial contamination.  The human
-    homology guard is applied first; UniVec Core exclusion provides
-    a second, unconditional safety net for any UniVec-classified read
-    regardless of k-mer voting.
+    Core are tracked independently (``univec_core_read_names`` /
+    ``univec_core_count``) and explicitly excluded from the consolidated
+    non-human fraction (NHF) so that vector library-preparation
+    artefacts — or human reads whose k-mers happen to match vector
+    sequences — are not errantly counted as microbial contamination.
+    The human homology guard is applied first; UniVec Core exclusion
+    provides a second, unconditional safety net for any
+    UniVec-classified read regardless of k-mer voting.
 
     The ``--confidence`` threshold (default 0.0) controls how strict
     the LCA classification must be.  A value of 0.2 requires at least
