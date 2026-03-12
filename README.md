@@ -194,7 +194,7 @@ kmer-denovo \
 | `--threads` / `-t` | 4 | Number of threads for Jellyfish and parallel anchoring workers |
 | `--memory` | auto | Available memory in GB. On HPC (e.g. SLURM), set this to the allocated memory so worker counts and hash sizes are tuned correctly. When omitted, auto-detected from the system |
 | `--debug-kmers` | false | Enable per-variant debug output |
-| `--kraken2-db` | – | Optional Kraken2 database path. In VCF mode, enables non-human fraction annotations (DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF, DKU_VF/DKA_VF, DKU_NHF/DKA_NHF). Ignored in discovery mode. **Memory note:** the standard Kraken2 DB typically needs ~50–100 GB RAM to load/classify; provision memory accordingly to avoid OOM |
+| `--kraken2-db` | – | Optional Kraken2 database path. In VCF mode, enables non-human fraction annotations (DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF, DKU_VF/DKA_VF, DKU_UCF/DKA_UCF, DKU_NHF/DKA_NHF). Ignored in discovery mode. **Memory note:** the standard Kraken2 DB typically needs ~50–100 GB RAM to load/classify; provision memory accordingly to avoid OOM |
 | `--kraken2-confidence` | 0.0 | Kraken2 LCA confidence threshold (0.0–1.0) |
 | `--kraken2-memory-mapping` | false | Passes Kraken2 `--memory-mapping` so DB files are memory-mapped from disk to reduce RAM footprint (usually slower, but helpful on RAM-constrained nodes) |
 | **VCF mode** | | |
@@ -256,8 +256,14 @@ and annotated with the following fields:
   are conservatively excluded — this specifically handles viruses that can
   integrate into the human genome (e.g. endogenous retroviruses, HBV, HPV),
   ensuring integrated viral sequences are not counted as exogenous contamination.
+* **DKU_UCF** / **DKA_UCF** – Fraction classified as UniVec Core (synthetic
+  sequencing-vector and adapter sequences, taxid 81077). Reads with any
+  human k-mer evidence are conservatively excluded. UniVec Core reads are
+  **not** included in the non-human fraction (DKU_NHF/DKA_NHF) because they
+  are artificial constructs, not biological contamination.
 * **DKU_NHF** / **DKA_NHF** – Consolidated non-human fraction: any read
-  definitively classified outside the human lineage.
+  definitively classified outside the human lineage. UniVec Core reads are
+  excluded from this fraction.
 
   Since DKU, DKA, and the fraction denominators all count unique fragment names,
   every fraction is always in [0.0, 1.0]. To reduce over-flagging from shared
@@ -509,9 +515,10 @@ provenance is self-documenting.
   fragment names (read names). When both mates of a paired-end read span
   the variant, they share a read name and are counted as one fragment.
   The non-human fraction metrics (DKU_BF, DKA_BF, DKU_AF, DKA_AF,
-  DKU_FF, DKA_FF, DKU_PF, DKA_PF, DKU_NHF, DKA_NHF) use the same
-  fragment-based denominator, so all counts and fractions are consistent
-  and all fraction values are always in [0.0, 1.0].
+  DKU_FF, DKA_FF, DKU_PF, DKA_PF, DKU_VF, DKA_VF, DKU_UCF, DKA_UCF,
+  DKU_NHF, DKA_NHF) use the same fragment-based denominator, so all
+  counts and fractions are consistent and all fraction values are always
+  in [0.0, 1.0].
 
 * **PKC is a combined parental count** – MAX_PKC, AVG_PKC, and MIN_PKC
   represent the **sum** of mother and father k-mer counts for each

@@ -20,8 +20,8 @@ indistinguishable from genuine *de novo* signals.
 
 Reads flagged as non-human can be used to compute per-domain fraction
 annotations (e.g. **DKU_BF**, **DKU_AF**, **DKU_FF**, **DKU_PF**,
-**DKU_VF**) and a consolidated **DKU_NHF** (non-human fraction), which
-indicate what proportion of the informative reads supporting a candidate
+**DKU_VF**, **DKU_UCF**) and a consolidated **DKU_NHF** (non-human fraction),
+which indicate what proportion of the informative reads supporting a candidate
 variant appear to derive from a non-human organism rather than from the human
 child genome. A high non-human fraction is a strong indicator of a
 false-positive *de novo* call.
@@ -160,8 +160,8 @@ transfer events). A read that contains such shared k-mers could be assigned a
 non-human LCA by Kraken2 even though it actually originated from human DNA.
 
 To reduce false flagging, `kmer-denovo` applies a **human homology guard** to
-**all** non-human categories (bacterial, archaeal, fungal, protist, viral, and
-consolidated non-human):
+**all** non-human categories (bacterial, archaeal, fungal, protist, viral,
+UniVec Core, and consolidated non-human):
 
 ```python
 # kmer_taxids = taxids voting in the per-read kmer_detail_string
@@ -174,6 +174,7 @@ if has_human_kmer:
     is_fungal = False
     is_protist = False
     is_viral = False
+    is_univec_core = False
     is_nonhuman = False
 ```
 
@@ -275,13 +276,15 @@ The classification results are added to the output VCF as per-variant fields:
 | **DKA_PF** | Fraction of DKA fragments classified as **protist**. |
 | **DKU_VF** | Fraction of DKU fragments classified as **viral** by Kraken2 (RefSeq viral genomes in PrackenDB). Reads with any human k-mer evidence are conservatively excluded, which handles viruses that can integrate into human DNA. |
 | **DKA_VF** | Fraction of DKA fragments classified as **viral**. |
+| **DKU_UCF** | Fraction of DKU fragments classified as **UniVec Core** (synthetic sequencing-vector and adapter sequences, taxid 81077) by Kraken2. Reads with any human k-mer evidence are excluded. UniVec Core reads are **not** included in DKU_NHF because they are artificial constructs, not biological contamination. |
+| **DKA_UCF** | Fraction of DKA fragments classified as **UniVec Core**. |
 
 ### Consolidated non-human fraction
 
 | Field | Description |
 |-------|-------------|
-| **DKU_NHF** | Fraction of DKU fragments classified as **non-human** by Kraken2 (consolidated across all non-human domains). |
-| **DKA_NHF** | Fraction of DKA fragments classified as **non-human**. |
+| **DKU_NHF** | Fraction of DKU fragments classified as **non-human** by Kraken2 (consolidated across all non-human domains). UniVec Core reads are excluded. |
+| **DKA_NHF** | Fraction of DKA fragments classified as **non-human**. UniVec Core reads are excluded. |
 
 These are per-variant fractions: each fraction is computed from the intersection
 of that variant's informative reads with the global set of domain-specific or
@@ -294,12 +297,16 @@ non-human read names returned by Kraken2.
 - `DKU_BF` close to `1.0` — specifically bacterial contamination
 - `DKU_VF` close to `1.0` — specifically exogenous viral contamination (reads
   with integrated-virus k-mer signatures are excluded via the human homology guard)
+- `DKU_UCF` close to `1.0` — reads are classified as synthetic sequencing
+  vectors/adapters; likely library-preparation artifacts, not biological contamination
 - `DKA_NHF` close to `1.0` — reads that directly support the alternate allele
   sequence are predominantly non-human; high-confidence contamination flag
 - All fractions near `0.0` — no detectable non-human content among the
   supporting reads; the candidate variant is more likely genuine
 - `DKU_NHF` ≥ `DKU_BF` — the non-human fraction is always at least as large as
   any individual domain fraction, since it consolidates all non-human categories
+- `DKU_UCF` is separate from `DKU_NHF` — UniVec Core reads are tracked
+  independently and never inflate the non-human contamination signal
 
 ---
 
@@ -320,7 +327,7 @@ non-human read names returned by Kraken2.
 
 | CLI argument | Default | Effect |
 |---|---|---|
-| `--kraken2-db` | *(disabled)* | Path to the Kraken2 database directory; enables non-human fraction annotations (DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF, DKU_VF/DKA_VF, DKU_NHF/DKA_NHF) in VCF mode |
+| `--kraken2-db` | *(disabled)* | Path to the Kraken2 database directory; enables non-human fraction annotations (DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF, DKU_VF/DKA_VF, DKU_UCF/DKA_UCF, DKU_NHF/DKA_NHF) in VCF mode |
 | `--kraken2-confidence` | `0.0` | LCA confidence threshold (0.0–1.0); higher values reduce sensitivity, increase specificity |
 
 See [Kraken2 Database Setup Helper](../README.md#kraken2-database-setup-helper)

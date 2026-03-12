@@ -286,6 +286,11 @@ class TestPipelineIntegration:
             assert "DKA_VF" in sample
             assert sample["DKU_VF"] == pytest.approx(0.0)
             assert sample["DKA_VF"] == pytest.approx(0.0)
+            # UniVec Core fraction (0)
+            assert "DKU_UCF" in sample
+            assert "DKA_UCF" in sample
+            assert sample["DKU_UCF"] == pytest.approx(0.0)
+            assert sample["DKA_UCF"] == pytest.approx(0.0)
             # Non-human fraction (1.0 — same as bacterial here)
             assert "DKU_NHF" in sample
             assert "DKA_NHF" in sample

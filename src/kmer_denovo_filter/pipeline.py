@@ -60,8 +60,8 @@ def _run_kraken2_on_reads(
 
     Extracts sequences for *read_names* from *child_bam*, classifies them
     with kraken2, and returns a :class:`Kraken2Runner.Result` with tallied
-    bacterial / archaeal / fungal / protist / non-human / human / root
-    counts.
+    bacterial / archaeal / fungal / protist / viral / univec_core /
+    non-human / human / root counts.
 
     Args:
         child_bam: Path to child BAM/CRAM.
@@ -534,7 +534,7 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
 
     When non-human fraction annotations are present in *annotations*,
     DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF,
-    and DKU_NHF/DKA_NHF are also added.
+    DKU_VF/DKA_VF, DKU_UCF/DKA_UCF, and DKU_NHF/DKA_NHF are also added.
 
     Returns:
         The actual output path (with ``.gz`` suffix).
@@ -791,12 +791,39 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
         vcf_in.header.add_meta(
             category,
             items=[
+                ("ID", "DKU_UCF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of DKU fragments classified as UniVec Core "
+                 "(synthetic sequencing-vector/adapter sequences, taxid "
+                 "81077) by kraken2; denominator equals DKU (both are "
+                 "fragment-based). Reads with any human k-mer evidence "
+                 "are excluded. UniVec Core reads are NOT included in "
+                 "the non-human fraction (DKU_NHF)"),
+            ],
+        )
+        vcf_in.header.add_meta(
+            category,
+            items=[
+                ("ID", "DKA_UCF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of DKA fragments classified as UniVec Core "
+                 "by kraken2; DKA fragments are always a subset of DKU"),
+            ],
+        )
+        vcf_in.header.add_meta(
+            category,
+            items=[
                 ("ID", "DKU_NHF"),
                 ("Number", "1"),
                 ("Type", "Float"),
                 ("Description",
                  "Fraction of DKU fragments classified as non-human by "
-                 "kraken2; denominator equals DKU (both are fragment-based)"),
+                 "kraken2; denominator equals DKU (both are fragment-based). "
+                 "UniVec Core reads are excluded (see DKU_UCF)"),
             ],
         )
         vcf_in.header.add_meta(
@@ -807,7 +834,8 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                 ("Type", "Float"),
                 ("Description",
                  "Fraction of DKA fragments classified as non-human by "
-                 "kraken2; DKA fragments are always a subset of DKU"),
+                 "kraken2; DKA fragments are always a subset of DKU. "
+                 "UniVec Core reads are excluded (see DKA_UCF)"),
             ],
         )
 
@@ -864,6 +892,12 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                     rec.samples[proband_id]["DKA_VF"] = ann.get(
                         "dka_viral_fraction", 0.0,
                     )
+                    rec.samples[proband_id]["DKU_UCF"] = ann.get(
+                        "dku_univec_core_fraction", 0.0,
+                    )
+                    rec.samples[proband_id]["DKA_UCF"] = ann.get(
+                        "dka_univec_core_fraction", 0.0,
+                    )
                     rec.samples[proband_id]["DKU_NHF"] = ann.get(
                         "dku_nonhuman_fraction", 0.0,
                     )
@@ -893,6 +927,8 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                     rec.info["DKA_PF"] = ann.get("dka_protist_fraction", 0.0)
                     rec.info["DKU_VF"] = ann.get("dku_viral_fraction", 0.0)
                     rec.info["DKA_VF"] = ann.get("dka_viral_fraction", 0.0)
+                    rec.info["DKU_UCF"] = ann.get("dku_univec_core_fraction", 0.0)
+                    rec.info["DKA_UCF"] = ann.get("dka_univec_core_fraction", 0.0)
                     rec.info["DKU_NHF"] = ann.get("dku_nonhuman_fraction", 0.0)
                     rec.info["DKA_NHF"] = ann.get("dka_nonhuman_fraction", 0.0)
         vcf_out.write(rec)
@@ -4323,6 +4359,7 @@ def run_pipeline(args):
                 ("fungal", kraken2_result.fungal_read_names),
                 ("protist", kraken2_result.protist_read_names),
                 ("viral", kraken2_result.viral_read_names),
+                ("univec_core", kraken2_result.univec_core_read_names),
                 ("nonhuman", kraken2_result.nonhuman_read_names),
             ):
                 dku_count = len(dku_names.intersection(read_set))
@@ -4382,6 +4419,7 @@ def run_pipeline(args):
                 "fungal_reads": kraken2_result.fungal_count,
                 "protist_reads": kraken2_result.protist_count,
                 "viral_reads": kraken2_result.viral_count,
+                "univec_core_reads": kraken2_result.univec_core_count,
                 "nonhuman_reads": kraken2_result.nonhuman_count,
                 "human_reads": kraken2_result.human_count,
                 "root_reads": kraken2_result.root_count,

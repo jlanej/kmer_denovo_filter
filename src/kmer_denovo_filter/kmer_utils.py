@@ -358,8 +358,16 @@ class Kraken2Runner:
                 is particularly relevant for integrating viruses such as
                 endogenous retroviruses, HBV, and HPV.
             viral_count: Number of viral reads (after human homology guard).
+            univec_core_read_names: Set of read names assigned to UniVec
+                Core (taxid 81077) or descendant taxa.  These are synthetic
+                sequencing-vector and adapter sequences, not biological
+                organisms.  The human homology guard is applied: reads with
+                any human k-mer evidence are excluded.
+            univec_core_count: Number of UniVec Core reads (after human
+                homology guard).
             nonhuman_read_names: Set of read names definitively classified
                 as non-human (any clade outside the human lineage).
+                UniVec Core reads are excluded from this set.
             nonhuman_count: Number of non-human reads.
             human_count: Number of reads assigned to Homo sapiens (taxid 9606)
                 or descendants.
@@ -381,6 +389,8 @@ class Kraken2Runner:
             self.protist_count = 0
             self.viral_read_names = set()
             self.viral_count = 0
+            self.univec_core_read_names = set()
+            self.univec_core_count = 0
             self.nonhuman_read_names = set()
             self.nonhuman_count = 0
             self.human_count = 0
@@ -406,6 +416,7 @@ class Kraken2Runner:
                 f"{self.fungal_count} fungal, "
                 f"{self.protist_count} protist, "
                 f"{self.viral_count} viral, "
+                f"{self.univec_core_count} univec_core, "
                 f"{self.nonhuman_count} non-human ({nh_pct}%), "
                 f"{self.human_count} human, "
                 f"{self.root_count} root"
@@ -826,6 +837,7 @@ class Kraken2Runner:
                     is_fungal = taxid in taxid_sets["fungal"]
                     is_protist = taxid in taxid_sets["protist"]
                     is_viral = taxid in taxid_sets["viral"]
+                    is_univec_core = taxid in taxid_sets["univec_core"]
                     is_human = taxid in taxid_sets["human_clade"]
                     # Non-human: any taxid NOT on the human lineage and
                     # NOT a human descendant.  Reads classified at broad
@@ -847,6 +859,7 @@ class Kraken2Runner:
                     is_fungal = taxid == _FUNGI_TAXID
                     is_protist = False  # cannot determine without tree
                     is_viral = taxid == _VIRUSES_TAXID
+                    is_univec_core = taxid == _UNIVEC_CORE_TAXID
                     is_human = taxid == _HUMAN_TAXID
                     # Exclude UniVec Core (81077) and root (1) from non-human
                     # counts even in the fallback path.
@@ -865,6 +878,7 @@ class Kraken2Runner:
                     is_fungal = False
                     is_protist = False
                     is_viral = False
+                    is_univec_core = False
                     is_nonhuman = False
 
                 if is_bacterial:
@@ -882,6 +896,9 @@ class Kraken2Runner:
                 if is_viral:
                     result.viral_count += 1
                     result.viral_read_names.add(read_name)
+                if is_univec_core:
+                    result.univec_core_count += 1
+                    result.univec_core_read_names.add(read_name)
                 if is_nonhuman:
                     result.nonhuman_count += 1
                     result.nonhuman_read_names.add(read_name)

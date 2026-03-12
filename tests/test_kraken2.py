@@ -35,6 +35,7 @@ class TestKraken2Result:
         assert r.fungal_count == 0
         assert r.protist_count == 0
         assert r.viral_count == 0
+        assert r.univec_core_count == 0
         assert r.nonhuman_count == 0
         assert r.human_count == 0
         assert r.root_count == 0
@@ -43,6 +44,7 @@ class TestKraken2Result:
         assert r.fungal_read_names == set()
         assert r.protist_read_names == set()
         assert r.viral_read_names == set()
+        assert r.univec_core_read_names == set()
         assert r.nonhuman_read_names == set()
 
     def test_summary_empty(self):
@@ -62,6 +64,7 @@ class TestKraken2Result:
         r.fungal_count = 3
         r.protist_count = 1
         r.viral_count = 2
+        r.univec_core_count = 1
         r.nonhuman_count = 18
         r.human_count = 60
         r.root_count = 4
@@ -74,6 +77,7 @@ class TestKraken2Result:
         assert "3 fungal" in s
         assert "1 protist" in s
         assert "2 viral" in s
+        assert "1 univec_core" in s
         assert "18 non-human" in s
         assert "18.0%" in s
         assert "60 human" in s
@@ -938,7 +942,8 @@ class TestMultiDomainClassification:
 
 
 class TestUniVecCoreExclusion:
-    """Reads classified as UniVec Core are excluded from non-human counts."""
+    """Reads classified as UniVec Core are excluded from non-human counts
+    but tracked independently via univec_core_read_names/univec_core_count."""
 
     @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
     def test_univec_core_not_counted_as_nonhuman(self, mock_popen):
@@ -981,6 +986,10 @@ class TestUniVecCoreExclusion:
         # UniVec Core is not bacterial (it's synthetic)
         assert result.bacterial_count == 1
         assert "read1" not in result.bacterial_read_names
+        # UniVec Core IS tracked independently
+        assert result.univec_core_count == 1
+        assert "read1" in result.univec_core_read_names
+        assert "read2" not in result.univec_core_read_names
 
     @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
     def test_univec_core_child_taxid_not_counted_as_nonhuman(self, mock_popen):
@@ -1011,6 +1020,9 @@ class TestUniVecCoreExclusion:
         assert result.classified == 1
         assert result.nonhuman_count == 0
         assert "read1" not in result.nonhuman_read_names
+        # Descendant taxid IS tracked as UniVec Core
+        assert result.univec_core_count == 1
+        assert "read1" in result.univec_core_read_names
 
     @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
     def test_univec_core_fallback_excluded(self, mock_popen):
@@ -1038,6 +1050,9 @@ class TestUniVecCoreExclusion:
         assert result.nonhuman_count == 1
         assert "read1" not in result.nonhuman_read_names
         assert "read2" in result.nonhuman_read_names
+        # UniVec Core IS tracked via exact taxid match in fallback
+        assert result.univec_core_count == 1
+        assert "read1" in result.univec_core_read_names
 
     @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
     def test_univec_core_with_human_kmers_also_excluded(self, mock_popen):
@@ -1067,3 +1082,6 @@ class TestUniVecCoreExclusion:
 
         assert result.nonhuman_count == 0
         assert "read1" not in result.nonhuman_read_names
+        # Human homology guard also suppresses the univec_core count
+        assert result.univec_core_count == 0
+        assert "read1" not in result.univec_core_read_names
