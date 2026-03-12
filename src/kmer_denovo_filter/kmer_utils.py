@@ -257,6 +257,13 @@ _METAZOA_TAXID = 33208
 _VIRIDIPLANTAE_TAXID = 33090
 _VIRUSES_TAXID = 10239
 _HUMAN_TAXID = 9606
+# UniVec Core (NCBI taxid 81077): synthetic sequencing-vector and adapter
+# sequences included in PrackenDB.  These are artificial constructs — not
+# real biological organisms — and must be excluded from non-human counts so
+# that reads misclassified here (due to vector k-mer contamination in library
+# preparation or shared k-mers with human DNA) are not errantly flagged as
+# evidence of microbial contamination.
+_UNIVEC_CORE_TAXID = 81077
 
 # Interval between Kraken2 memory heartbeat log messages (seconds)
 _KRAKEN2_HEARTBEAT_INTERVAL = 30
@@ -301,6 +308,18 @@ class Kraken2Runner:
     retroviruses, HBV, HPV), whose integrated copies may share k-mers
     with the human reference.  A read carrying both viral and human
     k-mer evidence is conservatively excluded from the viral count.
+
+    **UniVec Core exclusion**: PrackenDB includes UniVec Core (taxid
+    81077), a curated set of synthetic sequencing-vector and adapter
+    sequences.  These are artificial constructs and do not represent
+    genuine biological contamination.  Reads classified under UniVec
+    Core are explicitly excluded from the consolidated non-human
+    fraction (NHF) so that vector library-preparation artefacts —
+    or human reads whose k-mers happen to match vector sequences —
+    are not errantly counted as microbial contamination.  The human
+    homology guard is applied first; UniVec Core exclusion provides
+    a second, unconditional safety net for any UniVec-classified read
+    regardless of k-mer voting.
 
     The ``--confidence`` threshold (default 0.0) controls how strict
     the LCA classification must be.  A value of 0.2 requires at least
@@ -566,8 +585,8 @@ class Kraken2Runner:
         """Load taxonomy and return descendant sets for all domains.
 
         Returns a dict with keys ``bacterial``, ``archaeal``, ``fungal``,
-        ``protist``, ``viral``, ``human_lineage``, and ``human_clade``.
-        Each value is a set of NCBI taxonomy IDs.
+        ``protist``, ``viral``, ``univec_core``, ``human_lineage``, and
+        ``human_clade``.  Each value is a set of NCBI taxonomy IDs.
 
         ``protist`` is defined as eukaryotic taxa that are **not**
         Metazoa, Fungi, or Viridiplantae.
@@ -579,6 +598,14 @@ class Kraken2Runner:
         k-mer evidence in the per-read detail string) conservatively
         excludes any read with both viral and human k-mer evidence from
         the viral numerator.
+
+        ``univec_core`` contains all descendants of UniVec Core (taxid
+        81077), a set of synthetic sequencing-vector and adapter sequences
+        included in PrackenDB.  These artificial constructs are excluded
+        from the consolidated non-human fraction unconditionally: they do
+        not represent biological contamination and may share k-mers with
+        human DNA, so classifying them as non-human would produce false
+        positives.
 
         ``human_lineage`` contains every taxid on the path from human
         (9606) to root — these are taxonomic ranks too broad to be
@@ -603,6 +630,9 @@ class Kraken2Runner:
         )
         protist = eukaryota - metazoa - fungal - viridiplantae
         viral = Kraken2Runner._descendants_of(parent_map, _VIRUSES_TAXID)
+        univec_core = Kraken2Runner._descendants_of(
+            parent_map, _UNIVEC_CORE_TAXID,
+        )
 
         human_lineage = Kraken2Runner._ancestors_of(parent_map, _HUMAN_TAXID)
         human_clade = Kraken2Runner._descendants_of(parent_map, _HUMAN_TAXID)
@@ -613,6 +643,7 @@ class Kraken2Runner:
             "fungal": fungal,
             "protist": protist,
             "viral": viral,
+            "univec_core": univec_core,
             "human_lineage": human_lineage,
             "human_clade": human_clade,
         }
@@ -800,9 +831,14 @@ class Kraken2Runner:
                     # NOT a human descendant.  Reads classified at broad
                     # ranks that include human (e.g. Eukaryota, root)
                     # are conservatively excluded.
+                    # UniVec Core reads are also excluded: they are synthetic
+                    # vector/adapter sequences, not biological organisms, and
+                    # may share k-mers with the human genome.  Counting them
+                    # as non-human would produce false positives.
                     is_nonhuman = (
                         taxid not in taxid_sets["human_lineage"]
                         and taxid not in taxid_sets["human_clade"]
+                        and taxid not in taxid_sets["univec_core"]
                     )
                 else:
                     # Fallback: only exact taxid matching
@@ -812,7 +848,9 @@ class Kraken2Runner:
                     is_protist = False  # cannot determine without tree
                     is_viral = taxid == _VIRUSES_TAXID
                     is_human = taxid == _HUMAN_TAXID
-                    is_nonhuman = taxid not in (_HUMAN_TAXID, 1)
+                    # Exclude UniVec Core (81077) and root (1) from non-human
+                    # counts even in the fallback path.
+                    is_nonhuman = taxid not in (_HUMAN_TAXID, 1, _UNIVEC_CORE_TAXID)
 
                 # Apply human homology guard to all non-human categories.
                 # This is especially important for viral reads: viruses

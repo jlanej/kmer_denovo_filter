@@ -127,14 +127,16 @@ The following domain-specific taxid sets are computed:
 | **Fungi** | 4751 | All descendants of the Fungi kingdom |
 | **Protist** | (computed) | Eukaryota (2759) descendants **minus** Metazoa (33208), Fungi (4751), and Viridiplantae (33090) descendants |
 | **Viruses** | 10239 | All descendants of the Viruses superkingdom (PrackenDB includes RefSeq viral genomes) |
+| **UniVec Core** | 81077 | Synthetic sequencing-vector and adapter sequences — **excluded** from non-human counts (see below) |
 
 ```python
 taxid_sets = Kraken2Runner._load_all_taxid_sets(db_path)
-# taxid_sets["bacterial"] = set of ALL taxids descending from taxid 2
-# taxid_sets["archaeal"]  = set of ALL taxids descending from taxid 2157
-# taxid_sets["fungal"]    = set of ALL taxids descending from taxid 4751
-# taxid_sets["protist"]   = eukaryota - metazoa - fungi - viridiplantae
-# taxid_sets["viral"]     = set of ALL taxids descending from taxid 10239
+# taxid_sets["bacterial"]   = set of ALL taxids descending from taxid 2
+# taxid_sets["archaeal"]    = set of ALL taxids descending from taxid 2157
+# taxid_sets["fungal"]      = set of ALL taxids descending from taxid 4751
+# taxid_sets["protist"]     = eukaryota - metazoa - fungi - viridiplantae
+# taxid_sets["viral"]       = set of ALL taxids descending from taxid 10239
+# taxid_sets["univec_core"] = set of ALL taxids descending from taxid 81077
 ```
 
 This lineage-aware check correctly classifies reads assigned to a specific
@@ -209,8 +211,13 @@ integrate into or co-evolve with the human genome:
   both viral and human k-mers, and the human homology guard conservatively
   excludes it from the viral count.
 - **UniVec Core** — PrackenDB includes UniVec Core (sequencing vector and
-  adapter sequences). While not biologically viral, these are treated the same
-  way: reads with human k-mer evidence are excluded.
+  adapter sequences, taxid 81077). These synthetic constructs are handled in
+  two layers: (1) the human homology guard excludes any UniVec-classified read
+  that also has human k-mer evidence, and (2) UniVec Core reads are
+  *unconditionally* excluded from the consolidated non-human fraction (NHF),
+  because they are artificial sequences, not biological organisms, and their
+  k-mers can overlap with real human genomic sequence.  See
+  [Step 5](#step-5--conservative-non-human-fraction-nhf) for details.
 
 In practice, reads from stably integrated viral sequences are expected to
 produce human k-mer evidence and be excluded from the viral count, meaning
@@ -230,7 +237,12 @@ only if:
    be human
 3. Its assigned taxid is **not** a descendant of human (9606) — this
    excludes human subspecies and populations
-4. It has **no human k-mer evidence** in the k-mer detail string (the
+4. Its assigned taxid is **not** under UniVec Core (taxid 81077) — synthetic
+   vector/adapter sequences are unconditionally excluded from NHF because
+   they are artificial constructs and may share k-mers with human DNA,
+   meaning a human read misclassified as UniVec Core would otherwise produce
+   a false positive
+5. It has **no human k-mer evidence** in the k-mer detail string (the
    human homology guard)
 
 This conservative definition means:
@@ -241,6 +253,7 @@ This conservative definition means:
 - A read classified as *Metazoa* (33208) → **not counted as non-human** (ancestor of human)
 - A read classified as *Drosophila melanogaster* (7227) → **counted as non-human** ✓ (not in human lineage)
 - A read classified as *Homo sapiens* (9606) → **not counted as non-human**
+- A read classified as UniVec Core (81077) → **not counted as non-human** (synthetic construct)
 
 ---
 
