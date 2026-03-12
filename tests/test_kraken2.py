@@ -16,6 +16,7 @@ from kmer_denovo_filter.kmer_utils import (
     _FUNGI_TAXID,
     _HUMAN_TAXID,
     _METAZOA_TAXID,
+    _UNIVEC_CORE_TAXID,
     _VIRIDIPLANTAE_TAXID,
     _VIRUSES_TAXID,
 )
@@ -34,6 +35,7 @@ class TestKraken2Result:
         assert r.fungal_count == 0
         assert r.protist_count == 0
         assert r.viral_count == 0
+        assert r.univec_core_count == 0
         assert r.nonhuman_count == 0
         assert r.human_count == 0
         assert r.root_count == 0
@@ -42,6 +44,7 @@ class TestKraken2Result:
         assert r.fungal_read_names == set()
         assert r.protist_read_names == set()
         assert r.viral_read_names == set()
+        assert r.univec_core_read_names == set()
         assert r.nonhuman_read_names == set()
 
     def test_summary_empty(self):
@@ -61,6 +64,7 @@ class TestKraken2Result:
         r.fungal_count = 3
         r.protist_count = 1
         r.viral_count = 2
+        r.univec_core_count = 1
         r.nonhuman_count = 18
         r.human_count = 60
         r.root_count = 4
@@ -73,6 +77,7 @@ class TestKraken2Result:
         assert "3 fungal" in s
         assert "1 protist" in s
         assert "2 viral" in s
+        assert "1 univec_core" in s
         assert "18 non-human" in s
         assert "18.0%" in s
         assert "60 human" in s
@@ -235,6 +240,7 @@ class TestKraken2RunnerClassify:
             "fungal": set(),
             "protist": set(),
             "viral": set(),
+            "univec_core": set(),
             "human_lineage": {9606, 1},
             "human_clade": {9606},
         }
@@ -604,6 +610,10 @@ class TestLoadAllTaxidSets:
             # Virus (not under cellular organisms)
             fh.write("10239\t|\t1\t|\tsuperkingdom\t|\n")
             fh.write("11676\t|\t10239\t|\tspecies\t|\n")
+            # Other sequences / UniVec Core (synthetic, under root)
+            fh.write("28384\t|\t1\t|\tno rank\t|\n")
+            fh.write("81077\t|\t28384\t|\tno rank\t|\n")  # UniVec Core
+            fh.write("99999\t|\t81077\t|\tno rank\t|\n")  # fictitious child
 
     def test_missing_db_returns_none(self):
         assert Kraken2Runner._load_all_taxid_sets("/nonexistent") is None
@@ -641,6 +651,12 @@ class TestLoadAllTaxidSets:
             assert 11676 in sets["viral"]   # viral species under 10239
             assert 562 not in sets["viral"]  # bacterial, not viral
             assert 9606 not in sets["viral"] # human, not viral
+
+            # UniVec Core: synthetic sequences under taxid 81077
+            assert 81077 in sets["univec_core"]
+            assert 99999 in sets["univec_core"]  # fictitious child
+            assert 562 not in sets["univec_core"]   # bacterial, not UniVec
+            assert 9606 not in sets["univec_core"]  # human, not UniVec
 
             # Human lineage
             assert 9606 in sets["human_lineage"]
@@ -694,6 +710,9 @@ class TestTaxidConstants:
     def test_human_taxid(self):
         assert _HUMAN_TAXID == 9606
 
+    def test_univec_core_taxid(self):
+        assert _UNIVEC_CORE_TAXID == 81077
+
 
 class TestKrakenHomologyGuard:
     """Ensure human-homologous reads are not over-flagged as non-human."""
@@ -718,6 +737,7 @@ class TestKrakenHomologyGuard:
             "fungal": set(),
             "protist": set(),
             "viral": set(),
+            "univec_core": set(),
             "human_lineage": {9606, 1},
             "human_clade": {9606},
         }
@@ -758,6 +778,7 @@ class TestKrakenHomologyGuard:
             "fungal": set(),
             "protist": set(),
             "viral": set(),
+            "univec_core": set(),
             "human_lineage": {9606, 1},
             "human_clade": {9606},
         }
@@ -797,6 +818,7 @@ class TestKrakenHomologyGuard:
             "fungal": set(),
             "protist": set(),
             "viral": {10239},
+            "univec_core": set(),
             "human_lineage": {9606, 1},
             "human_clade": {9606},
         }
@@ -845,6 +867,7 @@ class TestMultiDomainClassification:
             "fungal": {4751},
             "protist": {5794},
             "viral": {10239},
+            "univec_core": set(),
             "human_lineage": {9606, 9605, 33208, 2759, 131567, 1},
             "human_clade": {9606},
         }
@@ -900,6 +923,7 @@ class TestMultiDomainClassification:
             "fungal": set(),
             "protist": set(),
             "viral": set(),
+            "univec_core": set(),
             "human_lineage": {9606, 9605, 33208, 2759, 131567, 1},
             "human_clade": {9606},
         }
@@ -915,3 +939,149 @@ class TestMultiDomainClassification:
         assert result.nonhuman_count == 0
         assert result.bacterial_count == 0
         assert result.archaeal_count == 0
+
+
+class TestUniVecCoreExclusion:
+    """Reads classified as UniVec Core are excluded from non-human counts
+    but tracked independently via univec_core_read_names/univec_core_count."""
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_univec_core_not_counted_as_nonhuman(self, mock_popen):
+        """A read classified as UniVec Core (81077) is NOT non-human."""
+        # read1 → UniVec Core (synthetic vector); must not count as non-human
+        # read2 → Bacteria (562); should count as non-human
+        kraken2_output = (
+            "C\tread1\t81077\t100\t81077:10\n"
+            "C\tread2\t562\t100\t562:10\n"
+        )
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (kraken2_output.encode(), b"")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/fake/db")
+        taxid_sets = {
+            "bacterial": {2, 562},
+            "archaeal": set(),
+            "fungal": set(),
+            "protist": set(),
+            "viral": set(),
+            "univec_core": {81077, 99999},
+            "human_lineage": {9606, 1},
+            "human_clade": {9606},
+        }
+        with mock.patch.object(
+            Kraken2Runner, "_load_all_taxid_sets", return_value=taxid_sets,
+        ):
+            result = kr.classify_sequences({
+                "read1": "ACGTACGT",
+                "read2": "ACGTACGT",
+            })
+
+        # UniVec Core read is classified but must NOT appear in nonhuman
+        assert result.classified == 2
+        assert result.nonhuman_count == 1
+        assert "read1" not in result.nonhuman_read_names
+        assert "read2" in result.nonhuman_read_names
+        # UniVec Core is not bacterial (it's synthetic)
+        assert result.bacterial_count == 1
+        assert "read1" not in result.bacterial_read_names
+        # UniVec Core IS tracked independently
+        assert result.univec_core_count == 1
+        assert "read1" in result.univec_core_read_names
+        assert "read2" not in result.univec_core_read_names
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_univec_core_child_taxid_not_counted_as_nonhuman(self, mock_popen):
+        """A read classified under a UniVec Core descendant taxid is excluded."""
+        # Use a fictitious child taxid (99999) that is under 81077
+        kraken2_output = "C\tread1\t99999\t100\t99999:10\n"
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (kraken2_output.encode(), b"")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/fake/db")
+        taxid_sets = {
+            "bacterial": set(),
+            "archaeal": set(),
+            "fungal": set(),
+            "protist": set(),
+            "viral": set(),
+            "univec_core": {81077, 99999},
+            "human_lineage": {9606, 1},
+            "human_clade": {9606},
+        }
+        with mock.patch.object(
+            Kraken2Runner, "_load_all_taxid_sets", return_value=taxid_sets,
+        ):
+            result = kr.classify_sequences({"read1": "ACGTACGT"})
+
+        assert result.classified == 1
+        assert result.nonhuman_count == 0
+        assert "read1" not in result.nonhuman_read_names
+        # Descendant taxid IS tracked as UniVec Core
+        assert result.univec_core_count == 1
+        assert "read1" in result.univec_core_read_names
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_univec_core_fallback_excluded(self, mock_popen):
+        """In the fallback path (no taxonomy tree), UniVec Core is excluded."""
+        kraken2_output = (
+            "C\tread1\t81077\t100\t81077:10\n"   # UniVec Core exact taxid
+            "C\tread2\t562\t100\t562:10\n"        # E. coli (bacterial)
+        )
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (kraken2_output.encode(), b"")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/fake/db")
+        # Return None so classify_sequences uses the exact-taxid fallback
+        with mock.patch.object(
+            Kraken2Runner, "_load_all_taxid_sets", return_value=None,
+        ):
+            result = kr.classify_sequences({
+                "read1": "ACGTACGT",
+                "read2": "ACGTACGT",
+            })
+
+        # UniVec Core (81077) must be excluded even in fallback mode
+        assert result.nonhuman_count == 1
+        assert "read1" not in result.nonhuman_read_names
+        assert "read2" in result.nonhuman_read_names
+        # UniVec Core IS tracked via exact taxid match in fallback
+        assert result.univec_core_count == 1
+        assert "read1" in result.univec_core_read_names
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_univec_core_with_human_kmers_also_excluded(self, mock_popen):
+        """UniVec Core read with human k-mer evidence is excluded by both guards."""
+        # read classified as UniVec Core AND has human k-mers
+        kraken2_output = "C\tread1\t81077\t100\t81077:6 9606:4\n"
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (kraken2_output.encode(), b"")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/fake/db")
+        taxid_sets = {
+            "bacterial": set(),
+            "archaeal": set(),
+            "fungal": set(),
+            "protist": set(),
+            "viral": set(),
+            "univec_core": {81077},
+            "human_lineage": {9606, 1},
+            "human_clade": {9606},
+        }
+        with mock.patch.object(
+            Kraken2Runner, "_load_all_taxid_sets", return_value=taxid_sets,
+        ):
+            result = kr.classify_sequences({"read1": "ACGTACGT"})
+
+        assert result.nonhuman_count == 0
+        assert "read1" not in result.nonhuman_read_names
+        # Human homology guard also suppresses the univec_core count
+        assert result.univec_core_count == 0
+        assert "read1" not in result.univec_core_read_names

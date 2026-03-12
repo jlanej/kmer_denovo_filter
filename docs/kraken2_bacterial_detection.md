@@ -1,9 +1,9 @@
 # Kraken2 Non-Human Content Detection
 
 This document describes how `kmer-denovo` uses [Kraken2](https://github.com/DerrickWood/kraken2)
-to detect non-human content — bacteria, archaea, fungi, protists, and other
-non-human organisms — in the child's sequencing reads, and why Kraken2's
-k-mer–based classification approach is well suited to that goal.
+to detect non-human content — bacteria, archaea, fungi, protists, viruses,
+and synthetic sequencing vectors — in the child's sequencing reads, and why
+Kraken2's k-mer–based classification approach is well suited to that goal.
 
 ---
 
@@ -23,8 +23,11 @@ annotations (e.g. **DKU_BF**, **DKU_AF**, **DKU_FF**, **DKU_PF**,
 **DKU_VF**) and a consolidated **DKU_NHF** (non-human fraction), which
 indicate what proportion of the informative reads supporting a candidate
 variant appear to derive from a non-human organism rather than from the human
-child genome. A high non-human fraction is a strong indicator of a
-false-positive *de novo* call.
+child genome.  **DKU_UCF** separately tracks the fraction of reads classified
+as UniVec Core (synthetic vectors/adapters); these reads are excluded from
+DKU_NHF because they are artificial constructs, not biological contamination.
+A high non-human fraction is a strong indicator of a false-positive *de novo*
+call.
 
 ---
 
@@ -127,14 +130,16 @@ The following domain-specific taxid sets are computed:
 | **Fungi** | 4751 | All descendants of the Fungi kingdom |
 | **Protist** | (computed) | Eukaryota (2759) descendants **minus** Metazoa (33208), Fungi (4751), and Viridiplantae (33090) descendants |
 | **Viruses** | 10239 | All descendants of the Viruses superkingdom (PrackenDB includes RefSeq viral genomes) |
+| **UniVec Core** | 81077 | Synthetic sequencing-vector and adapter sequences — **excluded** from non-human counts (see below) |
 
 ```python
 taxid_sets = Kraken2Runner._load_all_taxid_sets(db_path)
-# taxid_sets["bacterial"] = set of ALL taxids descending from taxid 2
-# taxid_sets["archaeal"]  = set of ALL taxids descending from taxid 2157
-# taxid_sets["fungal"]    = set of ALL taxids descending from taxid 4751
-# taxid_sets["protist"]   = eukaryota - metazoa - fungi - viridiplantae
-# taxid_sets["viral"]     = set of ALL taxids descending from taxid 10239
+# taxid_sets["bacterial"]   = set of ALL taxids descending from taxid 2
+# taxid_sets["archaeal"]    = set of ALL taxids descending from taxid 2157
+# taxid_sets["fungal"]      = set of ALL taxids descending from taxid 4751
+# taxid_sets["protist"]     = eukaryota - metazoa - fungi - viridiplantae
+# taxid_sets["viral"]       = set of ALL taxids descending from taxid 10239
+# taxid_sets["univec_core"] = set of ALL taxids descending from taxid 81077
 ```
 
 This lineage-aware check correctly classifies reads assigned to a specific
@@ -158,8 +163,8 @@ transfer events). A read that contains such shared k-mers could be assigned a
 non-human LCA by Kraken2 even though it actually originated from human DNA.
 
 To reduce false flagging, `kmer-denovo` applies a **human homology guard** to
-**all** non-human categories (bacterial, archaeal, fungal, protist, viral, and
-consolidated non-human):
+**all** non-human categories (bacterial, archaeal, fungal, protist, viral,
+UniVec Core, and consolidated non-human):
 
 ```python
 # kmer_taxids = taxids voting in the per-read kmer_detail_string
@@ -172,6 +177,7 @@ if has_human_kmer:
     is_fungal = False
     is_protist = False
     is_viral = False
+    is_univec_core = False
     is_nonhuman = False
 ```
 
@@ -209,8 +215,13 @@ integrate into or co-evolve with the human genome:
   both viral and human k-mers, and the human homology guard conservatively
   excludes it from the viral count.
 - **UniVec Core** — PrackenDB includes UniVec Core (sequencing vector and
-  adapter sequences). While not biologically viral, these are treated the same
-  way: reads with human k-mer evidence are excluded.
+  adapter sequences, taxid 81077). These synthetic constructs are handled in
+  two layers: (1) the human homology guard excludes any UniVec-classified read
+  that also has human k-mer evidence, and (2) UniVec Core reads are
+  *unconditionally* excluded from the consolidated non-human fraction (NHF),
+  because they are artificial sequences, not biological organisms, and their
+  k-mers can overlap with real human genomic sequence.  See
+  [Step 5](#step-5--conservative-non-human-fraction-nhf) for details.
 
 In practice, reads from stably integrated viral sequences are expected to
 produce human k-mer evidence and be excluded from the viral count, meaning
@@ -230,7 +241,12 @@ only if:
    be human
 3. Its assigned taxid is **not** a descendant of human (9606) — this
    excludes human subspecies and populations
-4. It has **no human k-mer evidence** in the k-mer detail string (the
+4. Its assigned taxid is **not** under UniVec Core (taxid 81077) — synthetic
+   vector/adapter sequences are unconditionally excluded from NHF because
+   they are artificial constructs and may share k-mers with human DNA,
+   meaning a human read misclassified as UniVec Core would otherwise produce
+   a false positive
+5. It has **no human k-mer evidence** in the k-mer detail string (the
    human homology guard)
 
 This conservative definition means:
@@ -241,6 +257,7 @@ This conservative definition means:
 - A read classified as *Metazoa* (33208) → **not counted as non-human** (ancestor of human)
 - A read classified as *Drosophila melanogaster* (7227) → **counted as non-human** ✓ (not in human lineage)
 - A read classified as *Homo sapiens* (9606) → **not counted as non-human**
+- A read classified as UniVec Core (81077) → **not counted as non-human** (synthetic construct)
 
 ---
 
@@ -262,13 +279,15 @@ The classification results are added to the output VCF as per-variant fields:
 | **DKA_PF** | Fraction of DKA fragments classified as **protist**. |
 | **DKU_VF** | Fraction of DKU fragments classified as **viral** by Kraken2 (RefSeq viral genomes in PrackenDB). Reads with any human k-mer evidence are conservatively excluded, which handles viruses that can integrate into human DNA. |
 | **DKA_VF** | Fraction of DKA fragments classified as **viral**. |
+| **DKU_UCF** | Fraction of DKU fragments classified as **UniVec Core** (synthetic sequencing-vector and adapter sequences, taxid 81077) by Kraken2. Reads with any human k-mer evidence are excluded. UniVec Core reads are **not** included in DKU_NHF because they are artificial constructs, not biological contamination. |
+| **DKA_UCF** | Fraction of DKA fragments classified as **UniVec Core**. |
 
 ### Consolidated non-human fraction
 
 | Field | Description |
 |-------|-------------|
-| **DKU_NHF** | Fraction of DKU fragments classified as **non-human** by Kraken2 (consolidated across all non-human domains). |
-| **DKA_NHF** | Fraction of DKA fragments classified as **non-human**. |
+| **DKU_NHF** | Fraction of DKU fragments classified as **non-human** by Kraken2 (consolidated across all non-human domains). UniVec Core reads are excluded. |
+| **DKA_NHF** | Fraction of DKA fragments classified as **non-human**. UniVec Core reads are excluded. |
 
 These are per-variant fractions: each fraction is computed from the intersection
 of that variant's informative reads with the global set of domain-specific or
@@ -281,12 +300,16 @@ non-human read names returned by Kraken2.
 - `DKU_BF` close to `1.0` — specifically bacterial contamination
 - `DKU_VF` close to `1.0` — specifically exogenous viral contamination (reads
   with integrated-virus k-mer signatures are excluded via the human homology guard)
+- `DKU_UCF` close to `1.0` — reads are classified as synthetic sequencing
+  vectors/adapters; likely library-preparation artifacts, not biological contamination
 - `DKA_NHF` close to `1.0` — reads that directly support the alternate allele
   sequence are predominantly non-human; high-confidence contamination flag
 - All fractions near `0.0` — no detectable non-human content among the
   supporting reads; the candidate variant is more likely genuine
 - `DKU_NHF` ≥ `DKU_BF` — the non-human fraction is always at least as large as
   any individual domain fraction, since it consolidates all non-human categories
+- `DKU_UCF` is separate from `DKU_NHF` — UniVec Core reads are tracked
+  independently and never inflate the non-human contamination signal
 
 ---
 
@@ -307,7 +330,7 @@ non-human read names returned by Kraken2.
 
 | CLI argument | Default | Effect |
 |---|---|---|
-| `--kraken2-db` | *(disabled)* | Path to the Kraken2 database directory; enables non-human fraction annotations (DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF, DKU_VF/DKA_VF, DKU_NHF/DKA_NHF) in VCF mode |
+| `--kraken2-db` | *(disabled)* | Path to the Kraken2 database directory; enables non-human fraction annotations (DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF, DKU_VF/DKA_VF, DKU_UCF/DKA_UCF, DKU_NHF/DKA_NHF) in VCF mode |
 | `--kraken2-confidence` | `0.0` | LCA confidence threshold (0.0–1.0); higher values reduce sensitivity, increase specificity |
 
 See [Kraken2 Database Setup Helper](../README.md#kraken2-database-setup-helper)
