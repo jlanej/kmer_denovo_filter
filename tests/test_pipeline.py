@@ -594,6 +594,338 @@ class TestPipelineIntegration:
             "Insertion should produce DKU > 0"
         vcf_out.close()
 
+    def test_deletion_dka_positive(self, tmpdir):
+        """A de novo deletion must yield DKA > 0 and DKA_DKT > 0.
+
+        DKA counts fragments where at least one k-mer is absent from both
+        parents *and* the read sequence exactly matches the deletion alt
+        allele.  A positive DKA is the rigorous proof that the allele-
+        matching step correctly attributes the deletion read to the ALT.
+        """
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        anchor_0 = 50
+        del_len = 2
+
+        child_seq = ref_seq[40:anchor_0 + 1] + ref_seq[anchor_0 + 1 + del_len:80]
+        child_cigar = [(0, anchor_0 + 1 - 40), (2, del_len),
+                       (0, 80 - (anchor_0 + 1 + del_len))]
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(child_bam, ref_fa, chrom,
+                    [("read1", 40, child_seq, None, child_cigar)])
+
+        parent_seq = ref_seq[40:80]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom,
+                    [("mread1", 40, parent_seq, None)])
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(father_bam, ref_fa, chrom,
+                    [("fread1", 40, parent_seq, None)])
+
+        ref_allele = ref_seq[anchor_0:anchor_0 + 1 + del_len]
+        alt_allele = ref_seq[anchor_0]
+        in_vcf = os.path.join(tmpdir, "input.vcf")
+        _create_vcf(in_vcf, chrom, [(anchor_0 + 1, ref_allele, alt_allele)])
+
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
+        args = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--vcf", in_vcf, "--output", out_vcf,
+            "--kmer-size", "5", "--proband-id", "HG002",
+        ])
+        run_pipeline(args)
+
+        vcf_out = pysam.VariantFile(out_vcf)
+        records = list(vcf_out)
+        assert len(records) == 1
+        rec = records[0].samples["HG002"]
+        assert rec["DKU"] > 0, "Deletion read must produce DKU > 0"
+        assert rec["DKA"] > 0, \
+            "Deletion read must produce DKA > 0: allele-matching must " \
+            "confirm that the deletion-carrying read exactly supports ALT"
+        assert rec["DKA_DKT"] > 0, "DKA_DKT ratio must be positive for deletion"
+        vcf_out.close()
+
+    def test_insertion_dka_positive(self, tmpdir):
+        """A de novo insertion must yield DKA > 0 and DKA_DKT > 0.
+
+        Proves that the allele-matching step (read_supports_alt) correctly
+        recognises insertion-carrying reads as supporting the ALT allele,
+        producing a positive DKA score.
+        """
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        anchor_0 = 50
+        ins_bases = "GCA"
+
+        child_seq = (ref_seq[40:anchor_0 + 1] + ins_bases
+                     + ref_seq[anchor_0 + 1:80])
+        child_cigar = [(0, anchor_0 + 1 - 40), (1, len(ins_bases)),
+                       (0, 80 - (anchor_0 + 1))]
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(child_bam, ref_fa, chrom,
+                    [("read1", 40, child_seq, None, child_cigar)])
+
+        parent_seq = ref_seq[40:80]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom,
+                    [("mread1", 40, parent_seq, None)])
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(father_bam, ref_fa, chrom,
+                    [("fread1", 40, parent_seq, None)])
+
+        ref_allele = ref_seq[anchor_0]
+        alt_allele = ref_seq[anchor_0] + ins_bases
+        in_vcf = os.path.join(tmpdir, "input.vcf")
+        _create_vcf(in_vcf, chrom, [(anchor_0 + 1, ref_allele, alt_allele)])
+
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
+        args = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--vcf", in_vcf, "--output", out_vcf,
+            "--kmer-size", "5", "--proband-id", "HG002",
+        ])
+        run_pipeline(args)
+
+        vcf_out = pysam.VariantFile(out_vcf)
+        records = list(vcf_out)
+        assert len(records) == 1
+        rec = records[0].samples["HG002"]
+        assert rec["DKU"] > 0, "Insertion read must produce DKU > 0"
+        assert rec["DKA"] > 0, \
+            "Insertion read must produce DKA > 0: allele-matching must " \
+            "confirm that the insertion-carrying read exactly supports ALT"
+        assert rec["DKA_DKT"] > 0, "DKA_DKT ratio must be positive for insertion"
+        vcf_out.close()
+
+    def test_deletion_dka_is_allele_specific_not_all_spanning(self, tmpdir):
+        """DKA counts only reads that carry the deletion, not every read
+        spanning the site.
+
+        Setup:
+        - Parents have *no* reads at all (empty BAMs), making every child
+          k-mer technically unique so that DKU equals DKT.
+        - Child has two reads at the deletion site: one carrying the
+          2-base deletion (del_read) and one matching reference (ref_read).
+        - Both reads produce unique k-mers (parents are empty), so
+          DKU = DKT = 2.
+        - Only del_read passes read_supports_alt, so DKA = 1 < DKU.
+
+        This rigorously demonstrates that DKA is allele-specific: even when
+        a read has unique k-mers at a deletion site, it is NOT counted in
+        DKA unless it actually carries the alt allele.
+        """
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        anchor_0 = 50
+        del_len = 2
+
+        # Read 1: carries the 2-base deletion
+        del_seq = ref_seq[40:anchor_0 + 1] + ref_seq[anchor_0 + 1 + del_len:80]
+        del_cigar = [(0, anchor_0 + 1 - 40), (2, del_len),
+                     (0, 80 - (anchor_0 + 1 + del_len))]
+
+        # Read 2: reference allele (no deletion) — same region
+        ref_read_seq = ref_seq[40:80]
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(child_bam, ref_fa, chrom, [
+            ("del_read", 40, del_seq, None, del_cigar),
+            ("ref_read", 40, ref_read_seq, None),
+        ])
+
+        # Parents: empty BAMs so every child k-mer is unique
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom, [])
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(father_bam, ref_fa, chrom, [])
+
+        ref_allele = ref_seq[anchor_0:anchor_0 + 1 + del_len]
+        alt_allele = ref_seq[anchor_0]
+        in_vcf = os.path.join(tmpdir, "input.vcf")
+        _create_vcf(in_vcf, chrom, [(anchor_0 + 1, ref_allele, alt_allele)])
+
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
+        args = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--vcf", in_vcf, "--output", out_vcf,
+            "--kmer-size", "5", "--proband-id", "HG002",
+        ])
+        run_pipeline(args)
+
+        vcf_out = pysam.VariantFile(out_vcf)
+        records = list(vcf_out)
+        assert len(records) == 1
+        rec = records[0].samples["HG002"]
+        dkt = rec["DKT"]
+        dku = rec["DKU"]
+        dka = rec["DKA"]
+        assert dkt == 2, \
+            f"Both reads span the deletion site; expected DKT=2, got {dkt}"
+        assert dku == 2, \
+            f"Both reads have unique k-mers (empty parents); expected DKU=2, got {dku}"
+        assert dka == 1, \
+            f"Only the deletion read supports ALT; expected DKA=1, got {dka}"
+        vcf_out.close()
+
+    def test_insertion_dka_is_allele_specific_not_all_spanning(self, tmpdir):
+        """DKA counts only reads that carry the insertion, not every read
+        spanning the site.
+
+        Setup mirrors test_deletion_dka_is_allele_specific_not_all_spanning
+        but for an insertion:
+        - Empty parent BAMs → all child k-mers are unique (DKU = DKT).
+        - Child has an insertion read and a ref-allele read.
+        - Only the insertion read passes read_supports_alt → DKA = 1 < DKU.
+        """
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        anchor_0 = 50
+        ins_bases = "GCA"
+
+        # Read 1: carries the insertion
+        ins_seq = (ref_seq[40:anchor_0 + 1] + ins_bases
+                   + ref_seq[anchor_0 + 1:80])
+        ins_cigar = [(0, anchor_0 + 1 - 40), (1, len(ins_bases)),
+                     (0, 80 - (anchor_0 + 1))]
+
+        # Read 2: reference allele (no insertion)
+        ref_read_seq = ref_seq[40:80]
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(child_bam, ref_fa, chrom, [
+            ("ins_read", 40, ins_seq, None, ins_cigar),
+            ("ref_read", 40, ref_read_seq, None),
+        ])
+
+        # Parents: empty BAMs so every child k-mer is unique
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom, [])
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(father_bam, ref_fa, chrom, [])
+
+        ref_allele = ref_seq[anchor_0]
+        alt_allele = ref_seq[anchor_0] + ins_bases
+        in_vcf = os.path.join(tmpdir, "input.vcf")
+        _create_vcf(in_vcf, chrom, [(anchor_0 + 1, ref_allele, alt_allele)])
+
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
+        args = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--vcf", in_vcf, "--output", out_vcf,
+            "--kmer-size", "5", "--proband-id", "HG002",
+        ])
+        run_pipeline(args)
+
+        vcf_out = pysam.VariantFile(out_vcf)
+        records = list(vcf_out)
+        assert len(records) == 1
+        rec = records[0].samples["HG002"]
+        dkt = rec["DKT"]
+        dku = rec["DKU"]
+        dka = rec["DKA"]
+        assert dkt == 2, \
+            f"Both reads span the insertion site; expected DKT=2, got {dkt}"
+        assert dku == 2, \
+            f"Both reads have unique k-mers (empty parents); expected DKU=2, got {dku}"
+        assert dka == 1, \
+            f"Only the insertion read supports ALT; expected DKA=1, got {dka}"
+        vcf_out.close()
+
+    def test_decomposed_indel_allele_specific_dka(self, tmpdir):
+        """Two different deletion alleles at the same anchor position receive
+        independent DKA scores.
+
+        When the child carries a 1-base deletion but NOT a 3-base deletion,
+        the record for the 1-base deletion must have DKA > 0 while the
+        record for the 3-base deletion must have DKA = 0.
+
+        This is the indel equivalent of test_decomposed_multiallelic_unique_
+        annotations and proves that DKA allele-matching discriminates between
+        different indel lengths at the same position.
+        """
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        anchor_0 = 50
+
+        # Child carries a 1-base deletion (del1)
+        del1_len = 1
+        del1_seq = ref_seq[40:anchor_0 + 1] + ref_seq[anchor_0 + 1 + del1_len:80]
+        del1_cigar = [(0, anchor_0 + 1 - 40), (2, del1_len),
+                      (0, 80 - (anchor_0 + 1 + del1_len))]
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(child_bam, ref_fa, chrom,
+                    [("read1", 40, del1_seq, None, del1_cigar)])
+
+        # Parents match reference (neither deletion present)
+        parent_seq = ref_seq[40:80]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom,
+                    [("mread1", 40, parent_seq, None)])
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(father_bam, ref_fa, chrom,
+                    [("fread1", 40, parent_seq, None)])
+
+        # VCF: two decomposed records at the same anchor position
+        del1_ref = ref_seq[anchor_0:anchor_0 + 1 + del1_len]  # 2-base REF
+        del1_alt = ref_seq[anchor_0]                           # 1-base ALT
+
+        del2_len = 3
+        del2_ref = ref_seq[anchor_0:anchor_0 + 1 + del2_len]  # 4-base REF
+        del2_alt = ref_seq[anchor_0]                           # 1-base ALT
+
+        in_vcf = os.path.join(tmpdir, "input.vcf")
+        _create_vcf(in_vcf, chrom, [
+            (anchor_0 + 1, del1_ref, del1_alt),
+            (anchor_0 + 1, del2_ref, del2_alt),
+        ])
+
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
+        args = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--vcf", in_vcf, "--output", out_vcf,
+            "--kmer-size", "5", "--proband-id", "HG002",
+        ])
+        run_pipeline(args)
+
+        vcf_out = pysam.VariantFile(out_vcf)
+        records = list(vcf_out)
+        assert len(records) == 2, "Both decomposed records should be present"
+
+        rec_del1 = [r for r in records if r.alts and r.alts[0] == del1_alt
+                    and len(r.ref) == len(del1_ref)]
+        rec_del2 = [r for r in records if r.alts and r.alts[0] == del2_alt
+                    and len(r.ref) == len(del2_ref)]
+        assert len(rec_del1) == 1, "Expected one record for the 1-base deletion"
+        assert len(rec_del2) == 1, "Expected one record for the 3-base deletion"
+
+        # 1-base deletion: child carries it → DKA > 0
+        dka_del1 = rec_del1[0].samples["HG002"]["DKA"]
+        assert dka_del1 > 0, \
+            f"Child carries 1-base deletion; expected DKA > 0, got {dka_del1}"
+
+        # 3-base deletion: child does NOT carry it → DKA = 0
+        dka_del2 = rec_del2[0].samples["HG002"]["DKA"]
+        assert dka_del2 == 0, \
+            f"Child does NOT carry 3-base deletion; expected DKA = 0, got {dka_del2}"
+        vcf_out.close()
+
     def test_summary_includes_pkc_fields(self, tmpdir):
         """Summary output should include MAX_PKC and AVG_PKC columns."""
         chrom = "chr1"
