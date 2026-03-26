@@ -245,34 +245,75 @@ and annotated with the following fields:
   Returns 0 when no variant-spanning k-mers appear in the parents.
 * **MAX_PKC_ALT** / **AVG_PKC_ALT** / **MIN_PKC_ALT** – Same as above but
   restricted to k-mers from reads that directly support the alternate allele.
-* **DKU_BF** / **DKA_BF** *(optional; when `--kraken2-db` is provided in VCF mode)* –
-  Fraction of DKU/DKA fragments classified as bacterial by Kraken2.
-* **DKU_AF** / **DKA_AF** – Fraction classified as archaeal.
-* **DKU_FF** / **DKA_FF** – Fraction classified as fungal.
-* **DKU_PF** / **DKA_PF** – Fraction classified as protist
-  (eukaryotic but not metazoan, fungal, or plant).
-* **DKU_VF** / **DKA_VF** – Fraction classified as viral (RefSeq viral
-  genomes are included in PrackenDB). Reads with any human k-mer evidence
-  are conservatively excluded — this specifically handles viruses that can
-  integrate into the human genome (e.g. endogenous retroviruses, HBV, HPV),
-  ensuring integrated viral sequences are not counted as exogenous contamination.
-* **DKU_UCF** / **DKA_UCF** – Fraction classified as UniVec Core (synthetic
-  sequencing-vector and adapter sequences, taxid 81077). Reads with any
-  human k-mer evidence are conservatively excluded. UniVec Core reads are
-  **not** included in the non-human fraction (DKU_NHF/DKA_NHF) because they
-  are artificial constructs, not biological contamination.
-* **DKU_NHF** / **DKA_NHF** – Consolidated non-human fraction: any read
-  definitively classified outside the human lineage. UniVec Core reads are
-  excluded from this fraction.
 
-  Since DKU, DKA, and the fraction denominators all count unique fragment names,
-  every fraction is always in [0.0, 1.0]. To reduce over-flagging from shared
-  human homology, reads with explicit human taxid k-mer evidence in Kraken2's
-  per-read output are conservatively excluded from **all** non-human numerators.
-  Reads classified at ambiguous taxonomic ranks that include human (e.g.
-  Eukaryota, Metazoa, root) are also excluded from the non-human fraction.
-  See [Kraken2 Non-Human Content Detection](docs/kraken2_bacterial_detection.md)
-  for a detailed description of the classification method.
+The following fields are populated only when `--kraken2-db` is provided in VCF
+mode. For all fraction fields the denominator is the total fragment count for
+that read category: **DKU\_\*** fields divide by DKU; **DKA\_\*** fields divide
+by DKA. Because DKA ≤ DKU by construction, DKA\_\* fractions reflect only the
+allele-supporting subset of DKU reads, and can differ from their DKU\_\*
+counterparts. Every fraction is always in \[0.0, 1.0\].
+
+* **DKU_BF** – **Bacterial fraction of DKU.** Number of DKU fragments
+  classified as bacterial by Kraken2, divided by DKU
+  (= bacterial\_reads\_in\_DKU / DKU).
+* **DKA_BF** – **Bacterial fraction of DKA.** Number of DKA fragments
+  classified as bacterial by Kraken2, divided by DKA
+  (= bacterial\_reads\_in\_DKA / DKA). Because DKA ≤ DKU, DKA\_BF can differ
+  from DKU\_BF.
+* **DKU_AF** – **Archaeal fraction of DKU.** Number of DKU fragments
+  classified as archaeal by Kraken2, divided by DKU
+  (= archaeal\_reads\_in\_DKU / DKU).
+* **DKA_AF** – **Archaeal fraction of DKA.** Number of DKA fragments
+  classified as archaeal by Kraken2, divided by DKA
+  (= archaeal\_reads\_in\_DKA / DKA).
+* **DKU_FF** – **Fungal fraction of DKU.** Number of DKU fragments
+  classified as fungal by Kraken2, divided by DKU
+  (= fungal\_reads\_in\_DKU / DKU).
+* **DKA_FF** – **Fungal fraction of DKA.** Number of DKA fragments
+  classified as fungal by Kraken2, divided by DKA
+  (= fungal\_reads\_in\_DKA / DKA).
+* **DKU_PF** – **Protist fraction of DKU.** Number of DKU fragments
+  classified as protist (eukaryotic but not metazoan, fungal, or plant) by
+  Kraken2, divided by DKU (= protist\_reads\_in\_DKU / DKU).
+* **DKA_PF** – **Protist fraction of DKA.** Number of DKA fragments
+  classified as protist by Kraken2, divided by DKA
+  (= protist\_reads\_in\_DKA / DKA).
+* **DKU_VF** – **Viral fraction of DKU.** Number of DKU fragments classified
+  as viral by Kraken2, divided by DKU (= viral\_reads\_in\_DKU / DKU). RefSeq
+  viral genomes are included in PrackenDB. Reads with any human k-mer evidence
+  are conservatively excluded — this handles viruses that can integrate into
+  the human genome (e.g. endogenous retroviruses, HBV, HPV), ensuring
+  integrated viral sequences are not counted as exogenous contamination.
+* **DKA_VF** – **Viral fraction of DKA.** Number of DKA fragments classified
+  as viral by Kraken2, divided by DKA (= viral\_reads\_in\_DKA / DKA). The same
+  human-homology exclusion applies as for DKU\_VF.
+* **DKU_UCF** – **UniVec Core fraction of DKU.** Number of DKU fragments
+  classified as UniVec Core (synthetic sequencing-vector and adapter sequences,
+  taxid 81077) by Kraken2, divided by DKU (= univec\_reads\_in\_DKU / DKU).
+  Reads with any human k-mer evidence are conservatively excluded. UniVec Core
+  reads are **not** included in DKU\_NHF because they are artificial constructs,
+  not biological contamination.
+* **DKA_UCF** – **UniVec Core fraction of DKA.** Number of DKA fragments
+  classified as UniVec Core by Kraken2, divided by DKA
+  (= univec\_reads\_in\_DKA / DKA). Same exclusions apply as for DKU\_UCF; not
+  included in DKA\_NHF.
+* **DKU_NHF** – **Consolidated non-human fraction of DKU.** Fraction of DKU
+  fragments definitively classified outside the human lineage by Kraken2,
+  divided by DKU (= non\_human\_reads\_in\_DKU / DKU). This is the union of
+  bacterial, archaeal, fungal, protist, and viral reads; UniVec Core reads are
+  excluded because they are artificial constructs, not biological contamination.
+* **DKA_NHF** – **Consolidated non-human fraction of DKA.** Fraction of DKA
+  fragments definitively classified outside the human lineage by Kraken2,
+  divided by DKA (= non\_human\_reads\_in\_DKA / DKA). Same composition and
+  exclusions as DKU\_NHF, applied to the allele-supporting DKA subset.
+
+To reduce over-flagging from shared human homology, reads with explicit human
+taxid k-mer evidence in Kraken2's per-read output are conservatively excluded
+from **all** non-human numerators. Reads classified at ambiguous taxonomic ranks
+that include human (e.g. Eukaryota, Metazoa, root) are also excluded from the
+non-human fraction. See
+[Kraken2 Non-Human Content Detection](docs/kraken2_bacterial_detection.md)
+for a detailed description of the classification method.
 
 When `--proband-id` is provided and matches a sample in the input VCF,
 annotations are written as **FORMAT** (per-sample) fields on that sample.
