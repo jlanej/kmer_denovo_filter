@@ -199,6 +199,7 @@ kmer-denovo \
 | `--kraken2-memory-mapping` | false | Passes Kraken2 `--memory-mapping` so DB files are memory-mapped from disk to reduce RAM footprint (usually slower, but helpful on RAM-constrained nodes) |
 | `--kraken2-read-detail` | auto | Output path for the per-read Kraken2 classification detail BED file (bgzipped + tabix-indexed). Auto-derived from `--output` when `--kraken2-db` is provided (e.g. `my_trio.annotated.kraken2_reads.bed.gz`) |
 | `--kraken2-span-bed` | auto | Output path for the species-annotated genomic span BED file (bgzipped + tabix-indexed). Maps each classified read's aligned reference span to its Kraken2-assigned species, including soft-clip lengths and split-read indicators. Auto-derived from `--output` when `--kraken2-db` is provided (e.g. `my_trio.annotated.kraken2_spans.bed.gz`) |
+| `--no-expanded-bed` | false | Disable generation of the soft-clip-expanded span BED file. By default, when `--kraken2-db` is provided, both the standard span BED and an expanded span BED are written |
 | **VCF mode** | | |
 | `--vcf` | – | Input VCF with candidate variants (activates VCF mode) |
 | `--output` / `-o` | – | Output annotated VCF (required with `--vcf`) |
@@ -352,6 +353,17 @@ This enables visual audit in IGV when loaded alongside the informative reads BAM
 Override the path with `--kraken2-span-bed`.  See
 [Genomic Span BED File](docs/kraken2_bacterial_detection.md#genomic-span-bed-file)
 for the full schema and interpretation guidance.
+
+A companion **expanded span BED file** is also produced (default:
+`<output>.kraken2_spans_expanded.bed.gz` + `.tbi` tabix index).  This BED
+extends each read's coordinates by the observed soft-clip lengths
+(`expanded_start = max(0, start - softclip_left)`,
+`expanded_end = end + softclip_right`), providing a "maximum hypothetical
+coverage" window for visualization.  Two extra columns (`aligned_start`,
+`aligned_end`) preserve the original mapped coordinates.  Suppress with
+`--no-expanded-bed`.  See
+[Expanded Genomic Span BED File](docs/kraken2_bacterial_detection.md#expanded-genomic-span-bed-file)
+for details.
 
 ### Kraken2 Database Setup Helper
 

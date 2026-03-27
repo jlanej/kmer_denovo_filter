@@ -497,6 +497,94 @@ sequence, not each alignment segment independently).
 
 ---
 
+## Expanded Genomic Span BED File
+
+In addition to the standard span BED described above, the pipeline writes an
+**expanded span BED file** that naively extends each read's BED coordinates by
+the observed soft-clip lengths.  The expanded coordinates hypothesize the
+genomic span as if all soft-clipped bases were aligned contiguously to the
+reference at the mapped location:
+
+```
+expanded_start = max(0, reference_start - softclip_left)
+expanded_end   = reference_end + softclip_right
+```
+
+**The expanded spans are for visualization only** — they do not represent
+verified reference alignments.  The actual mapped region is preserved in
+the `aligned_start` and `aligned_end` columns.
+
+### Scientific Rationale
+
+Contamination and library-prep chimeras often manifest as reads with partial
+human alignments and substantial soft-clipped ends representing non-human
+(e.g. bacterial) sequence.  Visually, clusters of soft-clipped non-human
+reads with congruent expanded spans strongly suggest local contamination,
+integration, or library chimera events.  The expanded span provides a
+"maximum hypothetical coverage" window to focus curation or pileup analysis.
+
+### File naming
+
+Written alongside the standard span BED when `--kraken2-db` is provided
+(unless `--no-expanded-bed` is specified):
+
+- Default: derived from `--output` (e.g. `my_trio.annotated.kraken2_spans_expanded.bed.gz`)
+- Disable with `--no-expanded-bed`
+
+### Columns
+
+The expanded BED contains all 15 columns from the standard span BED, plus
+two additional columns referencing the original mapped coordinates.
+
+| Column | Name | Type | Description |
+|--------|------|------|-------------|
+| 1 | `chrom` | String | Reference contig name. |
+| 2 | `start` | Integer | 0-based **expanded** start: `max(0, reference_start - softclip_left)`. |
+| 3 | `end` | Integer | 0-based exclusive **expanded** end: `reference_end + softclip_right`. May exceed chromosome length. |
+| 4 | `taxon_name` | String | Scientific name (underscored) from Kraken2 LCA assignment. |
+| 5 | `domain` | String | Domain classification. |
+| 6 | `guard_status` | String | Human homology guard status. |
+| 7 | `is_nonhuman` | String | `true` or `false`. |
+| 8 | `read_name` | String | SAM QNAME. |
+| 9 | `variant` | String | Comma-separated variant key(s). |
+| 10 | `read_set` | String | `DKA` or `DKU`. |
+| 11 | `mapq` | Integer | Mapping quality. |
+| 12 | `softclip_left` | Integer | Left soft-clip length. |
+| 13 | `softclip_right` | Integer | Right soft-clip length. |
+| 14 | `is_split` | String | `true` if the read has an SA tag. |
+| 15 | `is_supplementary` | String | `true` if this record is supplementary. |
+| 16 | `aligned_start` | Integer | Original 0-based aligned start (`reference_start`). |
+| 17 | `aligned_end` | Integer | Original 0-based exclusive aligned end (`reference_end`). |
+
+### Example
+
+```bed
+#chrom	start	end	taxon_name	domain	guard_status	is_nonhuman	read_name	variant	read_set	mapq	softclip_left	softclip_right	is_split	is_supplementary	aligned_start	aligned_end
+chr1	99980	100155	Escherichia_coli	Bacteria	PASS	true	read001	chr1:100050:A:T	DKA	60	20	5	false	false	100000	100150
+```
+
+Here the original aligned span is `chr1:100000–100150` (columns 16–17), and
+the expanded span extends 20 bp left (soft-clip) and 5 bp right.  Compare
+with the standard span BED row for the same read:
+
+```bed
+chr1	100000	100150	Escherichia_coli	Bacteria	PASS	true	read001	chr1:100050:A:T	DKA	60	20	5	false	false
+```
+
+### Comparing Standard and Expanded BED Tracks
+
+Loading both BED tracks in IGV (or a similar genome browser) enables
+powerful visual contamination auditing:
+
+| Pattern | Standard BED | Expanded BED | Interpretation |
+|---------|-------------|-------------|----------------|
+| Clustered non-human soft-clipped reads | Small, congruent aligned regions | Large, consistently expanded intervals spanning a locus | Possible library/prep contamination or integration breakpoint |
+| Fully mapped non-human read | Standard and expanded spans nearly identical | Standard and expanded spans nearly identical | Likely genuine non-human sequence mapping to conserved/low-complexity region |
+| Mixed/ambiguous read | Small aligned span | Expanded covers ambiguous region | Carefully review; may indicate integration or clipped artifact |
+| Split read with large clips | Two small intervals on different chroms | Each interval extended by its clips | Cross-chromosome chimera; if congruent across reads, likely systematic contamination |
+
+---
+
 ## Why Kraken2 Is Well Suited to This Task
 
 | Property | Benefit |
@@ -518,6 +606,7 @@ sequence, not each alignment segment independently).
 | `--kraken2-confidence` | `0.0` | LCA confidence threshold (0.0–1.0); higher values reduce sensitivity, increase specificity |
 | `--kraken2-read-detail` | *(auto-derived)* | Output path for the per-read classification detail BED file. Auto-derived from `--output` when `--kraken2-db` is provided (e.g. `my_trio.annotated.kraken2_reads.bed.gz`). |
 | `--kraken2-span-bed` | *(auto-derived)* | Output path for the species-annotated genomic span BED file. Auto-derived from `--output` when `--kraken2-db` is provided (e.g. `my_trio.annotated.kraken2_spans.bed.gz`). |
+| `--no-expanded-bed` | `false` | When set, disables generation of the expanded span BED file. By default both standard and expanded span BEDs are produced. |
 
 See [Kraken2 Database Setup Helper](../README.md#kraken2-database-setup-helper)
 for instructions on downloading PrackenDB.
