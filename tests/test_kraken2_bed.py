@@ -348,8 +348,7 @@ class TestExtractSoftclips:
         assert _extract_softclips([(4, 100)]) == (100, 0)
 
     def test_hard_clips_ignored(self):
-        # 5H10S80M5S3H — hard clips (op 5) should not count as soft clips
-        # but soft clips inside hard clips still count
+        # 5H10S80M5S3H — hard clips (op 5) do not mask soft clips
         assert _extract_softclips([(5, 5), (4, 10), (0, 80), (4, 5), (5, 3)]) == (10, 5)
 
 

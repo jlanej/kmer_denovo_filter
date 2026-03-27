@@ -198,6 +198,7 @@ kmer-denovo \
 | `--kraken2-confidence` | 0.0 | Kraken2 LCA confidence threshold (0.0–1.0) |
 | `--kraken2-memory-mapping` | false | Passes Kraken2 `--memory-mapping` so DB files are memory-mapped from disk to reduce RAM footprint (usually slower, but helpful on RAM-constrained nodes) |
 | `--kraken2-read-detail` | auto | Output path for the per-read Kraken2 classification detail BED file (bgzipped + tabix-indexed). Auto-derived from `--output` when `--kraken2-db` is provided (e.g. `my_trio.annotated.kraken2_reads.bed.gz`) |
+| `--kraken2-span-bed` | auto | Output path for the species-annotated genomic span BED file (bgzipped + tabix-indexed). Maps each classified read's aligned reference span to its Kraken2-assigned species, including soft-clip lengths and split-read indicators. Auto-derived from `--output` when `--kraken2-db` is provided (e.g. `my_trio.annotated.kraken2_spans.bed.gz`) |
 | **VCF mode** | | |
 | `--vcf` | – | Input VCF with candidate variants (activates VCF mode) |
 | `--output` / `-o` | – | Output annotated VCF (required with `--vcf`) |
@@ -342,6 +343,15 @@ guard status, k-mer vote distribution, and final non-human determination.
 Override the path with `--kraken2-read-detail`.  See
 [Per-Read Classification Detail (BED)](docs/kraken2_bacterial_detection.md#per-read-classification-detail-bed)
 for the full schema.
+
+Additionally, a species-annotated **genomic span BED file** is written (default:
+`<output>.kraken2_spans.bed.gz` + `.tbi` tabix index).  This BED maps each
+classified read's aligned reference span (`reference_start` to `reference_end`)
+to its Kraken2-assigned species, with soft-clip lengths and split-read indicators.
+This enables visual audit in IGV when loaded alongside the informative reads BAM.
+Override the path with `--kraken2-span-bed`.  See
+[Genomic Span BED File](docs/kraken2_bacterial_detection.md#genomic-span-bed-file)
+for the full schema and interpretation guidance.
 
 ### Kraken2 Database Setup Helper
 
