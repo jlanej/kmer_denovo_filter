@@ -294,6 +294,33 @@ The classification results are added to the output VCF as per-variant fields:
 | **DKU_NHF** | Fraction of DKU fragments classified as **non-human** by Kraken2 (consolidated across all non-human domains). UniVec Core reads are excluded. |
 | **DKA_NHF** | Fraction of DKA fragments classified as **non-human**. UniVec Core reads are excluded. |
 
+### Unclassified fraction
+
+| Field | Description |
+|-------|-------------|
+| **DKU_UF** | Fraction of DKU fragments that received **no taxonomic assignment** from Kraken2 (status "U"). |
+| **DKA_UF** | Fraction of DKA fragments that received **no taxonomic assignment**. |
+
+### Human lineage fraction
+
+| Field | Description |
+|-------|-------------|
+| **DKU_HLF** | Fraction of DKU fragments in the **human lineage**: classified reads that are neither definitively non-human (NHF) nor UniVec Core (UCF). Includes reads directly classified as human, reads cleared by the human homology guard (HHG), and reads assigned to broad taxonomic ranks on the human-to-root path (e.g. Eukaryota, Root). |
+| **DKA_HLF** | Fraction of DKA fragments in the **human lineage**. |
+
+### Sum-to-one property
+
+For every variant, the four partition fractions sum to 1.0:
+
+```
+DKU_NHF + DKU_UCF + DKU_HLF + DKU_UF = 1.0
+DKA_NHF + DKA_UCF + DKA_HLF + DKA_UF = 1.0
+```
+
+This provides a complete accounting of all variant-supporting reads: every read
+is in exactly one of non-human (NHF), UniVec Core (UCF), human lineage (HLF),
+or unclassified (UF).
+
 These are per-variant fractions: each fraction is computed from the intersection
 of that variant's informative reads with the global set of domain-specific or
 non-human read names returned by Kraken2.
@@ -315,6 +342,12 @@ non-human read names returned by Kraken2.
   any individual domain fraction, since it consolidates all non-human categories
 - `DKU_UCF` is separate from `DKU_NHF` — UniVec Core reads are tracked
   independently and never inflate the non-human contamination signal
+- `DKU_HLF` close to `1.0` — essentially all variant-supporting reads are in
+  the human lineage; the variant is likely a genuine human variant
+- `DKU_UF` close to `1.0` — nearly all variant-supporting reads could not be
+  classified; may warrant investigation of read quality or database coverage
+- `DKU_NHF + DKU_UCF + DKU_HLF + DKU_UF = 1.0` — a quick sanity check that
+  all reads are accounted for in exactly one category
 
 ---
 

@@ -296,6 +296,125 @@ class TestPipelineIntegration:
             assert "DKA_NHF" in sample
             assert sample["DKU_NHF"] == pytest.approx(1.0)
             assert sample["DKA_NHF"] == pytest.approx(1.0)
+            # Unclassified fraction (0 — no unclassified reads)
+            assert "DKU_UF" in sample
+            assert "DKA_UF" in sample
+            assert sample["DKU_UF"] == pytest.approx(0.0)
+            assert sample["DKA_UF"] == pytest.approx(0.0)
+            # Human lineage fraction (0 — no human lineage reads)
+            assert "DKU_HLF" in sample
+            assert "DKA_HLF" in sample
+            assert sample["DKU_HLF"] == pytest.approx(0.0)
+            assert sample["DKA_HLF"] == pytest.approx(0.0)
+            # Sum-to-1 property
+            dku_sum = (
+                sample["DKU_NHF"] + sample["DKU_UCF"]
+                + sample["DKU_HLF"] + sample["DKU_UF"]
+            )
+            assert dku_sum == pytest.approx(1.0)
+            dka_sum = (
+                sample["DKA_NHF"] + sample["DKA_UCF"]
+                + sample["DKA_HLF"] + sample["DKA_UF"]
+            )
+            assert dka_sum == pytest.approx(1.0)
+
+    def test_vcf_kraken2_fractions_sum_to_one_mixed(self, tmpdir, monkeypatch):
+        """NHF + UCF + HLF + UF = 1.0 with a mix of read categories."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+        var_pos_0 = 50
+
+        child_seq = list(ref_seq[40:80])
+        child_seq[10] = "G" if ref_seq[var_pos_0] != "G" else "T"
+        child_seq = "".join(child_seq)
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        # Create 4 reads to cover all categories
+        _create_bam(
+            child_bam, ref_fa, chrom,
+            [
+                ("read_bact", 40, child_seq, None),
+                ("read_human", 40, child_seq, None),
+                ("read_uncl", 40, child_seq, None),
+                ("read_ucf", 40, child_seq, None),
+            ],
+        )
+
+        parent_seq = ref_seq[40:80]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(mother_bam, ref_fa, chrom, [("mread1", 40, parent_seq, None)])
+        _create_bam(father_bam, ref_fa, chrom, [("fread1", 40, parent_seq, None)])
+
+        in_vcf = os.path.join(tmpdir, "input.vcf")
+        _create_vcf(in_vcf, chrom, [(51, ref_seq[var_pos_0], child_seq[10])])
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
+        kraken_db = os.path.join(tmpdir, "kraken_db")
+        os.makedirs(kraken_db)
+
+        def _mock_check_tool(_name):
+            return True
+
+        def _mock_run_kraken2(*_args, **_kwargs):
+            result = pipeline_mod.Kraken2Runner.Result()
+            result.total = 4
+            result.classified = 3
+            result.unclassified = 1
+            # Bacterial (non-human)
+            result.bacterial_count = 1
+            result.bacterial_read_names.add("read_bact")
+            result.nonhuman_count = 1
+            result.nonhuman_read_names.add("read_bact")
+            # Human lineage (classified, not NHF, not UCF)
+            result.human_lineage_count = 1
+            result.human_lineage_read_names.add("read_human")
+            result.human_count = 1
+            # Unclassified
+            result.unclassified_read_names.add("read_uncl")
+            # UniVec Core
+            result.univec_core_count = 1
+            result.univec_core_read_names.add("read_ucf")
+            return result
+
+        monkeypatch.setattr(pipeline_mod, "_check_tool", _mock_check_tool)
+        monkeypatch.setattr(
+            pipeline_mod, "_run_kraken2_on_reads", _mock_run_kraken2,
+        )
+
+        args = parse_args([
+            "--child", child_bam,
+            "--mother", mother_bam,
+            "--father", father_bam,
+            "--ref-fasta", ref_fa,
+            "--vcf", in_vcf,
+            "--output", out_vcf,
+            "--kmer-size", "5",
+            "--proband-id", "HG002",
+            "--kraken2-db", kraken_db,
+        ])
+        run_pipeline(args)
+
+        with pysam.VariantFile(out_vcf) as vcf_out:
+            rec = next(iter(vcf_out))
+            sample = rec.samples["HG002"]
+            # Each of the 4 reads should contribute 0.25 to its category
+            nhf = sample["DKU_NHF"]
+            ucf = sample["DKU_UCF"]
+            hlf = sample["DKU_HLF"]
+            uf = sample["DKU_UF"]
+            assert nhf == pytest.approx(0.25)
+            assert ucf == pytest.approx(0.25)
+            assert hlf == pytest.approx(0.25)
+            assert uf == pytest.approx(0.25)
+            # Sum-to-1 property
+            assert nhf + ucf + hlf + uf == pytest.approx(1.0)
+            # DKA versions
+            dka_nhf = sample["DKA_NHF"]
+            dka_ucf = sample["DKA_UCF"]
+            dka_hlf = sample["DKA_HLF"]
+            dka_uf = sample["DKA_UF"]
+            assert dka_nhf + dka_ucf + dka_hlf + dka_uf == pytest.approx(1.0)
 
     def test_kraken2_read_extraction_uses_variant_locus(self, tmpdir, monkeypatch):
         """Kraken2 read extraction uses locus-targeted fetches when available."""

@@ -370,6 +370,21 @@ class Kraken2Runner:
                 as non-human (any clade outside the human lineage).
                 UniVec Core reads are excluded from this set.
             nonhuman_count: Number of non-human reads.
+            unclassified_read_names: Set of read names that received no
+                taxonomic assignment from Kraken2 (status ``"U"``).
+            human_lineage_read_names: Set of read names that are classified
+                but are **not** in ``nonhuman_read_names`` and **not** in
+                ``univec_core_read_names``.  This covers reads directly
+                assigned to the human clade, reads cleared by the human
+                homology guard (HHG), and reads assigned to broad
+                taxonomic ranks on the human-to-root lineage path
+                (e.g. Root, Eukaryota).  Together with
+                ``nonhuman_read_names``, ``univec_core_read_names``, and
+                ``unclassified_read_names`` these four sets form a
+                partition of all classified+unclassified reads, so the
+                corresponding per-variant fractions sum to 1.
+            human_lineage_count: Number of human-lineage reads (see
+                ``human_lineage_read_names``).
             human_count: Number of reads assigned to Homo sapiens (taxid 9606)
                 or descendants.
             root_count: Number of reads assigned to root (taxid 1) with no
@@ -401,6 +416,9 @@ class Kraken2Runner:
             self.univec_core_count = 0
             self.nonhuman_read_names = set()
             self.nonhuman_count = 0
+            self.unclassified_read_names = set()
+            self.human_lineage_read_names = set()
+            self.human_lineage_count = 0
             self.human_count = 0
             self.root_count = 0
             self.per_read_detail = {}
@@ -879,6 +897,7 @@ class Kraken2Runner:
 
                 if status == "U":
                     result.unclassified += 1
+                    result.unclassified_read_names.add(read_name)
                     result.per_read_detail[read_name] = {
                         "status": "U",
                         "taxid": 0,
@@ -986,6 +1005,12 @@ class Kraken2Runner:
                 if is_nonhuman:
                     result.nonhuman_count += 1
                     result.nonhuman_read_names.add(read_name)
+                if not is_nonhuman and not is_univec_core:
+                    # Classified but neither definitively non-human nor
+                    # UniVec Core.  Covers: human clade, HHG-guarded,
+                    # Root, and Ambiguous_Ancestor reads.
+                    result.human_lineage_read_names.add(read_name)
+                    result.human_lineage_count += 1
                 if is_human:
                     result.human_count += 1
                 elif taxid == 1:
