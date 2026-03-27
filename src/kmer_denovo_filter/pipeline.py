@@ -472,6 +472,184 @@ def _collect_read_alignment_metadata(
     return alignment_meta
 
 
+def _build_span_bed_rows(
+    alignment_meta,
+    informative_reads_by_variant,
+    informative_alt_reads_by_variant,
+    kraken2_result,
+    name_map,
+):
+    """Build per-alignment row data for span BED output.
+
+    Returns a list of tuples
+    ``(chrom, start, read_name, is_supplementary, rec_dict, annotation_dict)``
+    sorted by ``(chrom, start, read_name)``.
+
+    ``rec_dict`` contains the alignment record fields (``start``, ``end``,
+    ``softclip_left``, ``softclip_right``, etc.).  ``annotation_dict``
+    contains read-level classification fields (``taxon_name``, ``domain``,
+    ``guard_status``, ``is_nonhuman``, ``variant_str``, ``read_set``,
+    ``is_split``).
+    """
+    # Build read_name → set of variant keys mapping
+    read_to_variants = {}
+    for var_key, names in informative_reads_by_variant.items():
+        for rname in names:
+            read_to_variants.setdefault(rname, set()).add(var_key)
+
+    # Build read_name → read_set (DKA if in any DKA set, otherwise DKU)
+    dka_reads = set()
+    for names in informative_alt_reads_by_variant.values():
+        dka_reads.update(names)
+
+    rows = []
+    for rname, records in alignment_meta.items():
+        detail = kraken2_result.per_read_detail.get(rname)
+        if detail is None:
+            continue
+
+        var_keys = read_to_variants.get(rname, set())
+        if not var_keys:
+            continue
+
+        variant_str = ",".join(sorted(var_keys))
+        read_set = "DKA" if rname in dka_reads else "DKU"
+
+        taxid = detail["taxid"]
+        status = detail["status"]
+        domain = detail["domain"]
+        guard_status = detail["guard_status"]
+        is_nonhuman = detail["is_nonhuman"]
+
+        # Taxon name
+        if status == "U" or taxid == 0:
+            taxon_name = "Unclassified"
+        elif name_map and taxid in name_map:
+            taxon_name = name_map[taxid]
+        else:
+            taxon_name = f"Unknown_taxid_{taxid}"
+
+        is_split = any(r["has_sa"] for r in records)
+
+        annotation = {
+            "taxon_name": taxon_name,
+            "domain": domain,
+            "guard_status": guard_status,
+            "is_nonhuman": is_nonhuman,
+            "variant_str": variant_str,
+            "read_set": read_set,
+            "is_split": is_split,
+            "rname": rname,
+        }
+
+        for rec in records:
+            rows.append((
+                rec["chrom"], rec["start"], rname,
+                rec["is_supplementary"], rec, annotation,
+            ))
+
+    rows.sort(key=lambda x: (x[0], x[1], x[2]))
+    return rows
+
+
+_SPAN_BED_COLUMNS = [
+    "#chrom", "start", "end", "taxon_name", "domain",
+    "guard_status", "is_nonhuman", "read_name", "variant",
+    "read_set", "mapq", "softclip_left", "softclip_right",
+    "is_split", "is_supplementary",
+]
+
+_EXPANDED_SPAN_BED_COLUMNS = _SPAN_BED_COLUMNS + [
+    "aligned_start", "aligned_end",
+]
+
+
+def _format_span_row(rec, ann):
+    """Format a single standard span BED row from record and annotation."""
+    return [
+        rec["chrom"],
+        str(rec["start"]),
+        str(rec["end"]),
+        ann["taxon_name"],
+        ann["domain"],
+        ann["guard_status"],
+        "true" if ann["is_nonhuman"] else "false",
+        ann["rname"],
+        ann["variant_str"],
+        ann["read_set"],
+        str(rec["mapq"]),
+        str(rec["softclip_left"]),
+        str(rec["softclip_right"]),
+        "true" if ann["is_split"] else "false",
+        "true" if rec["is_supplementary"] else "false",
+    ]
+
+
+def _format_expanded_span_row(rec, ann):
+    """Format a single expanded span BED row from record and annotation.
+
+    The expanded BED extends coordinates by the observed soft-clip
+    lengths::
+
+        expanded_start = max(0, reference_start - softclip_left)
+        expanded_end   = reference_end + softclip_right
+
+    Two extra columns (``aligned_start``, ``aligned_end``) preserve the
+    original mapped coordinates.
+    """
+    expanded_start = max(0, rec["start"] - rec["softclip_left"])
+    expanded_end = rec["end"] + rec["softclip_right"]
+    fields = [
+        rec["chrom"],
+        str(expanded_start),
+        str(expanded_end),
+        ann["taxon_name"],
+        ann["domain"],
+        ann["guard_status"],
+        "true" if ann["is_nonhuman"] else "false",
+        ann["rname"],
+        ann["variant_str"],
+        ann["read_set"],
+        str(rec["mapq"]),
+        str(rec["softclip_left"]),
+        str(rec["softclip_right"]),
+        "true" if ann["is_split"] else "false",
+        "true" if rec["is_supplementary"] else "false",
+        str(rec["start"]),
+        str(rec["end"]),
+    ]
+    return fields
+
+
+def _write_bed_from_rows(output_path, columns, rows, format_fn):
+    """Write a bgzipped, tabix-indexed BED file from pre-built rows.
+
+    Args:
+        output_path: Destination ``.bed.gz`` path.
+        columns: Header column names (first element should start with ``#``).
+        rows: Sorted row tuples from :func:`_build_span_bed_rows`.
+        format_fn: Callable ``(rec, ann) -> list[str]`` producing tab fields.
+    """
+    raw_path = output_path.replace(".bed.gz", ".bed")
+    if raw_path == output_path:
+        raw_path = output_path + ".tmp"
+
+    with open(raw_path, "w") as fh:
+        fh.write("\t".join(columns) + "\n")
+        for _, _, _, _, rec, ann in rows:
+            fh.write("\t".join(format_fn(rec, ann)) + "\n")
+
+    pysam.tabix_compress(raw_path, output_path, force=True)
+    try:
+        os.unlink(raw_path)
+    except OSError:
+        pass
+    pysam.tabix_index(
+        output_path, force=True, preset="bed",
+        meta_char="#",
+    )
+
+
 def _write_kraken2_span_bed(
     output_path,
     alignment_meta,
@@ -506,98 +684,53 @@ def _write_kraken2_span_bed(
         name_map: ``{taxid: name}`` dict from
             :meth:`Kraken2Runner._load_name_map`, or ``None``.
     """
-    _SPAN_BED_COLUMNS = [
-        "#chrom", "start", "end", "taxon_name", "domain",
-        "guard_status", "is_nonhuman", "read_name", "variant",
-        "read_set", "mapq", "softclip_left", "softclip_right",
-        "is_split", "is_supplementary",
-    ]
-
-    # Build read_name → set of variant keys mapping
-    read_to_variants = {}
-    for var_key, names in informative_reads_by_variant.items():
-        for rname in names:
-            read_to_variants.setdefault(rname, set()).add(var_key)
-
-    # Build read_name → read_set (DKA if in any DKA set, otherwise DKU)
-    dka_reads = set()
-    for names in informative_alt_reads_by_variant.values():
-        dka_reads.update(names)
-
-    # Collect rows: (chrom, start, read_name, is_supp, field_list)
-    rows = []
-    for rname, records in alignment_meta.items():
-        detail = kraken2_result.per_read_detail.get(rname)
-        if detail is None:
-            continue
-
-        var_keys = read_to_variants.get(rname, set())
-        if not var_keys:
-            continue
-
-        variant_str = ",".join(sorted(var_keys))
-        read_set = "DKA" if rname in dka_reads else "DKU"
-
-        taxid = detail["taxid"]
-        status = detail["status"]
-        domain = detail["domain"]
-        guard_status = detail["guard_status"]
-        is_nonhuman = detail["is_nonhuman"]
-
-        # Taxon name
-        if status == "U" or taxid == 0:
-            taxon_name = "Unclassified"
-        elif name_map and taxid in name_map:
-            taxon_name = name_map[taxid]
-        else:
-            taxon_name = f"Unknown_taxid_{taxid}"
-
-        # Any record for this read has SA → is_split for all records
-        is_split = any(r["has_sa"] for r in records)
-
-        for rec in records:
-            fields = [
-                rec["chrom"],
-                str(rec["start"]),
-                str(rec["end"]),
-                taxon_name,
-                domain,
-                guard_status,
-                "true" if is_nonhuman else "false",
-                rname,
-                variant_str,
-                read_set,
-                str(rec["mapq"]),
-                str(rec["softclip_left"]),
-                str(rec["softclip_right"]),
-                "true" if is_split else "false",
-                "true" if rec["is_supplementary"] else "false",
-            ]
-            rows.append((rec["chrom"], rec["start"], rname, rec["is_supplementary"], fields))
-
-    # Sort by chrom (lexicographic), then start (numeric), then read_name
-    rows.sort(key=lambda x: (x[0], x[1], x[2]))
-
-    # Write uncompressed BED to a temp file, then bgzip
-    raw_path = output_path.replace(".bed.gz", ".bed")
-    if raw_path == output_path:
-        raw_path = output_path + ".tmp"
-
-    with open(raw_path, "w") as fh:
-        fh.write("\t".join(_SPAN_BED_COLUMNS) + "\n")
-        for _, _, _, _, fields in rows:
-            fh.write("\t".join(fields) + "\n")
-
-    # bgzip and tabix index
-    pysam.tabix_compress(raw_path, output_path, force=True)
-    try:
-        os.unlink(raw_path)
-    except OSError:
-        pass
-    pysam.tabix_index(
-        output_path, force=True, preset="bed",
-        meta_char="#",
+    rows = _build_span_bed_rows(
+        alignment_meta, informative_reads_by_variant,
+        informative_alt_reads_by_variant, kraken2_result, name_map,
     )
+    _write_bed_from_rows(output_path, _SPAN_BED_COLUMNS, rows,
+                         _format_span_row)
+
+
+def _write_kraken2_expanded_span_bed(
+    output_path,
+    alignment_meta,
+    informative_reads_by_variant,
+    informative_alt_reads_by_variant,
+    kraken2_result,
+    name_map,
+):
+    """Write soft-clip–expanded genomic span BED for classified reads.
+
+    Like :func:`_write_kraken2_span_bed`, but the BED coordinates are
+    naively extended by the observed soft-clip lengths::
+
+        expanded_start = max(0, reference_start - softclip_left)
+        expanded_end   = reference_end + softclip_right
+
+    Two extra columns (``aligned_start``, ``aligned_end``) preserve the
+    original mapped coordinates for reference.
+
+    **The expanded spans are for visualization only** — they do not
+    represent verified reference alignments.  Clusters of expanded
+    non-human intervals at a locus are suggestive of contamination,
+    integration breakpoints, or library-prep chimeras.
+
+    Args:
+        output_path: Destination path (should end with ``.bed.gz``).
+            A ``.tbi`` index is written alongside.
+        alignment_meta: See :func:`_write_kraken2_span_bed`.
+        informative_reads_by_variant: See :func:`_write_kraken2_span_bed`.
+        informative_alt_reads_by_variant: See :func:`_write_kraken2_span_bed`.
+        kraken2_result: See :func:`_write_kraken2_span_bed`.
+        name_map: See :func:`_write_kraken2_span_bed`.
+    """
+    rows = _build_span_bed_rows(
+        alignment_meta, informative_reads_by_variant,
+        informative_alt_reads_by_variant, kraken2_result, name_map,
+    )
+    _write_bed_from_rows(output_path, _EXPANDED_SPAN_BED_COLUMNS, rows,
+                         _format_expanded_span_row)
 
 
 def _validate_inputs(args):
@@ -4916,6 +5049,34 @@ def run_pipeline(args):
             "[Step 5/5] Wrote span BED for %d reads",
             len(alignment_meta),
         )
+
+        # Write expanded span BED (unless --no-expanded-bed)
+        if not getattr(args, "no_expanded_bed", False):
+            expanded_path = kraken2_span_path.replace(
+                ".kraken2_spans.bed.gz",
+                ".kraken2_spans_expanded.bed.gz",
+            )
+            if expanded_path == kraken2_span_path:
+                # Fallback if span path doesn't match expected pattern
+                expanded_path = kraken2_span_path.replace(
+                    ".bed.gz", "_expanded.bed.gz",
+                )
+            logger.info(
+                "[Step 5/5] Writing expanded span BED: %s",
+                expanded_path,
+            )
+            _write_kraken2_expanded_span_bed(
+                expanded_path,
+                alignment_meta,
+                informative_reads_by_variant,
+                informative_alt_reads_by_variant,
+                kraken2_result,
+                name_map,
+            )
+            logger.info(
+                "[Step 5/5] Wrote expanded span BED for %d reads",
+                len(alignment_meta),
+            )
 
     if args.metrics:
         metrics = {
