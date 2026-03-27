@@ -633,7 +633,9 @@ def _write_bed_from_rows(output_path, columns, rows, format_fn):
     Args:
         output_path: Destination ``.bed.gz`` path.
         columns: Header column names (first element should start with ``#``).
-        rows: Row tuples from :func:`_build_span_bed_rows`.
+        rows: Row tuples from :func:`_build_span_bed_rows` (need not
+            be pre-sorted; sorting by output coordinates is handled
+            internally).
         format_fn: Callable ``(rec, ann) -> list[str]`` producing tab fields.
     """
     raw_path = output_path.replace(".bed.gz", ".bed")
