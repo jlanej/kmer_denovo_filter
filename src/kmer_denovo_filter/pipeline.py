@@ -18,6 +18,7 @@ import pysam
 from kmer_denovo_filter.kmer_utils import (
     JellyfishKmerQuery,
     Kraken2Runner,
+    _HUMAN_TAXID,
     _extract_read_kmers,
     _is_symbolic,
     build_kmer_automaton,
@@ -148,6 +149,188 @@ def _run_kraken2_on_reads(
         memory_mapping=memory_mapping,
     )
     return kr.classify_sequences(sequences, tmpdir=tmpdir)
+
+
+def _parse_kmer_votes(kmer_string, name_map=None, top_n=10):
+    """Parse a Kraken2 kmer_detail_string into vote summaries.
+
+    Args:
+        kmer_string: Raw Kraken2 kmer detail string (space-separated
+            ``taxid:count`` tokens; ``|:|`` separates paired-end mates).
+        name_map: Optional ``{taxid: name}`` dict for named output.
+        top_n: Maximum number of entries to include (sorted descending
+            by count).
+
+    Returns:
+        Tuple ``(kmer_votes, kmer_votes_named, total_kmers,
+        human_kmer_count)`` where ``kmer_votes`` is
+        ``taxid1:count1;taxid2:count2;...`` and ``kmer_votes_named``
+        replaces taxids with names.  Taxid ``0`` is rendered as
+        ``unclassified`` in the named column.  ``A`` (ambiguous) tokens
+        are excluded.
+    """
+    if not kmer_string:
+        return ("", "", 0, 0)
+
+    counts = {}  # taxid (int) -> total count
+    for token in kmer_string.replace("|:|", " ").split():
+        taxid_str, _, count_str = token.partition(":")
+        if not taxid_str or not count_str:
+            continue
+        try:
+            tid = int(taxid_str)
+            cnt = int(count_str)
+        except ValueError:
+            continue
+        counts[tid] = counts.get(tid, 0) + cnt
+
+    total_kmers = sum(counts.values())
+    human_kmer_count = counts.get(_HUMAN_TAXID, 0)
+
+    # Sort descending by count, truncate
+    sorted_votes = sorted(counts.items(), key=lambda x: (-x[1], x[0]))
+    top_votes = sorted_votes[:top_n]
+
+    kmer_votes = ";".join(f"{tid}:{cnt}" for tid, cnt in top_votes)
+
+    def _name_for(tid):
+        if tid == 0:
+            return "unclassified"
+        if name_map and tid in name_map:
+            return name_map[tid]
+        return str(tid)
+
+    kmer_votes_named = ";".join(
+        f"{_name_for(tid)}:{cnt}" for tid, cnt in top_votes
+    )
+
+    return (kmer_votes, kmer_votes_named, total_kmers, human_kmer_count)
+
+
+def _write_kraken2_read_detail_bed(
+    output_path,
+    informative_reads_by_variant,
+    informative_alt_reads_by_variant,
+    kraken2_result,
+    name_map,
+):
+    """Write per-read Kraken2 classification detail as a BED file.
+
+    Produces a bgzipped, tabix-indexed BED file with one row per
+    (variant, read) pair.  The first three columns are BED-standard
+    ``chrom``, ``chromStart``, ``chromEnd``; the remaining columns
+    capture read-level classification detail.
+
+    The file includes a ``#``-prefixed header line with column names so
+    that downstream tools can parse the schema.
+
+    Args:
+        output_path: Destination path (should end with ``.bed.gz``).
+            A ``.tbi`` index is written alongside.
+        informative_reads_by_variant: ``{variant_key: set_of_read_names}``
+            for all DKU reads.
+        informative_alt_reads_by_variant: ``{variant_key: set_of_read_names}``
+            for DKA reads (subset of DKU).
+        kraken2_result: :class:`Kraken2Runner.Result` with
+            ``per_read_detail`` populated.
+        name_map: ``{taxid: name}`` dict from
+            :meth:`Kraken2Runner._load_name_map`, or ``None``.
+    """
+    _BED_COLUMNS = [
+        "#chrom", "chromStart", "chromEnd", "variant", "read_name",
+        "read_set", "kraken2_status", "assigned_taxid", "assigned_taxon",
+        "domain", "guard_status", "is_nonhuman", "kmer_votes",
+        "kmer_votes_named", "total_kmers", "human_kmer_count",
+    ]
+
+    # Collect and sort rows: (chrom, pos_int, variant_key, read_name)
+    row_keys = []
+    for var_key in informative_reads_by_variant:
+        parts = var_key.split(":")
+        if len(parts) < 4:
+            continue
+        chrom = parts[0]
+        try:
+            pos = int(parts[1])
+        except ValueError:
+            continue
+        ref = parts[2]
+        for rname in informative_reads_by_variant[var_key]:
+            row_keys.append((chrom, pos, ref, var_key, rname))
+
+    # Sort by chrom (lexicographic), then pos (numeric), then read_name
+    row_keys.sort(key=lambda x: (x[0], x[1], x[4]))
+
+    # Write uncompressed BED to a temp file, then bgzip
+    raw_path = output_path.replace(".bed.gz", ".bed")
+    if raw_path == output_path:
+        raw_path = output_path + ".tmp"
+
+    with open(raw_path, "w") as fh:
+        fh.write("\t".join(_BED_COLUMNS) + "\n")
+
+        for chrom, pos, ref, var_key, rname in row_keys:
+            detail = kraken2_result.per_read_detail.get(rname)
+            if detail is None:
+                continue
+
+            dka_names = informative_alt_reads_by_variant.get(var_key, set())
+            read_set = "DKA" if rname in dka_names else "DKU"
+
+            taxid = detail["taxid"]
+            status = detail["status"]
+            domain = detail["domain"]
+            guard_status = detail["guard_status"]
+            is_nonhuman = detail["is_nonhuman"]
+            kmer_string = detail["kmer_string"]
+
+            # Taxon name
+            if status == "U" or taxid == 0:
+                assigned_taxon = "."
+            elif name_map and taxid in name_map:
+                assigned_taxon = name_map[taxid]
+            else:
+                assigned_taxon = str(taxid)
+
+            # K-mer vote summaries
+            kmer_votes, kmer_votes_named, total_kmers, human_kmer_count = (
+                _parse_kmer_votes(kmer_string, name_map)
+            )
+
+            # BED coordinates: 0-based start, exclusive end
+            chrom_start = pos
+            chrom_end = pos + len(ref)
+
+            fields = [
+                chrom,
+                str(chrom_start),
+                str(chrom_end),
+                var_key,
+                rname,
+                read_set,
+                status,
+                str(taxid),
+                assigned_taxon,
+                domain,
+                guard_status,
+                "true" if is_nonhuman else "false",
+                kmer_votes,
+                kmer_votes_named,
+                str(total_kmers),
+                str(human_kmer_count),
+            ]
+            fh.write("\t".join(fields) + "\n")
+
+    # bgzip and tabix index
+    pysam.tabix_compress(raw_path, output_path, force=True)
+    try:
+        os.unlink(raw_path)
+    except OSError:
+        pass
+    pysam.tabix_index(
+        output_path, force=True, preset="bed",
+        meta_char="#",
+    )
 
 
 def _validate_inputs(args):
@@ -4328,6 +4511,7 @@ def run_pipeline(args):
 
     # ── Kraken2 non-human content flagging (VCF mode) ────────────────
     kraken2_result = None
+    name_map = None
     if kraken2_db is not None:
         step_start = time.monotonic()
         all_informative_names = set()
@@ -4349,6 +4533,10 @@ def run_pipeline(args):
             kraken2_result.summary(),
             _format_elapsed(time.monotonic() - step_start),
         )
+
+        # Load taxon name map for per-read detail BED
+        name_map = Kraken2Runner._load_name_map(kraken2_db)
+
         for var_key, ann in annotations.items():
             dku_names = informative_reads_by_variant.get(var_key, set())
             dka_names = informative_alt_reads_by_variant.get(var_key, set())
@@ -4399,6 +4587,33 @@ def run_pipeline(args):
         logger.info(
             "[Step 5/5] Wrote %d informative reads across %d variants",
             total_reads, len(informative_reads_by_variant),
+        )
+
+    # Write per-read Kraken2 classification detail BED
+    if kraken2_result is not None:
+        kraken2_detail_path = getattr(args, "kraken2_read_detail", None)
+        if kraken2_detail_path is None:
+            # Auto-derive from --output
+            base = args.output
+            for ext in (".vcf.gz", ".vcf.bgz", ".vcf"):
+                if base.endswith(ext):
+                    base = base[: -len(ext)]
+                    break
+            kraken2_detail_path = base + ".kraken2_reads.bed.gz"
+        logger.info(
+            "[Step 5/5] Writing per-read Kraken2 detail BED: %s",
+            kraken2_detail_path,
+        )
+        _write_kraken2_read_detail_bed(
+            kraken2_detail_path,
+            informative_reads_by_variant,
+            informative_alt_reads_by_variant,
+            kraken2_result,
+            name_map,
+        )
+        logger.info(
+            "[Step 5/5] Wrote per-read Kraken2 detail for %d variants",
+            len(informative_reads_by_variant),
         )
 
     if args.metrics:
