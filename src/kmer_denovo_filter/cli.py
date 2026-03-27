@@ -191,6 +191,13 @@ def parse_args(argv=None):
              "is provided and this is omitted, auto-derived from --output "
              "(e.g. my_trio.annotated.kraken2_spans.bed.gz).",
     )
+    parser.add_argument(
+        "--no-expanded-bed", action="store_true", default=False,
+        help="Disable generation of the soft-clip-expanded span BED file. "
+             "By default, when --kraken2-db is provided, both the standard "
+             "span BED and an expanded span BED (coordinates extended by "
+             "soft-clip lengths) are written.",
+    )
     return parser.parse_args(argv)
 
 
