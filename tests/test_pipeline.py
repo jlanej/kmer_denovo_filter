@@ -926,6 +926,71 @@ class TestPipelineIntegration:
             f"Child does NOT carry 3-base deletion; expected DKA = 0, got {dka_del2}"
         vcf_out.close()
 
+    def test_decomposed_insertion_allele_specific_dka(self, tmpdir):
+        """Two insertion alleles at one position receive independent DKA.
+
+        Child carries only the 3-base insertion allele; a second 1-base
+        insertion record at the same anchor must remain DKA=0.
+        """
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        anchor_0 = 50
+        ins3 = "GCA"
+        child_seq = (ref_seq[40:anchor_0 + 1] + ins3
+                     + ref_seq[anchor_0 + 1:80])
+        child_cigar = [(0, anchor_0 + 1 - 40), (1, len(ins3)),
+                       (0, 80 - (anchor_0 + 1))]
+
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(child_bam, ref_fa, chrom,
+                    [("read1", 40, child_seq, None, child_cigar)])
+
+        parent_seq = ref_seq[40:80]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom,
+                    [("mread1", 40, parent_seq, None)])
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(father_bam, ref_fa, chrom,
+                    [("fread1", 40, parent_seq, None)])
+
+        ref_allele = ref_seq[anchor_0]
+        alt_ins3 = ref_allele + ins3
+        alt_ins1 = ref_allele + "T"
+        in_vcf = os.path.join(tmpdir, "input.vcf")
+        _create_vcf(in_vcf, chrom, [
+            (anchor_0 + 1, ref_allele, alt_ins3),
+            (anchor_0 + 1, ref_allele, alt_ins1),
+        ])
+
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
+        args = parse_args([
+            "--child", child_bam, "--mother", mother_bam,
+            "--father", father_bam, "--ref-fasta", ref_fa,
+            "--vcf", in_vcf, "--output", out_vcf,
+            "--kmer-size", "5", "--proband-id", "HG002",
+        ])
+        run_pipeline(args)
+
+        vcf_out = pysam.VariantFile(out_vcf)
+        records = list(vcf_out)
+        assert len(records) == 2, "Both decomposed insertion records should be present"
+
+        rec_ins3 = [r for r in records if r.alts and r.alts[0] == alt_ins3]
+        rec_ins1 = [r for r in records if r.alts and r.alts[0] == alt_ins1]
+        assert len(rec_ins3) == 1, "Expected one record for the 3-base insertion"
+        assert len(rec_ins1) == 1, "Expected one record for the 1-base insertion"
+
+        dka_ins3 = rec_ins3[0].samples["HG002"]["DKA"]
+        assert dka_ins3 > 0, \
+            f"Child carries 3-base insertion; expected DKA > 0, got {dka_ins3}"
+
+        dka_ins1 = rec_ins1[0].samples["HG002"]["DKA"]
+        assert dka_ins1 == 0, \
+            f"Child does NOT carry 1-base insertion; expected DKA = 0, got {dka_ins1}"
+        vcf_out.close()
+
     def test_summary_includes_pkc_fields(self, tmpdir):
         """Summary output should include MAX_PKC and AVG_PKC columns."""
         chrom = "chr1"
