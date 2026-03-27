@@ -33,7 +33,12 @@ jobs:
         run: pytest tests/test_cli.py tests/test_kmer_utils.py -v
 
       - name: Run integration tests
-        run: pytest tests/test_pipeline.py -v
+        run: |
+          pytest tests/test_pipeline.py -v -k "not (deletion_dka or insertion_dka or decomposed_indel or decomposed_insertion)"
+
+      - name: Run focused indel DKA coverage tests
+        run: |
+          pytest tests/test_pipeline.py -v -k "deletion_dka or insertion_dka or decomposed_indel or decomposed_insertion"
 
       - name: Run GIAB VCF-mode integration pipeline
         run: |
