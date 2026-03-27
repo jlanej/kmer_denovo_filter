@@ -1282,3 +1282,243 @@ class TestPerReadDetail:
         """Empty result has empty per_read_detail."""
         r = Kraken2Runner.Result()
         assert r.per_read_detail == {}
+
+
+class TestUnclassifiedAndHumanLineageSets:
+    """Tests for unclassified_read_names and human_lineage_read_names."""
+
+    def test_empty_result_has_empty_sets(self):
+        """Fresh Result has empty unclassified and human_lineage sets."""
+        r = Kraken2Runner.Result()
+        assert r.unclassified_read_names == set()
+        assert r.human_lineage_read_names == set()
+        assert r.human_lineage_count == 0
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_unclassified_read_names_populated(self, mock_popen):
+        """Unclassified reads are tracked in unclassified_read_names."""
+        kraken2_output = "U\tread_unk\t0\t100\t0:30\n"
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (kraken2_output.encode(), b"")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/fake/db")
+        taxid_sets = {
+            "bacterial": set(),
+            "archaeal": set(),
+            "fungal": set(),
+            "protist": set(),
+            "viral": set(),
+            "univec_core": set(),
+            "human_lineage": {9606, 1},
+            "human_clade": {9606},
+        }
+        with mock.patch.object(
+            Kraken2Runner, "_load_all_taxid_sets", return_value=taxid_sets,
+        ):
+            result = kr.classify_sequences({"read_unk": "ACGTACGT"})
+
+        assert "read_unk" in result.unclassified_read_names
+        assert result.unclassified == 1
+        assert "read_unk" not in result.human_lineage_read_names
+        assert "read_unk" not in result.nonhuman_read_names
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_human_lineage_read_names_populated(self, mock_popen):
+        """Human reads go into human_lineage_read_names."""
+        kraken2_output = "C\tread_hum\t9606\t100\t9606:30\n"
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (kraken2_output.encode(), b"")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/fake/db")
+        taxid_sets = {
+            "bacterial": set(),
+            "archaeal": set(),
+            "fungal": set(),
+            "protist": set(),
+            "viral": set(),
+            "univec_core": set(),
+            "human_lineage": {9606, 1},
+            "human_clade": {9606},
+        }
+        with mock.patch.object(
+            Kraken2Runner, "_load_all_taxid_sets", return_value=taxid_sets,
+        ):
+            result = kr.classify_sequences({"read_hum": "ACGTACGT"})
+
+        assert "read_hum" in result.human_lineage_read_names
+        assert result.human_lineage_count == 1
+        assert "read_hum" not in result.nonhuman_read_names
+        assert "read_hum" not in result.unclassified_read_names
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_hhg_guarded_reads_in_human_lineage(self, mock_popen):
+        """HHG-guarded reads (non-human with human kmer) go into human_lineage."""
+        kraken2_output = "C\tread1\t562\t100\t562:8 9606:4\n"
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (kraken2_output.encode(), b"")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/fake/db")
+        taxid_sets = {
+            "bacterial": {2, 562},
+            "archaeal": set(),
+            "fungal": set(),
+            "protist": set(),
+            "viral": set(),
+            "univec_core": set(),
+            "human_lineage": {9606, 1},
+            "human_clade": {9606},
+        }
+        with mock.patch.object(
+            Kraken2Runner, "_load_all_taxid_sets", return_value=taxid_sets,
+        ):
+            result = kr.classify_sequences({"read1": "ACGTACGT"})
+
+        # HHG guard cleared non-human flags, so the read is in human_lineage
+        assert "read1" in result.human_lineage_read_names
+        assert result.human_lineage_count == 1
+        assert "read1" not in result.nonhuman_read_names
+        assert "read1" not in result.univec_core_read_names
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_root_reads_in_human_lineage(self, mock_popen):
+        """Root (taxid 1) reads go into human_lineage (classified, not NHF, not UCF)."""
+        kraken2_output = "C\tread_root\t1\t100\t1:30\n"
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (kraken2_output.encode(), b"")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/fake/db")
+        taxid_sets = {
+            "bacterial": set(),
+            "archaeal": set(),
+            "fungal": set(),
+            "protist": set(),
+            "viral": set(),
+            "univec_core": set(),
+            "human_lineage": {9606, 1},
+            "human_clade": {9606},
+        }
+        with mock.patch.object(
+            Kraken2Runner, "_load_all_taxid_sets", return_value=taxid_sets,
+        ):
+            result = kr.classify_sequences({"read_root": "ACGTACGT"})
+
+        assert "read_root" in result.human_lineage_read_names
+        assert result.human_lineage_count == 1
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_nonhuman_reads_not_in_human_lineage(self, mock_popen):
+        """Definitively non-human reads are NOT in human_lineage."""
+        kraken2_output = "C\tread_bact\t562\t100\t562:30\n"
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (kraken2_output.encode(), b"")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/fake/db")
+        taxid_sets = {
+            "bacterial": {2, 562},
+            "archaeal": set(),
+            "fungal": set(),
+            "protist": set(),
+            "viral": set(),
+            "univec_core": set(),
+            "human_lineage": {9606, 1},
+            "human_clade": {9606},
+        }
+        with mock.patch.object(
+            Kraken2Runner, "_load_all_taxid_sets", return_value=taxid_sets,
+        ):
+            result = kr.classify_sequences({"read_bact": "ACGTACGT"})
+
+        assert "read_bact" in result.nonhuman_read_names
+        assert "read_bact" not in result.human_lineage_read_names
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_univec_core_not_in_human_lineage(self, mock_popen):
+        """UniVec Core reads are NOT in human_lineage."""
+        kraken2_output = "C\tread_ucf\t81077\t100\t81077:30\n"
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (kraken2_output.encode(), b"")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/fake/db")
+        taxid_sets = {
+            "bacterial": set(),
+            "archaeal": set(),
+            "fungal": set(),
+            "protist": set(),
+            "viral": set(),
+            "univec_core": {81077},
+            "human_lineage": {9606, 1},
+            "human_clade": {9606},
+        }
+        with mock.patch.object(
+            Kraken2Runner, "_load_all_taxid_sets", return_value=taxid_sets,
+        ):
+            result = kr.classify_sequences({"read_ucf": "ACGTACGT"})
+
+        assert "read_ucf" in result.univec_core_read_names
+        assert "read_ucf" not in result.human_lineage_read_names
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_four_sets_partition_all_reads(self, mock_popen):
+        """nonhuman + univec_core + human_lineage + unclassified = all reads."""
+        kraken2_output = (
+            "C\tread_bact\t562\t100\t562:30\n"
+            "C\tread_hum\t9606\t100\t9606:30\n"
+            "U\tread_unk\t0\t100\t0:30\n"
+            "C\tread_root\t1\t100\t1:30\n"
+            "C\tread_ucf\t81077\t100\t81077:30\n"
+        )
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (kraken2_output.encode(), b"")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/fake/db")
+        taxid_sets = {
+            "bacterial": {2, 562},
+            "archaeal": set(),
+            "fungal": set(),
+            "protist": set(),
+            "viral": set(),
+            "univec_core": {81077},
+            "human_lineage": {9606, 1},
+            "human_clade": {9606},
+        }
+        with mock.patch.object(
+            Kraken2Runner, "_load_all_taxid_sets", return_value=taxid_sets,
+        ):
+            result = kr.classify_sequences({
+                "read_bact": "ACGT",
+                "read_hum": "ACGT",
+                "read_unk": "ACGT",
+                "read_root": "ACGT",
+                "read_ucf": "ACGT",
+            })
+
+        all_names = {"read_bact", "read_hum", "read_unk", "read_root", "read_ucf"}
+        # Four sets should be a partition of all read names
+        partition = (
+            result.nonhuman_read_names
+            | result.univec_core_read_names
+            | result.human_lineage_read_names
+            | result.unclassified_read_names
+        )
+        assert partition == all_names
+        # Mutually exclusive
+        assert not (result.nonhuman_read_names & result.univec_core_read_names)
+        assert not (result.nonhuman_read_names & result.human_lineage_read_names)
+        assert not (result.nonhuman_read_names & result.unclassified_read_names)
+        assert not (result.univec_core_read_names & result.human_lineage_read_names)
+        assert not (result.univec_core_read_names & result.unclassified_read_names)
+        assert not (result.human_lineage_read_names & result.unclassified_read_names)

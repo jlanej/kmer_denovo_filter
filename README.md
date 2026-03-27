@@ -309,6 +309,23 @@ counterparts. Every fraction is always in \[0.0, 1.0\].
   fragments definitively classified outside the human lineage by Kraken2,
   divided by DKA (= non\_human\_reads\_in\_DKA / DKA). Same composition and
   exclusions as DKU\_NHF, applied to the allele-supporting DKA subset.
+* **DKU_UF** – **Unclassified fraction of DKU.** Number of DKU fragments that
+  received no taxonomic assignment from Kraken2 (status "U"), divided by DKU
+  (= unclassified\_reads\_in\_DKU / DKU).
+* **DKA_UF** – **Unclassified fraction of DKA.** Number of DKA fragments that
+  received no taxonomic assignment from Kraken2, divided by DKA
+  (= unclassified\_reads\_in\_DKA / DKA).
+* **DKU_HLF** – **Human lineage fraction of DKU.** Fraction of DKU fragments
+  that are classified but are neither definitively non-human (DKU\_NHF) nor
+  UniVec Core (DKU\_UCF). This includes reads directly classified as human,
+  reads cleared by the human homology guard (HHG), and reads assigned to broad
+  taxonomic ranks on the human-to-root lineage path (e.g. Eukaryota, Root).
+* **DKA_HLF** – **Human lineage fraction of DKA.** Same as DKU\_HLF, applied
+  to the allele-supporting DKA subset.
+
+The four fractions **DKU\_NHF + DKU\_UCF + DKU\_HLF + DKU\_UF = 1.0** (and
+likewise for DKA), forming a complete partition of reads into non-human,
+UniVec Core, human-lineage, and unclassified categories.
 
 To reduce over-flagging from shared human homology, reads with explicit human
 taxid k-mer evidence in Kraken2's per-read output are conservatively excluded

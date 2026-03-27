@@ -1117,7 +1117,8 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
 
     When non-human fraction annotations are present in *annotations*,
     DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF,
-    DKU_VF/DKA_VF, DKU_UCF/DKA_UCF, and DKU_NHF/DKA_NHF are also added.
+    DKU_VF/DKA_VF, DKU_UCF/DKA_UCF, DKU_NHF/DKA_NHF, DKU_UF/DKA_UF,
+    and DKU_HLF/DKA_HLF are also added.
 
     Returns:
         The actual output path (with ``.gz`` suffix).
@@ -1421,6 +1422,60 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                  "UniVec Core reads are excluded (see DKA_UCF)"),
             ],
         )
+        vcf_in.header.add_meta(
+            category,
+            items=[
+                ("ID", "DKU_UF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of DKU fragments that were unclassified by "
+                 "kraken2 (no taxonomic assignment). Denominator equals "
+                 "DKU (both are fragment-based). Together DKU_NHF + "
+                 "DKU_UCF + DKU_HLF + DKU_UF = 1.0"),
+            ],
+        )
+        vcf_in.header.add_meta(
+            category,
+            items=[
+                ("ID", "DKA_UF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of DKA fragments that were unclassified by "
+                 "kraken2; DKA fragments are always a subset of DKU. "
+                 "Together DKA_NHF + DKA_UCF + DKA_HLF + DKA_UF = 1.0"),
+            ],
+        )
+        vcf_in.header.add_meta(
+            category,
+            items=[
+                ("ID", "DKU_HLF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of DKU fragments in the human lineage: "
+                 "classified reads that are neither definitively "
+                 "non-human (DKU_NHF) nor UniVec Core (DKU_UCF). "
+                 "Includes reads directly classified as human, reads "
+                 "cleared by the human homology guard (HHG), and reads "
+                 "assigned to broad taxonomic ranks on the human-to-root "
+                 "path (e.g. Eukaryota, Root). Together DKU_NHF + "
+                 "DKU_UCF + DKU_HLF + DKU_UF = 1.0"),
+            ],
+        )
+        vcf_in.header.add_meta(
+            category,
+            items=[
+                ("ID", "DKA_HLF"),
+                ("Number", "1"),
+                ("Type", "Float"),
+                ("Description",
+                 "Fraction of DKA fragments in the human lineage; "
+                 "DKA fragments are always a subset of DKU. "
+                 "Together DKA_NHF + DKA_UCF + DKA_HLF + DKA_UF = 1.0"),
+            ],
+        )
 
     if not output_vcf.endswith(".gz"):
         output_vcf = output_vcf + ".gz"
@@ -1487,6 +1542,18 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                     rec.samples[proband_id]["DKA_NHF"] = ann.get(
                         "dka_nonhuman_fraction", 0.0,
                     )
+                    rec.samples[proband_id]["DKU_UF"] = ann.get(
+                        "dku_unclassified_fraction", 0.0,
+                    )
+                    rec.samples[proband_id]["DKA_UF"] = ann.get(
+                        "dka_unclassified_fraction", 0.0,
+                    )
+                    rec.samples[proband_id]["DKU_HLF"] = ann.get(
+                        "dku_human_lineage_fraction", 0.0,
+                    )
+                    rec.samples[proband_id]["DKA_HLF"] = ann.get(
+                        "dka_human_lineage_fraction", 0.0,
+                    )
             else:
                 rec.info["DKU"] = ann["dku"]
                 rec.info["DKT"] = ann["dkt"]
@@ -1514,6 +1581,10 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
                     rec.info["DKA_UCF"] = ann.get("dka_univec_core_fraction", 0.0)
                     rec.info["DKU_NHF"] = ann.get("dku_nonhuman_fraction", 0.0)
                     rec.info["DKA_NHF"] = ann.get("dka_nonhuman_fraction", 0.0)
+                    rec.info["DKU_UF"] = ann.get("dku_unclassified_fraction", 0.0)
+                    rec.info["DKA_UF"] = ann.get("dka_unclassified_fraction", 0.0)
+                    rec.info["DKU_HLF"] = ann.get("dku_human_lineage_fraction", 0.0)
+                    rec.info["DKA_HLF"] = ann.get("dka_human_lineage_fraction", 0.0)
         vcf_out.write(rec)
 
     vcf_out.close()
@@ -4949,6 +5020,8 @@ def run_pipeline(args):
                 ("viral", kraken2_result.viral_read_names),
                 ("univec_core", kraken2_result.univec_core_read_names),
                 ("nonhuman", kraken2_result.nonhuman_read_names),
+                ("unclassified", kraken2_result.unclassified_read_names),
+                ("human_lineage", kraken2_result.human_lineage_read_names),
             ):
                 dku_count = len(dku_names.intersection(read_set))
                 dka_count = len(dka_names.intersection(read_set))

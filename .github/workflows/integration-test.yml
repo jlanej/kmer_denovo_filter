@@ -30,7 +30,7 @@ jobs:
         run: pip install -e '.[test]' || pip install -e . && pip install pytest
 
       - name: Run unit tests
-        run: pytest tests/test_cli.py tests/test_kmer_utils.py -v
+        run: pytest tests/test_cli.py tests/test_kmer_utils.py tests/test_kraken2.py -v
 
       - name: Run integration tests
         run: |
