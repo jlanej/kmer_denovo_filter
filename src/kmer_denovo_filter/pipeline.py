@@ -624,20 +624,31 @@ def _format_expanded_span_row(rec, ann):
 def _write_bed_from_rows(output_path, columns, rows, format_fn):
     """Write a bgzipped, tabix-indexed BED file from pre-built rows.
 
+    All rows are formatted first, then sorted by the actual BED
+    coordinates (``chrom``, ``start``) to guarantee the output is
+    position-sorted regardless of the coordinate transform applied by
+    *format_fn*.  This is essential for the expanded span BED where
+    soft-clip extension can reorder positions relative to aligned starts.
+
     Args:
         output_path: Destination ``.bed.gz`` path.
         columns: Header column names (first element should start with ``#``).
-        rows: Sorted row tuples from :func:`_build_span_bed_rows`.
+        rows: Row tuples from :func:`_build_span_bed_rows`.
         format_fn: Callable ``(rec, ann) -> list[str]`` producing tab fields.
     """
     raw_path = output_path.replace(".bed.gz", ".bed")
     if raw_path == output_path:
         raw_path = output_path + ".tmp"
 
+    # Format all rows, then sort by actual BED coordinates so that
+    # tabix indexing never encounters out-of-order positions.
+    formatted = [format_fn(rec, ann) for _, _, _, _, rec, ann in rows]
+    formatted.sort(key=lambda f: (f[0], int(f[1])))
+
     with open(raw_path, "w") as fh:
         fh.write("\t".join(columns) + "\n")
-        for _, _, _, _, rec, ann in rows:
-            fh.write("\t".join(format_fn(rec, ann)) + "\n")
+        for fields in formatted:
+            fh.write("\t".join(fields) + "\n")
 
     pysam.tabix_compress(raw_path, output_path, force=True)
     try:
