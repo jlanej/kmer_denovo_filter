@@ -197,6 +197,7 @@ kmer-denovo \
 | `--kraken2-db` | – | Optional Kraken2 database path. In VCF mode, enables non-human fraction annotations (DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF, DKU_VF/DKA_VF, DKU_UCF/DKA_UCF, DKU_NHF/DKA_NHF). Ignored in discovery mode. **Memory note:** the standard Kraken2 DB typically needs ~50–100 GB RAM to load/classify; provision memory accordingly to avoid OOM |
 | `--kraken2-confidence` | 0.0 | Kraken2 LCA confidence threshold (0.0–1.0) |
 | `--kraken2-memory-mapping` | false | Passes Kraken2 `--memory-mapping` so DB files are memory-mapped from disk to reduce RAM footprint (usually slower, but helpful on RAM-constrained nodes) |
+| `--kraken2-read-detail` | auto | Output path for the per-read Kraken2 classification detail BED file (bgzipped + tabix-indexed). Auto-derived from `--output` when `--kraken2-db` is provided (e.g. `my_trio.annotated.kraken2_reads.bed.gz`) |
 | **VCF mode** | | |
 | `--vcf` | – | Input VCF with candidate variants (activates VCF mode) |
 | `--output` / `-o` | – | Output annotated VCF (required with `--vcf`) |
@@ -331,6 +332,16 @@ The optional `--informative-reads` BAM file contains child reads that carry
 at least one variant-spanning k-mer absent from both parents. Each read is
 tagged with `DV` indicating which variant(s) it supports. The BAM is sorted
 and indexed for direct visualization in IGV.
+
+When `--kraken2-db` is provided, a per-read classification detail **BED file**
+is written alongside the output VCF (default:
+`<output>.kraken2_reads.bed.gz` + `.tbi` tabix index).  This bgzipped,
+tabix-indexed BED file contains one row per (variant, read) pair with full
+Kraken2 classification detail including domain assignment, human homology
+guard status, k-mer vote distribution, and final non-human determination.
+Override the path with `--kraken2-read-detail`.  See
+[Per-Read Classification Detail (BED)](docs/kraken2_bacterial_detection.md#per-read-classification-detail-bed)
+for the full schema.
 
 ### Kraken2 Database Setup Helper
 

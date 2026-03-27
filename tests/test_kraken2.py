@@ -1085,3 +1085,200 @@ class TestUniVecCoreExclusion:
         # Human homology guard also suppresses the univec_core count
         assert result.univec_core_count == 0
         assert "read1" not in result.univec_core_read_names
+
+
+class TestLoadNameMap:
+    """Tests for _load_name_map taxonomy name parsing."""
+
+    def test_missing_file_returns_none(self):
+        result = Kraken2Runner._load_name_map("/nonexistent/db")
+        assert result is None
+
+    def test_parses_names_dmp_scientific_only(self):
+        """Only 'scientific name' rows are retained."""
+        with tempfile.TemporaryDirectory() as db:
+            tax_dir = os.path.join(db, "taxonomy")
+            os.makedirs(tax_dir)
+            names = os.path.join(tax_dir, "names.dmp")
+            with open(names, "w") as fh:
+                fh.write("2\t|\tBacteria\t|\tBacteria\t|\tscientific name\t|\n")
+                fh.write("2\t|\teubacteria\t|\t\t|\tgenbank common name\t|\n")
+                fh.write("562\t|\tEscherichia coli\t|\t\t|\tscientific name\t|\n")
+                fh.write("562\t|\tE. coli\t|\t\t|\tcommon name\t|\n")
+                fh.write("9606\t|\tHomo sapiens\t|\t\t|\tscientific name\t|\n")
+
+            name_map = Kraken2Runner._load_name_map(db)
+            assert name_map is not None
+            assert name_map[2] == "Bacteria"
+            assert name_map[562] == "Escherichia_coli"  # spaces → underscores
+            assert name_map[9606] == "Homo_sapiens"
+            # Only 3 entries (scientific names), not the synonym/common names
+            assert len(name_map) == 3
+
+    def test_parses_root_level_names_dmp(self):
+        """names.dmp at DB root (PrackenDB layout) is found."""
+        with tempfile.TemporaryDirectory() as db:
+            names = os.path.join(db, "names.dmp")
+            with open(names, "w") as fh:
+                fh.write("2\t|\tBacteria\t|\tBacteria\t|\tscientific name\t|\n")
+                fh.write("562\t|\tEscherichia coli\t|\t\t|\tscientific name\t|\n")
+
+            name_map = Kraken2Runner._load_name_map(db)
+            assert name_map is not None
+            assert name_map[2] == "Bacteria"
+            assert name_map[562] == "Escherichia_coli"
+
+    def test_taxonomy_subdir_preferred_over_root(self):
+        """taxonomy/names.dmp is preferred when both locations exist."""
+        with tempfile.TemporaryDirectory() as db:
+            tax_dir = os.path.join(db, "taxonomy")
+            os.makedirs(tax_dir)
+            # taxonomy/ version has different name
+            with open(os.path.join(tax_dir, "names.dmp"), "w") as fh:
+                fh.write("2\t|\tBacteria\t|\tBacteria\t|\tscientific name\t|\n")
+            # Root version
+            with open(os.path.join(db, "names.dmp"), "w") as fh:
+                fh.write("2\t|\tXBacteria\t|\t\t|\tscientific name\t|\n")
+
+            name_map = Kraken2Runner._load_name_map(db)
+            assert name_map[2] == "Bacteria"  # taxonomy/ preferred
+
+
+class TestPerReadDetail:
+    """Tests for per_read_detail population in classify_sequences."""
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_per_read_detail_populated(self, mock_popen):
+        """per_read_detail is populated for all parsed reads."""
+        kraken2_output = (
+            "C\tread_bact\t562\t100\t562:10 0:5\n"
+            "C\tread_hum\t9606\t100\t9606:20\n"
+            "U\tread_unk\t0\t100\t0:15\n"
+            "C\tread_root\t1\t100\t1:8\n"
+        )
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (kraken2_output.encode(), b"")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/fake/db")
+        taxid_sets = {
+            "bacterial": {2, 562},
+            "archaeal": set(),
+            "fungal": set(),
+            "protist": set(),
+            "viral": set(),
+            "univec_core": set(),
+            "human_lineage": {9606, 1},
+            "human_clade": {9606},
+        }
+        with mock.patch.object(
+            Kraken2Runner, "_load_all_taxid_sets", return_value=taxid_sets,
+        ):
+            result = kr.classify_sequences({
+                "read_bact": "ACGTACGT",
+                "read_hum": "ACGTACGT",
+                "read_unk": "ACGTACGT",
+                "read_root": "ACGTACGT",
+            })
+
+        assert len(result.per_read_detail) == 4
+
+        # Bacterial read
+        d = result.per_read_detail["read_bact"]
+        assert d["status"] == "C"
+        assert d["taxid"] == 562
+        assert d["domain"] == "Bacteria"
+        assert d["guard_status"] == "PASS"
+        assert d["is_nonhuman"] is True
+        assert "562:10" in d["kmer_string"]
+
+        # Human read
+        d = result.per_read_detail["read_hum"]
+        assert d["status"] == "C"
+        assert d["taxid"] == 9606
+        assert d["domain"] == "Human"
+        assert d["guard_status"] == "HUMAN"
+        assert d["is_nonhuman"] is False
+
+        # Unclassified read
+        d = result.per_read_detail["read_unk"]
+        assert d["status"] == "U"
+        assert d["taxid"] == 0
+        assert d["domain"] == "Unclassified"
+        assert d["guard_status"] == "UNCLASSIFIED"
+        assert d["is_nonhuman"] is False
+
+        # Root read
+        d = result.per_read_detail["read_root"]
+        assert d["status"] == "C"
+        assert d["taxid"] == 1
+        assert d["domain"] == "Root"
+        assert d["is_nonhuman"] is False
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_per_read_detail_hhg_guard(self, mock_popen):
+        """Human homology guard sets guard_status to HHG."""
+        kraken2_output = (
+            "C\tread1\t562\t100\t562:8 9606:4\n"  # bacterial + human kmers
+        )
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (kraken2_output.encode(), b"")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/fake/db")
+        taxid_sets = {
+            "bacterial": {2, 562},
+            "archaeal": set(),
+            "fungal": set(),
+            "protist": set(),
+            "viral": set(),
+            "univec_core": set(),
+            "human_lineage": {9606, 1},
+            "human_clade": {9606},
+        }
+        with mock.patch.object(
+            Kraken2Runner, "_load_all_taxid_sets", return_value=taxid_sets,
+        ):
+            result = kr.classify_sequences({"read1": "ACGTACGT"})
+
+        d = result.per_read_detail["read1"]
+        assert d["domain"] == "Bacteria"  # pre-guard domain
+        assert d["guard_status"] == "HHG"
+        assert d["is_nonhuman"] is False  # guard excluded it
+
+    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    def test_per_read_detail_univec_core(self, mock_popen):
+        """UniVec Core reads get UVC guard status."""
+        kraken2_output = "C\tread1\t81077\t100\t81077:10\n"
+        mock_proc = mock.MagicMock()
+        mock_proc.communicate.return_value = (kraken2_output.encode(), b"")
+        mock_proc.returncode = 0
+        mock_popen.return_value = mock_proc
+
+        kr = Kraken2Runner("/fake/db")
+        taxid_sets = {
+            "bacterial": set(),
+            "archaeal": set(),
+            "fungal": set(),
+            "protist": set(),
+            "viral": set(),
+            "univec_core": {81077},
+            "human_lineage": {9606, 1},
+            "human_clade": {9606},
+        }
+        with mock.patch.object(
+            Kraken2Runner, "_load_all_taxid_sets", return_value=taxid_sets,
+        ):
+            result = kr.classify_sequences({"read1": "ACGTACGT"})
+
+        d = result.per_read_detail["read1"]
+        assert d["domain"] == "UniVec_Core"
+        assert d["guard_status"] == "UVC"
+        assert d["is_nonhuman"] is False
+
+    def test_empty_result_has_empty_per_read_detail(self):
+        """Empty result has empty per_read_detail."""
+        r = Kraken2Runner.Result()
+        assert r.per_read_detail == {}
