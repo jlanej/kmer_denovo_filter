@@ -374,6 +374,13 @@ class Kraken2Runner:
                 or descendants.
             root_count: Number of reads assigned to root (taxid 1) with no
                 more specific classification.
+            per_read_detail: Dict mapping read name to a dict with keys
+                ``status`` (``"C"`` or ``"U"``), ``taxid`` (int),
+                ``domain`` (str), ``guard_status`` (str),
+                ``is_nonhuman`` (bool), and ``kmer_string`` (str).
+                Populated during :meth:`classify_sequences` for every
+                parsed read so the per-read audit trail can be written
+                to the companion BED file.
         """
 
         def __init__(self):
@@ -396,6 +403,7 @@ class Kraken2Runner:
             self.nonhuman_count = 0
             self.human_count = 0
             self.root_count = 0
+            self.per_read_detail = {}
 
         def summary(self):
             """Return a human-readable summary string."""
@@ -517,6 +525,54 @@ class Kraken2Runner:
         except (OSError, ValueError):
             return None
         return parent_map
+
+    @staticmethod
+    def _load_name_map(db_path):
+        """Parse ``names.dmp`` and return a taxid → scientific name map.
+
+        Tries ``taxonomy/names.dmp`` first, then ``names.dmp`` at the
+        database root (PrackenDB layout).  Only rows whose name class
+        (4th ``\\t|\\t``-delimited field) equals ``scientific name`` are
+        retained.  Spaces in names are replaced with underscores.
+
+        Args:
+            db_path: Path to the Kraken2 database directory.
+
+        Returns:
+            ``{taxid: name_string}`` dict, or ``None`` if no readable
+            ``names.dmp`` is found.
+        """
+        names_path = os.path.join(db_path, "taxonomy", "names.dmp")
+        if not os.path.isfile(names_path):
+            names_path = os.path.join(db_path, "names.dmp")
+            if not os.path.isfile(names_path):
+                logger.warning(
+                    "names.dmp not found under %s; taxon names will be "
+                    "unavailable in the per-read detail file.",
+                    db_path,
+                )
+                return None
+
+        name_map = {}
+        try:
+            with open(names_path) as fh:
+                for line in fh:
+                    parts = line.split("\t|\t")
+                    if len(parts) < 4:
+                        continue
+                    # 4th field ends with "\t|\n"; strip to get name class
+                    name_class = parts[3].replace("\t|", "").strip()
+                    if name_class != "scientific name":
+                        continue
+                    try:
+                        taxid = int(parts[0].strip())
+                    except ValueError:
+                        continue
+                    name = parts[1].strip().replace(" ", "_")
+                    name_map[taxid] = name
+        except OSError:
+            return None
+        return name_map
 
     @staticmethod
     def _descendants_of(parent_map, root_taxid):
@@ -823,6 +879,14 @@ class Kraken2Runner:
 
                 if status == "U":
                     result.unclassified += 1
+                    result.per_read_detail[read_name] = {
+                        "status": "U",
+                        "taxid": 0,
+                        "domain": "Unclassified",
+                        "guard_status": "UNCLASSIFIED",
+                        "is_nonhuman": False,
+                        "kmer_string": "",
+                    }
                     continue
 
                 result.classified += 1
@@ -840,14 +904,6 @@ class Kraken2Runner:
                     is_viral = taxid in taxid_sets["viral"]
                     is_univec_core = taxid in taxid_sets["univec_core"]
                     is_human = taxid in taxid_sets["human_clade"]
-                    # Non-human: any taxid NOT on the human lineage and
-                    # NOT a human descendant.  Reads classified at broad
-                    # ranks that include human (e.g. Eukaryota, root)
-                    # are conservatively excluded.
-                    # UniVec Core reads are also excluded: they are synthetic
-                    # vector/adapter sequences, not biological organisms, and
-                    # may share k-mers with the human genome.  Counting them
-                    # as non-human would produce false positives.
                     is_nonhuman = (
                         taxid not in taxid_sets["human_lineage"]
                         and taxid not in taxid_sets["human_clade"]
@@ -862,17 +918,32 @@ class Kraken2Runner:
                     is_viral = taxid == _VIRUSES_TAXID
                     is_univec_core = taxid == _UNIVEC_CORE_TAXID
                     is_human = taxid == _HUMAN_TAXID
-                    # Exclude UniVec Core (81077) and root (1) from non-human
-                    # counts even in the fallback path.
                     is_nonhuman = taxid not in (_HUMAN_TAXID, 1, _UNIVEC_CORE_TAXID)
 
+                # Determine domain label *before* the guard clears flags
+                if is_bacterial:
+                    _domain = "Bacteria"
+                elif is_archaeal:
+                    _domain = "Archaea"
+                elif is_fungal:
+                    _domain = "Fungi"
+                elif is_protist:
+                    _domain = "Protist"
+                elif is_viral:
+                    _domain = "Viruses"
+                elif is_univec_core:
+                    _domain = "UniVec_Core"
+                elif is_human:
+                    _domain = "Human"
+                elif taxid == 1:
+                    _domain = "Root"
+                elif (taxid_sets is not None
+                      and taxid in taxid_sets["human_lineage"]):
+                    _domain = "Ambiguous_Ancestor"
+                else:
+                    _domain = "Root"
+
                 # Apply human homology guard to all non-human categories.
-                # This is especially important for viral reads: viruses
-                # that integrate into the human genome (e.g. endogenous
-                # retroviruses, HBV, HPV) produce reads that carry both
-                # viral and human k-mers.  Excluding any read with human
-                # k-mer evidence from the viral count avoids over-flagging
-                # such integrated sequences as exogenous viral contamination.
                 if has_human_kmer:
                     is_bacterial = False
                     is_archaeal = False
@@ -881,6 +952,18 @@ class Kraken2Runner:
                     is_viral = False
                     is_univec_core = False
                     is_nonhuman = False
+
+                # Determine guard status string
+                if is_human:
+                    _guard = "HUMAN"
+                elif has_human_kmer:
+                    _guard = "HHG"
+                elif _domain == "UniVec_Core":
+                    _guard = "UVC"
+                elif is_nonhuman:
+                    _guard = "PASS"
+                else:
+                    _guard = "PASS"
 
                 if is_bacterial:
                     result.bacterial_count += 1
@@ -907,6 +990,15 @@ class Kraken2Runner:
                     result.human_count += 1
                 elif taxid == 1:
                     result.root_count += 1
+
+                result.per_read_detail[read_name] = {
+                    "status": status,
+                    "taxid": taxid,
+                    "domain": _domain,
+                    "guard_status": _guard,
+                    "is_nonhuman": is_nonhuman,
+                    "kmer_string": parts[4] if len(parts) >= 5 else "",
+                }
 
         finally:
             try:

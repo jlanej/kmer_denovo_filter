@@ -91,6 +91,11 @@ genus or family node — not to an unrelated lineage. This preserves the
 specificity of classification while avoiding inflation from redundant genomes.
 It also makes k-mer counting per species unambiguous.
 
+**Taxonomy files**: PrackenDB includes `taxonomy/nodes.dmp` (used for
+lineage-aware classification) and `taxonomy/names.dmp` (used to map taxonomy
+IDs to scientific names in the per-read detail BED file).  Both are validated
+by the download script.
+
 ---
 
 ## How `kmer-denovo` Uses Kraken2 Output
@@ -313,6 +318,87 @@ non-human read names returned by Kraken2.
 
 ---
 
+## Per-Read Classification Detail (BED)
+
+In addition to the VCF summary fractions, the pipeline writes a companion
+**BED file** with one row per (variant, read) pair.  This exposes the full
+per-read Kraken2 classification detail so users can audit any individual
+variant.
+
+### Why BED and not VCF INFO fields
+
+Per-read detail is **not appropriate for VCF INFO fields** because VCF
+parsers expect well-typed, fixed-schema fields — not multi-kilobyte
+free-text blobs.  The BED file is directly queryable with standard
+genomics tools (`tabix`, `bedtools`), loadable in pandas/R, and joinable
+to the VCF on the variant key.
+
+### File naming
+
+When `--kraken2-db` is provided in VCF mode, the BED file is written
+alongside the output VCF:
+
+- If `--output my_trio.annotated.vcf.gz`, the BED is
+  `my_trio.annotated.kraken2_reads.bed.gz` (with a `.tbi` tabix index).
+- Override with `--kraken2-read-detail <path>`.
+
+### Columns
+
+The file uses a `#`-prefixed header so that downstream tools can parse the
+schema.  The first three columns are standard BED coordinates; subsequent
+columns carry classification detail.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `#chrom` | String | Chromosome name. |
+| `chromStart` | Integer | 0-based start position (same as the internal pipeline `pos`). |
+| `chromEnd` | Integer | Exclusive end position (`chromStart + len(ref)`). |
+| `variant` | String | Variant key `chr:pos:ref:alt` (0-based `pos`). Join key to the VCF — add 1 to convert to VCF POS. |
+| `read_name` | String | Fragment name (SAM QNAME). |
+| `read_set` | Enum | `DKU` (informative-only) or `DKA` (also supports alt allele). |
+| `kraken2_status` | Enum | `C` (classified) or `U` (unclassified). |
+| `assigned_taxid` | Integer | NCBI taxonomy ID assigned by Kraken2. `0` for unclassified. |
+| `assigned_taxon` | String | Scientific name from `names.dmp` (spaces → underscores). `.` if unclassified or name unavailable. |
+| `domain` | String | `Bacteria`, `Archaea`, `Fungi`, `Protist`, `Viruses`, `UniVec_Core`, `Human`, `Root`, `Unclassified`, or `Ambiguous_Ancestor`. |
+| `guard_status` | String | `PASS`, `HHG` (human homology guard), `UVC` (UniVec Core), `HUMAN`, or `UNCLASSIFIED`. |
+| `is_nonhuman` | Boolean | `true` if counted in NHF numerator after all guards. |
+| `kmer_votes` | String | Top k-mer vote summary: `taxid1:count1;taxid2:count2;...` (top 10, descending). |
+| `kmer_votes_named` | String | Same with scientific names: `Escherichia_coli:25;Bacteria:8;unclassified:3`. |
+| `total_kmers` | Integer | Total classified + unclassified k-mers in the read. |
+| `human_kmer_count` | Integer | K-mers that voted for taxid 9606 (human). |
+
+### Sort order
+
+Rows are sorted by chromosome (lexicographic), then position (numeric),
+then read name (lexicographic).
+
+### Tabix indexing
+
+The output is bgzipped and tabix-indexed (`-p bed`), so regions can be
+queried efficiently:
+
+```bash
+tabix my_trio.annotated.kraken2_reads.bed.gz chr1:1000-2000
+```
+
+### Example
+
+```
+#chrom	chromStart	chromEnd	variant	read_name	read_set	kraken2_status	assigned_taxid	assigned_taxon	domain	guard_status	is_nonhuman	kmer_votes	kmer_votes_named	total_kmers	human_kmer_count
+chr1	1000	1001	chr1:1000:A:T	read001	DKA	C	562	Escherichia_coli	Bacteria	PASS	true	562:25;2:8;0:3	Escherichia_coli:25;Bacteria:8;unclassified:3	36	0
+chr1	1000	1001	chr1:1000:A:T	read002	DKU	C	9606	Homo_sapiens	Human	HUMAN	false	9606:40;0:2	Homo_sapiens:40;unclassified:2	42	40
+```
+
+### `names.dmp` requirement
+
+The `assigned_taxon` and `kmer_votes_named` columns use `taxonomy/names.dmp`
+(or `names.dmp` at the DB root for PrackenDB) to look up scientific names.
+If `names.dmp` is not present, the BED file falls back to numeric taxids.
+The download script (`download_kraken2_db.sh`) validates the presence of
+`names.dmp` and warns if missing.  PrackenDB includes this file.
+
+---
+
 ## Why Kraken2 Is Well Suited to This Task
 
 | Property | Benefit |
@@ -332,6 +418,7 @@ non-human read names returned by Kraken2.
 |---|---|---|
 | `--kraken2-db` | *(disabled)* | Path to the Kraken2 database directory; enables non-human fraction annotations (DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF, DKU_VF/DKA_VF, DKU_UCF/DKA_UCF, DKU_NHF/DKA_NHF) in VCF mode |
 | `--kraken2-confidence` | `0.0` | LCA confidence threshold (0.0–1.0); higher values reduce sensitivity, increase specificity |
+| `--kraken2-read-detail` | *(auto-derived)* | Output path for the per-read classification detail BED file. Auto-derived from `--output` when `--kraken2-db` is provided (e.g. `my_trio.annotated.kraken2_reads.bed.gz`). |
 
 See [Kraken2 Database Setup Helper](../README.md#kraken2-database-setup-helper)
 for instructions on downloading PrackenDB.

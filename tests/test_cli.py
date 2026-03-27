@@ -236,3 +236,13 @@ class TestParseArgs:
     def test_kraken2_memory_mapping_flag(self):
         args = parse_args(self.REQUIRED_ARGS + ["--kraken2-memory-mapping"])
         assert args.kraken2_memory_mapping is True
+
+    def test_kraken2_read_detail_default(self):
+        args = parse_args(self.REQUIRED_ARGS)
+        assert args.kraken2_read_detail is None
+
+    def test_kraken2_read_detail_custom(self):
+        args = parse_args(
+            self.REQUIRED_ARGS + ["--kraken2-read-detail", "/tmp/detail.bed.gz"],
+        )
+        assert args.kraken2_read_detail == "/tmp/detail.bed.gz"

@@ -142,4 +142,13 @@ if [[ ! -f "$DB_VALIDATE_PATH/taxonomy/nodes.dmp" && ! -f "$DB_VALIDATE_PATH/nod
     echo "[kraken2-db] fall back to exact taxid==2 matching." >&2
 fi
 
+# taxonomy/names.dmp is used for the per-read Kraken2 detail BED file
+# to map taxids to scientific names.  Warn but do not fail; the BED file
+# will fall back to numeric taxids when names.dmp is absent.
+if [[ ! -f "$DB_VALIDATE_PATH/taxonomy/names.dmp" && ! -f "$DB_VALIDATE_PATH/names.dmp" ]]; then
+    echo "[kraken2-db] Warning: taxonomy/names.dmp not found." >&2
+    echo "[kraken2-db] Per-read Kraken2 detail BED will use numeric" >&2
+    echo "[kraken2-db] taxids instead of scientific names." >&2
+fi
+
 echo "[kraken2-db] Complete."

@@ -175,6 +175,13 @@ def parse_args(argv=None):
         help="Enable Kraken2 --memory-mapping to reduce RAM usage by mapping "
              "database files from disk (may run slower)",
     )
+    parser.add_argument(
+        "--kraken2-read-detail", default=None,
+        help="Output path for the per-read Kraken2 classification detail "
+             "BED file (bgzipped + tabix-indexed). When --kraken2-db is "
+             "provided and this is omitted, auto-derived from --output "
+             "(e.g. my_trio.annotated.kraken2_reads.bed.gz).",
+    )
     return parser.parse_args(argv)
 
 
