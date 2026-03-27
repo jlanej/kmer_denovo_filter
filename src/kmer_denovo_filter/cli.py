@@ -182,6 +182,15 @@ def parse_args(argv=None):
              "provided and this is omitted, auto-derived from --output "
              "(e.g. my_trio.annotated.kraken2_reads.bed.gz).",
     )
+    parser.add_argument(
+        "--kraken2-span-bed", default=None,
+        help="Output path for the species-annotated genomic span BED file "
+             "(bgzipped + tabix-indexed). Maps each classified read's aligned "
+             "reference span to its Kraken2-assigned species, including "
+             "soft-clip lengths and split-read indicators. When --kraken2-db "
+             "is provided and this is omitted, auto-derived from --output "
+             "(e.g. my_trio.annotated.kraken2_spans.bed.gz).",
+    )
     return parser.parse_args(argv)
 
 

@@ -333,6 +333,273 @@ def _write_kraken2_read_detail_bed(
     )
 
 
+def _extract_softclips(cigartuples):
+    """Extract left and right soft-clip lengths from CIGAR tuples.
+
+    Args:
+        cigartuples: List of ``(operation, length)`` tuples from
+            ``pysam.AlignedSegment.cigartuples``.  May be ``None``
+            for unmapped reads.
+
+    Returns:
+        ``(softclip_left, softclip_right)`` tuple of integers.
+    """
+    if not cigartuples:
+        return (0, 0)
+    # CIGAR ops: 4 = CSOFT_CLIP, 5 = CHARD_CLIP
+    # Hard clips may appear outside soft clips: e.g. 5H10S80M5S3H
+    left = 0
+    for op, length in cigartuples:
+        if op == 4:  # soft clip
+            left = length
+            break
+        elif op == 5:  # hard clip — skip and keep looking
+            continue
+        else:
+            break
+
+    right = 0
+    for op, length in reversed(cigartuples):
+        if op == 4:
+            right = length
+            break
+        elif op == 5:
+            continue
+        else:
+            break
+
+    # Avoid double-counting when there is only one non-hard-clip CIGAR op
+    non_hard = [t for t in cigartuples if t[0] != 5]
+    if len(non_hard) == 1 and non_hard[0][0] == 4:
+        right = 0
+
+    return (left, right)
+
+
+def _collect_read_alignment_metadata(
+    child_bam, ref_fasta, read_names,
+    informative_reads_by_variant=None,
+):
+    """Collect alignment metadata for informative reads from a BAM/CRAM.
+
+    For each read in *read_names*, collects **all** alignment records
+    (primary + supplementary) and stores per-alignment metadata needed
+    for the genomic span BED file.
+
+    Args:
+        child_bam: Path to child BAM/CRAM.
+        ref_fasta: Path to reference FASTA (may be ``None`` for BAM).
+        read_names: Set of read names to collect metadata for.
+        informative_reads_by_variant: Optional dict mapping variant keys
+            to read-name sets for targeted BAM fetching.
+
+    Returns:
+        Dict mapping ``read_name`` → list of alignment record dicts,
+        each with keys:
+
+        - ``chrom`` (str): Reference contig name.
+        - ``start`` (int): 0-based aligned start (``reference_start``).
+        - ``end`` (int): 0-based exclusive aligned end (``reference_end``).
+        - ``mapq`` (int): Mapping quality.
+        - ``softclip_left`` (int): Soft-clipped bases at left end.
+        - ``softclip_right`` (int): Soft-clipped bases at right end.
+        - ``has_sa`` (bool): Whether the read has an SA tag.
+        - ``is_supplementary`` (bool): Whether this record is supplementary.
+    """
+    if not read_names:
+        return {}
+
+    alignment_meta = {}  # read_name -> list of record dicts
+
+    bam = pysam.AlignmentFile(
+        child_bam, reference_filename=ref_fasta if ref_fasta else None,
+    )
+
+    def _process_read(read):
+        if read.query_name not in read_names:
+            return
+        if read.is_unmapped:
+            return
+        sc_left, sc_right = _extract_softclips(read.cigartuples)
+        has_sa = read.has_tag("SA")
+        rec = {
+            "chrom": read.reference_name,
+            "start": read.reference_start,
+            "end": read.reference_end,
+            "mapq": read.mapping_quality,
+            "softclip_left": sc_left,
+            "softclip_right": sc_right,
+            "has_sa": has_sa,
+            "is_supplementary": read.is_supplementary,
+        }
+        alignment_meta.setdefault(read.query_name, []).append(rec)
+
+    used_targeted_fetch = False
+    if informative_reads_by_variant:
+        loci_to_names = {}
+        for var_key, names in informative_reads_by_variant.items():
+            if not names:
+                continue
+            parts = var_key.split(":")
+            if len(parts) < 2:
+                continue
+            chrom = parts[0]
+            try:
+                pos = int(parts[1])
+            except ValueError:
+                continue
+            target_names = set(names).intersection(read_names)
+            if not target_names:
+                continue
+            loci_to_names.setdefault((chrom, pos), set()).update(target_names)
+
+        if loci_to_names:
+            used_targeted_fetch = True
+            seen = set()  # (read_name, is_supplementary, start) dedup key
+            for (chrom, pos), target_names in sorted(loci_to_names.items()):
+                for read in bam.fetch(chrom, pos, pos + 1):
+                    key = (read.query_name, read.is_supplementary,
+                           read.reference_start)
+                    if key not in seen:
+                        seen.add(key)
+                        _process_read(read)
+
+    if not used_targeted_fetch:
+        for read in bam.fetch(until_eof=True):
+            _process_read(read)
+
+    bam.close()
+    return alignment_meta
+
+
+def _write_kraken2_span_bed(
+    output_path,
+    alignment_meta,
+    informative_reads_by_variant,
+    informative_alt_reads_by_variant,
+    kraken2_result,
+    name_map,
+):
+    """Write species-annotated genomic span BED for classified reads.
+
+    Produces a bgzipped, tabix-indexed BED file with one row per
+    (variant, read, alignment record) combination.  The BED coordinates
+    are the read's **aligned reference span** (``reference_start`` to
+    ``reference_end``), and the species label applies to the **entire
+    read** (Kraken2 classifies the full read, not sub-regions).
+
+    For split reads (SA tag), both alignment segments are emitted as
+    separate BED intervals with the same classification, linked by
+    ``read_name``.
+
+    Args:
+        output_path: Destination path (should end with ``.bed.gz``).
+            A ``.tbi`` index is written alongside.
+        alignment_meta: Dict from :func:`_collect_read_alignment_metadata`
+            mapping ``read_name`` → list of alignment record dicts.
+        informative_reads_by_variant: ``{variant_key: set_of_read_names}``
+            for all DKU reads.
+        informative_alt_reads_by_variant: ``{variant_key: set_of_read_names}``
+            for DKA reads (subset of DKU).
+        kraken2_result: :class:`Kraken2Runner.Result` with
+            ``per_read_detail`` populated.
+        name_map: ``{taxid: name}`` dict from
+            :meth:`Kraken2Runner._load_name_map`, or ``None``.
+    """
+    _SPAN_BED_COLUMNS = [
+        "#chrom", "start", "end", "taxon_name", "domain",
+        "guard_status", "is_nonhuman", "read_name", "variant",
+        "read_set", "mapq", "softclip_left", "softclip_right",
+        "is_split", "is_supplementary",
+    ]
+
+    # Build read_name → set of variant keys mapping
+    read_to_variants = {}
+    for var_key, names in informative_reads_by_variant.items():
+        for rname in names:
+            read_to_variants.setdefault(rname, set()).add(var_key)
+
+    # Build read_name → read_set (DKA if in any DKA set, otherwise DKU)
+    dka_reads = set()
+    for names in informative_alt_reads_by_variant.values():
+        dka_reads.update(names)
+
+    # Collect rows: (chrom, start, read_name, is_supp, field_list)
+    rows = []
+    for rname, records in alignment_meta.items():
+        detail = kraken2_result.per_read_detail.get(rname)
+        if detail is None:
+            continue
+
+        var_keys = read_to_variants.get(rname, set())
+        if not var_keys:
+            continue
+
+        variant_str = ",".join(sorted(var_keys))
+        read_set = "DKA" if rname in dka_reads else "DKU"
+
+        taxid = detail["taxid"]
+        status = detail["status"]
+        domain = detail["domain"]
+        guard_status = detail["guard_status"]
+        is_nonhuman = detail["is_nonhuman"]
+
+        # Taxon name
+        if status == "U" or taxid == 0:
+            taxon_name = "Unclassified"
+        elif name_map and taxid in name_map:
+            taxon_name = name_map[taxid]
+        else:
+            taxon_name = f"Unknown_taxid_{taxid}"
+
+        # Any record for this read has SA → is_split for all records
+        is_split = any(r["has_sa"] for r in records)
+
+        for rec in records:
+            fields = [
+                rec["chrom"],
+                str(rec["start"]),
+                str(rec["end"]),
+                taxon_name,
+                domain,
+                guard_status,
+                "true" if is_nonhuman else "false",
+                rname,
+                variant_str,
+                read_set,
+                str(rec["mapq"]),
+                str(rec["softclip_left"]),
+                str(rec["softclip_right"]),
+                "true" if is_split else "false",
+                "true" if rec["is_supplementary"] else "false",
+            ]
+            rows.append((rec["chrom"], rec["start"], rname, rec["is_supplementary"], fields))
+
+    # Sort by chrom (lexicographic), then start (numeric), then read_name
+    rows.sort(key=lambda x: (x[0], x[1], x[2]))
+
+    # Write uncompressed BED to a temp file, then bgzip
+    raw_path = output_path.replace(".bed.gz", ".bed")
+    if raw_path == output_path:
+        raw_path = output_path + ".tmp"
+
+    with open(raw_path, "w") as fh:
+        fh.write("\t".join(_SPAN_BED_COLUMNS) + "\n")
+        for _, _, _, _, fields in rows:
+            fh.write("\t".join(fields) + "\n")
+
+    # bgzip and tabix index
+    pysam.tabix_compress(raw_path, output_path, force=True)
+    try:
+        os.unlink(raw_path)
+    except OSError:
+        pass
+    pysam.tabix_index(
+        output_path, force=True, preset="bed",
+        meta_char="#",
+    )
+
+
 def _validate_inputs(args):
     """Validate pipeline inputs before starting computation.
 
@@ -4614,6 +4881,40 @@ def run_pipeline(args):
         logger.info(
             "[Step 5/5] Wrote per-read Kraken2 detail for %d variants",
             len(informative_reads_by_variant),
+        )
+
+        # Write species-annotated genomic span BED
+        kraken2_span_path = getattr(args, "kraken2_span_bed", None)
+        if kraken2_span_path is None:
+            # Auto-derive from --output
+            span_base = args.output
+            for ext in (".vcf.gz", ".vcf.bgz", ".vcf"):
+                if span_base.endswith(ext):
+                    span_base = span_base[: -len(ext)]
+                    break
+            kraken2_span_path = span_base + ".kraken2_spans.bed.gz"
+        logger.info(
+            "[Step 5/5] Collecting alignment metadata for span BED",
+        )
+        alignment_meta = _collect_read_alignment_metadata(
+            args.child, args.ref_fasta, all_informative_names,
+            informative_reads_by_variant=informative_reads_by_variant,
+        )
+        logger.info(
+            "[Step 5/5] Writing species-annotated span BED: %s",
+            kraken2_span_path,
+        )
+        _write_kraken2_span_bed(
+            kraken2_span_path,
+            alignment_meta,
+            informative_reads_by_variant,
+            informative_alt_reads_by_variant,
+            kraken2_result,
+            name_map,
+        )
+        logger.info(
+            "[Step 5/5] Wrote span BED for %d reads",
+            len(alignment_meta),
         )
 
     if args.metrics:

@@ -399,6 +399,104 @@ The download script (`download_kraken2_db.sh`) validates the presence of
 
 ---
 
+## Genomic Span BED File
+
+In addition to the per-read classification detail BED described above, the
+pipeline writes a second **species-annotated genomic span BED file** that maps
+each informative read's **aligned reference span** to its Kraken2-assigned
+species.  This enables:
+
+1. **Visual audit in IGV**: Load the BED alongside the informative reads BAM
+   (`--informative-reads`) to see species labels on each read's footprint.
+2. **Spatial clustering detection**: Non-human reads clustered at a single locus
+   suggest a contamination pile-up (likely false positive).  Scattered non-human
+   reads suggest low-level background contamination.
+3. **Clipping-aware interpretation**: A read with large soft clips classified as
+   *Bacteria* may represent a chimeric molecule (human + bacterial junction from
+   library-prep contamination), distinct from a fully-bacterial read that happened
+   to map due to low-complexity sequence.
+
+### Important Scientific Scope Limitation
+
+**Kraken2 classifies the full read, not sub-regions.**  The BED coordinates
+represent the read's **aligned reference span** (from `reference_start` to
+`reference_end` in pysam), and the species label applies to the **entire read**.
+You cannot conclude "bases chr1:1000–1050 are bacterial and 1050–1100 are human"
+from this file.  The spatial information here is about **where the read aligns**,
+not where the non-human sequence within the read begins or ends.
+
+For split reads (SA tag), both alignment segments are emitted as separate BED
+intervals with the same classification, linked by `read_name`.
+
+### File naming
+
+Written alongside the output VCF when `--kraken2-db` is provided:
+
+- Default: derived from `--output` (e.g. `my_trio.annotated.kraken2_spans.bed.gz`)
+- Override with `--kraken2-span-bed <path>`
+
+### Columns
+
+Standard BED4+ format (tab-delimited, 0-based half-open coordinates), bgzipped
+and tabix-indexed.
+
+| Column | Name | Type | Description |
+|--------|------|------|-------------|
+| 1 | `chrom` | String | Reference contig name. |
+| 2 | `start` | Integer | 0-based aligned start (`reference_start`). |
+| 3 | `end` | Integer | 0-based exclusive aligned end (`reference_end`). |
+| 4 | `taxon_name` | String | Scientific name (underscored) from Kraken2 LCA assignment. `Unclassified` for unclassified reads. `Unknown_taxid_NNN` if `names.dmp` is unavailable. |
+| 5 | `domain` | String | `Bacteria`, `Archaea`, `Fungi`, `Protist`, `Viruses`, `UniVec_Core`, `Human`, `Root`, `Unclassified`, or `Ambiguous_Ancestor`. |
+| 6 | `guard_status` | String | `PASS`, `HHG`, `UVC`, `HUMAN`, or `UNCLASSIFIED`. |
+| 7 | `is_nonhuman` | String | `true` or `false`. Final NHF determination after all guards. |
+| 8 | `read_name` | String | SAM QNAME. |
+| 9 | `variant` | String | Comma-separated `chr:pos:ref:alt` variant key(s) this read is informative for. |
+| 10 | `read_set` | String | `DKA` or `DKU`. |
+| 11 | `mapq` | Integer | Mapping quality of this alignment. |
+| 12 | `softclip_left` | Integer | Number of soft-clipped bases at the left (5′ aligned) end. |
+| 13 | `softclip_right` | Integer | Number of soft-clipped bases at the right (3′ aligned) end. |
+| 14 | `is_split` | String | `true` if the read has an SA (supplementary alignment) tag; `false` otherwise. |
+| 15 | `is_supplementary` | String | `true` if this specific alignment record is the supplementary; `false` if it is the primary. |
+
+### Sort order & indexing
+
+Sorted by `chrom` (reference order), then `start`.  Bgzipped and tabix-indexed
+(`tabix -p bed`) for efficient region lookup:
+
+```bash
+tabix my_trio.annotated.kraken2_spans.bed.gz chr1:100000-200000
+```
+
+### Example
+
+```bed
+chr1	100000	100150	Escherichia_coli	Bacteria	PASS	true	read001	chr1:100050:A:T	DKA	60	0	5	false	false
+chr1	100020	100170	Homo_sapiens	Human	HUMAN	false	read002	chr1:100050:A:T	DKU	60	0	0	false	false
+chr1	100030	100100	Bacteria	Bacteria	HHG	false	read003	chr1:100050:A:T	DKA	25	42	0	true	false
+chr7	50000	50070	Bacteria	Bacteria	HHG	false	read003	chr1:100050:A:T	DKA	0	0	42	true	true
+```
+
+In this example, `read003` is a split read: the primary alignment (chr1) has
+42 bp left-clipped and is classified as *Bacteria* but was intercepted by the
+human homology guard.  Its supplementary alignment lands on chr7.  Both records
+carry the same Kraken2 classification (because Kraken2 classified the full read
+sequence, not each alignment segment independently).
+
+### Interpretation Guidance
+
+**Clipping patterns and what they suggest:**
+
+| Pattern | Likely Interpretation |
+|---------|----------------------|
+| Non-human read, no clips, high MAPQ | Genuinely non-human sequence that happens to align to the human reference (low-complexity or conserved region). Check the k-mer votes — if overwhelming bacterial/viral, likely real contamination. |
+| Non-human read, large soft clips (>30 bp), moderate MAPQ | Possible chimeric molecule: the aligned portion maps to human, the clipped portion is non-human. Common in library-prep contamination where bacterial and human DNA ligate. |
+| Non-human read, split alignment (`is_split=true`) | The aligner split the read across two locations. If one segment is in a known bacterial integration site, this may be a genuine insertion. If the segments are on different chromosomes with no biological rationale, likely an artifact. |
+| HHG-intercepted read, low human k-mer count (1–3) | Possibly a genuine non-human read with a single conserved k-mer that happened to match human. Consider the ratio: 2 human k-mers out of 80 total is very different from 30/80. The companion per-read detail BED's `human_kmer_count` column provides this detail. |
+| Cluster of non-human reads at one locus | Strong signal of contamination pile-up or a genuine non-human insertion. Cross-reference with the variant's `DKA_NHF` — if near 1.0, the variant is likely a contamination artifact. |
+| Scattered non-human reads across many loci | Low-level sample contamination. Individual variants may still be genuine if their specific `DKA_NHF` is low. |
+
+---
+
 ## Why Kraken2 Is Well Suited to This Task
 
 | Property | Benefit |
@@ -419,6 +517,7 @@ The download script (`download_kraken2_db.sh`) validates the presence of
 | `--kraken2-db` | *(disabled)* | Path to the Kraken2 database directory; enables non-human fraction annotations (DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF, DKU_VF/DKA_VF, DKU_UCF/DKA_UCF, DKU_NHF/DKA_NHF) in VCF mode |
 | `--kraken2-confidence` | `0.0` | LCA confidence threshold (0.0–1.0); higher values reduce sensitivity, increase specificity |
 | `--kraken2-read-detail` | *(auto-derived)* | Output path for the per-read classification detail BED file. Auto-derived from `--output` when `--kraken2-db` is provided (e.g. `my_trio.annotated.kraken2_reads.bed.gz`). |
+| `--kraken2-span-bed` | *(auto-derived)* | Output path for the species-annotated genomic span BED file. Auto-derived from `--output` when `--kraken2-db` is provided (e.g. `my_trio.annotated.kraken2_spans.bed.gz`). |
 
 See [Kraken2 Database Setup Helper](../README.md#kraken2-database-setup-helper)
 for instructions on downloading PrackenDB.
