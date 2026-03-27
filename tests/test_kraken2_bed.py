@@ -9,8 +9,10 @@ import pytest
 
 from kmer_denovo_filter.kmer_utils import Kraken2Runner
 from kmer_denovo_filter.pipeline import (
+    _extract_softclips,
     _parse_kmer_votes,
     _write_kraken2_read_detail_bed,
+    _write_kraken2_span_bed,
 )
 
 
@@ -314,3 +316,401 @@ class TestWriteKraken2ReadDetailBed:
             fields = lines[0].strip().split("\t")
             assert fields[1] == "1000"  # chromStart
             assert fields[2] == "1003"  # chromEnd = 1000 + len("ATG")
+
+
+class TestExtractSoftclips:
+    """Tests for _extract_softclips helper."""
+
+    def test_no_cigar(self):
+        assert _extract_softclips(None) == (0, 0)
+
+    def test_empty_cigar(self):
+        assert _extract_softclips([]) == (0, 0)
+
+    def test_no_clips(self):
+        # 100M
+        assert _extract_softclips([(0, 100)]) == (0, 0)
+
+    def test_left_clip_only(self):
+        # 42S58M
+        assert _extract_softclips([(4, 42), (0, 58)]) == (42, 0)
+
+    def test_right_clip_only(self):
+        # 58M5S
+        assert _extract_softclips([(0, 58), (4, 5)]) == (0, 5)
+
+    def test_both_clips(self):
+        # 10S80M10S
+        assert _extract_softclips([(4, 10), (0, 80), (4, 10)]) == (10, 10)
+
+    def test_single_softclip_op(self):
+        # Edge case: entire read is soft-clipped (single op)
+        assert _extract_softclips([(4, 100)]) == (100, 0)
+
+    def test_hard_clips_ignored(self):
+        # 5H10S80M5S3H — hard clips (op 5) should not count as soft clips
+        # but soft clips inside hard clips still count
+        assert _extract_softclips([(5, 5), (4, 10), (0, 80), (4, 5), (5, 3)]) == (10, 5)
+
+
+class TestWriteKraken2SpanBed:
+    """Tests for _write_kraken2_span_bed."""
+
+    def _make_result_with_detail(self, details):
+        """Create a Kraken2Runner.Result with given per_read_detail."""
+        result = Kraken2Runner.Result()
+        result.per_read_detail = details
+        for rname, d in details.items():
+            if d["is_nonhuman"]:
+                result.nonhuman_read_names.add(rname)
+                result.nonhuman_count += 1
+        return result
+
+    def test_basic_span_bed_output(self):
+        """Span BED file has correct header and data rows."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = os.path.join(tmpdir, "test.kraken2_spans.bed.gz")
+
+            alignment_meta = {
+                "read001": [{
+                    "chrom": "chr1", "start": 100000, "end": 100150,
+                    "mapq": 60, "softclip_left": 0, "softclip_right": 5,
+                    "has_sa": False, "is_supplementary": False,
+                }],
+                "read002": [{
+                    "chrom": "chr1", "start": 100020, "end": 100170,
+                    "mapq": 60, "softclip_left": 0, "softclip_right": 0,
+                    "has_sa": False, "is_supplementary": False,
+                }],
+            }
+            informative = {
+                "chr1:100050:A:T": {"read001", "read002"},
+            }
+            alt_informative = {
+                "chr1:100050:A:T": {"read001"},
+            }
+            result = self._make_result_with_detail({
+                "read001": {
+                    "status": "C", "taxid": 562,
+                    "domain": "Bacteria", "guard_status": "PASS",
+                    "is_nonhuman": True, "kmer_string": "562:25",
+                },
+                "read002": {
+                    "status": "C", "taxid": 9606,
+                    "domain": "Human", "guard_status": "HUMAN",
+                    "is_nonhuman": False, "kmer_string": "9606:40",
+                },
+            })
+            name_map = {562: "Escherichia_coli", 9606: "Homo_sapiens"}
+
+            _write_kraken2_span_bed(
+                out_path, alignment_meta,
+                informative, alt_informative, result, name_map,
+            )
+
+            assert os.path.isfile(out_path)
+            assert os.path.isfile(out_path + ".tbi")
+
+            with gzip.open(out_path, "rt") as fh:
+                lines = fh.readlines()
+
+            # Header
+            header = lines[0].strip().split("\t")
+            assert header[0] == "#chrom"
+            assert "taxon_name" in header
+            assert "softclip_left" in header
+            assert "is_split" in header
+            assert "is_supplementary" in header
+
+            data = [l for l in lines if not l.startswith("#")]
+            assert len(data) == 2
+
+            # First row (sorted by start → read001 at 100000)
+            f = data[0].strip().split("\t")
+            assert f[0] == "chr1"
+            assert f[1] == "100000"
+            assert f[2] == "100150"
+            assert f[3] == "Escherichia_coli"
+            assert f[4] == "Bacteria"
+            assert f[5] == "PASS"
+            assert f[6] == "true"
+            assert f[7] == "read001"
+            assert f[8] == "chr1:100050:A:T"
+            assert f[9] == "DKA"
+            assert f[10] == "60"
+            assert f[11] == "0"
+            assert f[12] == "5"
+            assert f[13] == "false"
+            assert f[14] == "false"
+
+    def test_split_read_produces_two_rows(self):
+        """A split read with SA tag produces two BED rows."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = os.path.join(tmpdir, "test.bed.gz")
+
+            alignment_meta = {
+                "read003": [
+                    {
+                        "chrom": "chr1", "start": 100030, "end": 100100,
+                        "mapq": 25, "softclip_left": 42, "softclip_right": 0,
+                        "has_sa": True, "is_supplementary": False,
+                    },
+                    {
+                        "chrom": "chr7", "start": 50000, "end": 50070,
+                        "mapq": 0, "softclip_left": 0, "softclip_right": 42,
+                        "has_sa": True, "is_supplementary": True,
+                    },
+                ],
+            }
+            informative = {"chr1:100050:A:T": {"read003"}}
+            result = self._make_result_with_detail({
+                "read003": {
+                    "status": "C", "taxid": 2,
+                    "domain": "Bacteria", "guard_status": "HHG",
+                    "is_nonhuman": False, "kmer_string": "2:10 9606:2",
+                },
+            })
+            name_map = {2: "Bacteria"}
+
+            _write_kraken2_span_bed(
+                out_path, alignment_meta,
+                informative, {}, result, name_map,
+            )
+
+            with gzip.open(out_path, "rt") as fh:
+                data = [l for l in fh if not l.startswith("#")]
+
+            assert len(data) == 2
+
+            # Primary (chr1)
+            f1 = data[0].strip().split("\t")
+            assert f1[0] == "chr1"
+            assert f1[1] == "100030"
+            assert f1[2] == "100100"
+            assert f1[13] == "true"   # is_split
+            assert f1[14] == "false"  # is_supplementary (primary)
+            assert f1[11] == "42"     # softclip_left
+
+            # Supplementary (chr7)
+            f2 = data[1].strip().split("\t")
+            assert f2[0] == "chr7"
+            assert f2[1] == "50000"
+            assert f2[2] == "50070"
+            assert f2[13] == "true"   # is_split
+            assert f2[14] == "true"   # is_supplementary
+            assert f2[12] == "42"     # softclip_right
+
+            # Both have same read_name and classification
+            assert f1[7] == f2[7] == "read003"
+            assert f1[3] == f2[3] == "Bacteria"
+
+    def test_unclassified_read(self):
+        """Unclassified reads have taxon_name=Unclassified."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = os.path.join(tmpdir, "test.bed.gz")
+
+            alignment_meta = {
+                "read001": [{
+                    "chrom": "chr1", "start": 1000, "end": 1100,
+                    "mapq": 30, "softclip_left": 0, "softclip_right": 0,
+                    "has_sa": False, "is_supplementary": False,
+                }],
+            }
+            informative = {"chr1:1050:A:T": {"read001"}}
+            result = self._make_result_with_detail({
+                "read001": {
+                    "status": "U", "taxid": 0,
+                    "domain": "Unclassified", "guard_status": "UNCLASSIFIED",
+                    "is_nonhuman": False, "kmer_string": "",
+                },
+            })
+
+            _write_kraken2_span_bed(
+                out_path, alignment_meta,
+                informative, {}, result, None,
+            )
+
+            with gzip.open(out_path, "rt") as fh:
+                data = [l for l in fh if not l.startswith("#")]
+
+            f = data[0].strip().split("\t")
+            assert f[3] == "Unclassified"
+            assert f[4] == "Unclassified"
+            assert f[5] == "UNCLASSIFIED"
+            assert f[6] == "false"
+
+    def test_unknown_taxid_fallback(self):
+        """Without name_map, taxon uses Unknown_taxid_NNN format."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = os.path.join(tmpdir, "test.bed.gz")
+
+            alignment_meta = {
+                "read001": [{
+                    "chrom": "chr1", "start": 1000, "end": 1100,
+                    "mapq": 60, "softclip_left": 0, "softclip_right": 0,
+                    "has_sa": False, "is_supplementary": False,
+                }],
+            }
+            informative = {"chr1:1050:A:T": {"read001"}}
+            result = self._make_result_with_detail({
+                "read001": {
+                    "status": "C", "taxid": 999999,
+                    "domain": "Bacteria", "guard_status": "PASS",
+                    "is_nonhuman": True, "kmer_string": "999999:10",
+                },
+            })
+
+            _write_kraken2_span_bed(
+                out_path, alignment_meta,
+                informative, {}, result, None,  # no name_map
+            )
+
+            with gzip.open(out_path, "rt") as fh:
+                data = [l for l in fh if not l.startswith("#")]
+
+            f = data[0].strip().split("\t")
+            assert f[3] == "Unknown_taxid_999999"
+
+    def test_multi_variant_comma_separated(self):
+        """Read spanning multiple variants has comma-separated variant keys."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = os.path.join(tmpdir, "test.bed.gz")
+
+            alignment_meta = {
+                "shared_read": [{
+                    "chrom": "chr1", "start": 1000, "end": 1200,
+                    "mapq": 60, "softclip_left": 0, "softclip_right": 0,
+                    "has_sa": False, "is_supplementary": False,
+                }],
+            }
+            informative = {
+                "chr1:1050:A:T": {"shared_read"},
+                "chr1:1100:G:C": {"shared_read"},
+            }
+            result = self._make_result_with_detail({
+                "shared_read": {
+                    "status": "C", "taxid": 562,
+                    "domain": "Bacteria", "guard_status": "PASS",
+                    "is_nonhuman": True, "kmer_string": "562:10",
+                },
+            })
+
+            _write_kraken2_span_bed(
+                out_path, alignment_meta,
+                informative, {}, result, {562: "Escherichia_coli"},
+            )
+
+            with gzip.open(out_path, "rt") as fh:
+                data = [l for l in fh if not l.startswith("#")]
+
+            # Single row (one alignment record)
+            assert len(data) == 1
+            f = data[0].strip().split("\t")
+            # Variant column has comma-separated sorted keys
+            variants = f[8].split(",")
+            assert len(variants) == 2
+            assert "chr1:1050:A:T" in variants
+            assert "chr1:1100:G:C" in variants
+
+    def test_tabix_queryable(self):
+        """Span BED file can be queried with tabix."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = os.path.join(tmpdir, "test.bed.gz")
+
+            alignment_meta = {
+                "read001": [{
+                    "chrom": "chr1", "start": 1000, "end": 1100,
+                    "mapq": 60, "softclip_left": 0, "softclip_right": 0,
+                    "has_sa": False, "is_supplementary": False,
+                }],
+                "read002": [{
+                    "chrom": "chr2", "start": 2000, "end": 2100,
+                    "mapq": 60, "softclip_left": 0, "softclip_right": 0,
+                    "has_sa": False, "is_supplementary": False,
+                }],
+            }
+            informative = {
+                "chr1:1050:A:T": {"read001"},
+                "chr2:2050:G:C": {"read002"},
+            }
+            result = self._make_result_with_detail({
+                "read001": {
+                    "status": "C", "taxid": 562, "domain": "Bacteria",
+                    "guard_status": "PASS", "is_nonhuman": True,
+                    "kmer_string": "562:10",
+                },
+                "read002": {
+                    "status": "C", "taxid": 562, "domain": "Bacteria",
+                    "guard_status": "PASS", "is_nonhuman": True,
+                    "kmer_string": "562:10",
+                },
+            })
+
+            _write_kraken2_span_bed(
+                out_path, alignment_meta,
+                informative, {}, result, None,
+            )
+
+            tbx = pysam.TabixFile(out_path)
+            assert "chr1" in tbx.contigs
+            assert "chr2" in tbx.contigs
+
+            rows = list(tbx.fetch("chr1", 999, 1101))
+            assert len(rows) == 1
+            assert "read001" in rows[0]
+
+            rows2 = list(tbx.fetch("chr2", 1999, 2101))
+            assert len(rows2) == 1
+            assert "read002" in rows2[0]
+            tbx.close()
+
+    def test_sort_order(self):
+        """Rows sorted by chrom, start, read_name."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = os.path.join(tmpdir, "test.bed.gz")
+
+            alignment_meta = {
+                "readB": [{
+                    "chrom": "chr2", "start": 500, "end": 600,
+                    "mapq": 60, "softclip_left": 0, "softclip_right": 0,
+                    "has_sa": False, "is_supplementary": False,
+                }],
+                "readA": [{
+                    "chrom": "chr1", "start": 200, "end": 300,
+                    "mapq": 60, "softclip_left": 0, "softclip_right": 0,
+                    "has_sa": False, "is_supplementary": False,
+                }],
+                "readD": [{
+                    "chrom": "chr1", "start": 100, "end": 200,
+                    "mapq": 60, "softclip_left": 0, "softclip_right": 0,
+                    "has_sa": False, "is_supplementary": False,
+                }],
+            }
+            informative = {
+                "chr2:550:A:T": {"readB"},
+                "chr1:250:G:C": {"readA"},
+                "chr1:150:T:A": {"readD"},
+            }
+            detail = {}
+            for rname in alignment_meta:
+                detail[rname] = {
+                    "status": "C", "taxid": 562, "domain": "Bacteria",
+                    "guard_status": "PASS", "is_nonhuman": True,
+                    "kmer_string": "562:10",
+                }
+            result = self._make_result_with_detail(detail)
+
+            _write_kraken2_span_bed(
+                out_path, alignment_meta,
+                informative, {}, result, None,
+            )
+
+            with gzip.open(out_path, "rt") as fh:
+                data = [l for l in fh if not l.startswith("#")]
+
+            assert "chr1\t100\t" in data[0]
+            assert "readD" in data[0]
+            assert "chr1\t200\t" in data[1]
+            assert "readA" in data[1]
+            assert "chr2\t500\t" in data[2]
+            assert "readB" in data[2]
