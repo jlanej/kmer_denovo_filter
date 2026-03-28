@@ -32,13 +32,17 @@ jobs:
       - name: Run unit tests
         run: pytest tests/test_cli.py tests/test_kmer_utils.py tests/test_kraken2.py tests/test_kraken2_bed.py -v
 
-      - name: Run integration tests
+      - name: Run VCF-mode integration tests
         run: |
-          pytest tests/test_pipeline.py -v -k "not (deletion_dka or insertion_dka or decomposed_indel or decomposed_insertion)"
+          pytest tests/vcf/test_pipeline.py -v -k "not (deletion_dka or insertion_dka or decomposed_indel or decomposed_insertion)"
+
+      - name: Run discovery-mode integration tests
+        run: |
+          pytest tests/discovery/test_pipeline.py -v
 
       - name: Run focused indel DKA coverage tests
         run: |
-          pytest tests/test_pipeline.py -v -k "deletion_dka or insertion_dka or decomposed_indel or decomposed_insertion"
+          pytest tests/vcf/test_pipeline.py -v -k "deletion_dka or insertion_dka or decomposed_indel or decomposed_insertion"
 
       - name: Run GIAB VCF-mode integration pipeline
         run: |

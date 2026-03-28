@@ -4,7 +4,9 @@
 
 - **test_cli.py** – CLI argument parsing and validation.
 - **test_kmer_utils.py** – K-mer utility functions (canonicalization, extraction).
-- **test_pipeline.py** – Pipeline integration tests using synthetic BAM/VCF data.
+- **vcf/test_pipeline.py** – VCF-mode pipeline integration tests using synthetic BAM/VCF data.
+- **discovery/test_pipeline.py** – Discovery-mode pipeline integration tests using synthetic BAM data.
+- **helpers.py** – Shared test helper functions for creating synthetic BAM, VCF, and FASTA data.
 - **test_example_output.py** – Regression tests that fail when committed example
   output changes (metrics, summary, VCF annotations). Shows a unified diff on
   failure.
@@ -20,7 +22,7 @@
   by multiple tests.
 
 ```bash
-pytest tests/test_cli.py tests/test_kmer_utils.py tests/test_pipeline.py -v
+pytest tests/test_cli.py tests/test_kmer_utils.py tests/vcf/test_pipeline.py tests/discovery/test_pipeline.py -v
 ```
 
 ## GIAB Integration Test
