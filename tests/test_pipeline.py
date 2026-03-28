@@ -3255,3 +3255,52 @@ class TestJellyfishBatchScanMemory:
         assert jf_query.query_calls[1] == {"GGGGG"}
         assert jf_query.close_calls == 2
         assert len(seen_reads) == 3
+
+
+class TestModuleSeparation:
+    """Verify that vcf/ and discovery/ sub-packages are properly isolated."""
+
+    def test_discovery_does_not_import_vcf(self):
+        """The discovery sub-package must never import from vcf/."""
+        import ast
+
+        discovery_pipeline = os.path.join(
+            os.path.dirname(__file__), "..", "src",
+            "kmer_denovo_filter", "discovery", "pipeline.py",
+        )
+        with open(discovery_pipeline) as f:
+            tree = ast.parse(f.read(), filename=discovery_pipeline)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                assert "kmer_denovo_filter.vcf" not in node.module, (
+                    f"discovery/pipeline.py imports from vcf/: {node.module}"
+                )
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    assert "kmer_denovo_filter.vcf" not in alias.name, (
+                        f"discovery/pipeline.py imports from vcf/: {alias.name}"
+                    )
+
+    def test_subpackages_exist(self):
+        """Both vcf/ and discovery/ sub-packages should be importable."""
+        import kmer_denovo_filter.vcf
+        import kmer_denovo_filter.discovery
+        assert hasattr(kmer_denovo_filter.vcf, "run_pipeline")
+        assert hasattr(kmer_denovo_filter.discovery, "run_discovery_pipeline")
+
+    def test_backward_compat_pipeline_reexports(self):
+        """The pipeline.py shim re-exports all public names."""
+        from kmer_denovo_filter import pipeline
+        # VCF-mode functions
+        assert callable(pipeline.run_pipeline)
+        assert callable(pipeline._write_annotated_vcf)
+        assert callable(pipeline._parse_vcf_variants)
+        # Discovery-mode functions
+        assert callable(pipeline.run_discovery_pipeline)
+        assert callable(pipeline._anchor_and_cluster)
+        assert callable(pipeline._parse_candidate_summary)
+        assert hasattr(pipeline, "SULOVARI_DNM_REGIONS")
+        # Shared
+        assert callable(pipeline._validate_inputs)
+        assert callable(pipeline._check_tool)
