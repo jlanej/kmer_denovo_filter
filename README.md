@@ -4,18 +4,18 @@ De novo variant curation using k-mer analysis.
 
 ## Overview
 
-`kmer-denovo` identifies candidate *de novo* variants in a child by
-comparing k-mers from the child's sequencing reads against both parents.
-K-mers present in the child but absent from both parents signal potential
-*de novo* mutations.
+This package provides two commands for *de novo* variant curation using
+k-mer analysis:
 
-The tool supports two modes:
+* **`kmer-denovo`** (VCF mode) – Given a VCF of candidate variants,
+  annotate each variant with k-mer–based evidence of *de novo* origin.
+* **`kmer-discovery`** (VCF-free discovery mode) – Without any input VCF,
+  scan the child's entire genome for regions harboring proband-unique
+  k-mers and report candidate *de novo* regions.
 
-* **VCF mode** – Given a VCF of candidate variants, annotate each variant
-  with k-mer–based evidence of *de novo* origin.
-* **VCF-free discovery mode** – Without any input VCF, scan the child's
-  entire genome for regions harboring proband-unique k-mers and report
-  candidate *de novo* regions.
+Both commands compare k-mers from the child's sequencing reads against
+both parents. K-mers present in the child but absent from both parents
+signal potential *de novo* mutations.
 
 ## Algorithm
 
@@ -95,6 +95,11 @@ The tool supports two modes:
 pip install .
 ```
 
+This installs two commands:
+
+* **`kmer-denovo`** – VCF-mode variant annotation pipeline
+* **`kmer-discovery`** – VCF-free de novo region discovery pipeline
+
 ## Usage
 
 ### VCF Mode
@@ -129,12 +134,12 @@ kmer-denovo \
 
 ### VCF-Free Discovery Mode
 
-Discover candidate *de novo* regions without an input VCF. A reference
-FASTA (or a precomputed Jellyfish index) is required so that reference
-k-mers can be subtracted:
+Discover candidate *de novo* regions without an input VCF using the
+`kmer-discovery` command. A reference FASTA (or a precomputed Jellyfish
+index) is required so that reference k-mers can be subtracted:
 
 ```bash
-kmer-denovo \
+kmer-discovery \
   --child   child.bam \
   --mother  mother.bam \
   --father  father.bam \
@@ -159,7 +164,7 @@ To skip the reference indexing step on subsequent runs, pass a precomputed
 Jellyfish index:
 
 ```bash
-kmer-denovo \
+kmer-discovery \
   --child   child.bam \
   --mother  mother.bam \
   --father  father.bam \
@@ -171,7 +176,7 @@ Optionally, compare discovered regions against high-quality candidates from
 a previous VCF-mode run:
 
 ```bash
-kmer-denovo \
+kmer-discovery \
   --child   child.bam \
   --mother  mother.bam \
   --father  father.bam \
@@ -182,34 +187,48 @@ kmer-denovo \
 
 ### Arguments
 
+The two commands share a common set of arguments for BAM/CRAM input and
+k-mer parameters. Each command also has its own mode-specific arguments.
+
+#### Shared arguments (both `kmer-denovo` and `kmer-discovery`)
+
 | Argument | Default | Description |
 |---|---|---|
-| **Common** | | |
 | `--child` | *required* | Child BAM/CRAM file (indexed) |
 | `--mother` | *required* | Mother BAM/CRAM file (indexed) |
 | `--father` | *required* | Father BAM/CRAM file (indexed) |
-| `--ref-fasta` / `-r` | – | Reference FASTA with `.fai` index (required for CRAM; required for discovery mode unless `--ref-jf` is provided) |
+| `--ref-fasta` / `-r` | – | Reference FASTA with `.fai` index (required for CRAM; required for `kmer-discovery` unless `--ref-jf` is provided) |
 | `--kmer-size` / `-k` | 31 | K-mer size (must be odd, 3–201) |
 | `--min-baseq` | 20 | Minimum base quality for read k-mers |
 | `--threads` / `-t` | 4 | Number of threads for Jellyfish and parallel anchoring workers |
 | `--memory` | auto | Available memory in GB. On HPC (e.g. SLURM), set this to the allocated memory so worker counts and hash sizes are tuned correctly. When omitted, auto-detected from the system |
 | `--debug-kmers` | false | Enable per-variant debug output |
-| `--kraken2-db` | – | Optional Kraken2 database path. In VCF mode, enables non-human fraction annotations (DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF, DKU_VF/DKA_VF, DKU_UCF/DKA_UCF, DKU_NHF/DKA_NHF). Ignored in discovery mode. **Memory note:** the standard Kraken2 DB typically needs ~50–100 GB RAM to load/classify; provision memory accordingly to avoid OOM |
+| `--jf-hash-size` | auto | Initial hash size for `jellyfish count` (e.g. `2G`, `500M`). Estimated from the child BAM file size by default. A larger value avoids hash overflow (which creates multi-file indexes requiring more memory to merge/dump) |
+| `--tmp-dir` | auto | Directory for temporary files (jellyfish indexes, intermediate FASTA files). Defaults to a subdirectory next to the output files. Avoid RAM-backed filesystems like tmpfs (`/tmp` on many HPC systems), as intermediate files can exceed 100 GB for WGS data |
+
+#### `kmer-denovo` arguments (VCF mode)
+
+| Argument | Default | Description |
+|---|---|---|
+| `--vcf` | *required* | Input VCF with candidate variants |
+| `--output` / `-o` | *required* | Output annotated VCF |
+| `--min-mapq` | 20 | Minimum mapping quality for child reads |
+| `--proband-id` | – | Sample ID of the proband in the VCF. When provided and matching a VCF sample, annotations are written as FORMAT fields; otherwise INFO fields |
+| `--informative-reads` | – | Output BAM of reads carrying child-unique k-mers (tagged with `DV`) |
+| `--metrics` | – | Output summary metrics JSON file |
+| `--summary` | – | Output human-readable summary text file |
+| `--kraken2-db` | – | Optional Kraken2 database path. Enables non-human fraction annotations (DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF, DKU_VF/DKA_VF, DKU_UCF/DKA_UCF, DKU_NHF/DKA_NHF). **Memory note:** the standard Kraken2 DB typically needs ~50–100 GB RAM to load/classify; provision memory accordingly to avoid OOM |
 | `--kraken2-confidence` | 0.0 | Kraken2 LCA confidence threshold (0.0–1.0) |
 | `--kraken2-memory-mapping` | false | Passes Kraken2 `--memory-mapping` so DB files are memory-mapped from disk to reduce RAM footprint (usually slower, but helpful on RAM-constrained nodes) |
 | `--kraken2-read-detail` | auto | Output path for the per-read Kraken2 classification detail BED file (bgzipped + tabix-indexed). Auto-derived from `--output` when `--kraken2-db` is provided (e.g. `my_trio.annotated.kraken2_reads.bed.gz`) |
 | `--kraken2-span-bed` | auto | Output path for the species-annotated genomic span BED file (bgzipped + tabix-indexed). Maps each classified read's aligned reference span to its Kraken2-assigned species, including soft-clip lengths and split-read indicators. Auto-derived from `--output` when `--kraken2-db` is provided (e.g. `my_trio.annotated.kraken2_spans.bed.gz`) |
 | `--no-expanded-bed` | false | Disable generation of the soft-clip-expanded span BED file. By default, when `--kraken2-db` is provided, both the standard span BED and an expanded span BED are written |
-| **VCF mode** | | |
-| `--vcf` | – | Input VCF with candidate variants (activates VCF mode) |
-| `--output` / `-o` | – | Output annotated VCF (required with `--vcf`) |
-| `--min-mapq` | 20 | Minimum mapping quality for child reads (VCF mode only; discovery mode scans all primary reads regardless of mapping quality) |
-| `--proband-id` | – | Sample ID of the proband in the VCF. When provided and matching a VCF sample, annotations are written as FORMAT fields; otherwise INFO fields |
-| `--informative-reads` | – | Output BAM of reads carrying child-unique k-mers (tagged with `DV`) |
-| `--metrics` | – | Output summary metrics JSON file |
-| `--summary` | – | Output human-readable summary text file |
-| **Discovery mode** | | |
-| `--out-prefix` | – | Output prefix for discovery mode files (activates discovery mode) |
+
+#### `kmer-discovery` arguments (discovery mode)
+
+| Argument | Default | Description |
+|---|---|---|
+| `--out-prefix` | *required* | Output prefix for discovery mode files |
 | `--ref-jf` | – | Precomputed Jellyfish reference index; defaults to `[ref-fasta].k[kmer-size].jf` |
 | `--min-child-count` | 3 | Minimum k-mer occurrences in the child to be considered a candidate |
 | `--cluster-distance` | 500 | Maximum gap (bp) for merging adjacent regions |
@@ -220,8 +239,6 @@ kmer-denovo \
 | `--parent-max-count` | 0 | Maximum k-mer count in a parent before the k-mer is considered parental; k-mers with count > this value in either parent are removed |
 | `--candidate-summary` | – | Path to a VCF-mode `summary.txt` for candidate comparison. High-quality *de novos* (DKA\_DKT > 0.25, DKA > 10) are checked against discovered regions |
 | `--sv-bedpe` | – | Output BEDPE file for linked SV breakpoint pairs (default: `[out-prefix].sv.bedpe`) |
-| `--jf-hash-size` | auto | Initial hash size for `jellyfish count` (e.g. `2G`, `500M`). Estimated from the child BAM file size by default. A larger value avoids hash overflow (which creates multi-file indexes requiring more memory to merge/dump) |
-| `--tmp-dir` | auto | Directory for temporary files (jellyfish indexes, intermediate FASTA files). Defaults to a subdirectory next to the output files. Avoid RAM-backed filesystems like tmpfs (`/tmp` on many HPC systems), as intermediate files can exceed 100 GB for WGS data |
 
 ### VCF Mode Output
 
@@ -627,10 +644,13 @@ provenance is self-documenting.
 A Docker image is published to GitHub Container Registry on every push to
 `main`. The image includes `samtools`, `jellyfish`, `kraken2`, and `wget`
 for downloading the pre-built PrackenDB database.  The helper
-script is available inside the container at `/app/scripts/download_kraken2_db.sh`:
+script is available inside the container at `/app/scripts/download_kraken2_db.sh`.
+
+The default entrypoint is `kmer-denovo` (VCF mode). For discovery mode,
+override the entrypoint with `--entrypoint kmer-discovery`:
 
 ```bash
-# VCF mode
+# VCF mode (uses default entrypoint)
 docker run --rm -v $PWD:/data ghcr.io/jlanej/kmer_denovo_filter:latest \
   --child /data/child.bam \
   --mother /data/mother.bam \
@@ -640,8 +660,9 @@ docker run --rm -v $PWD:/data ghcr.io/jlanej/kmer_denovo_filter:latest \
   --kraken2-db /data/kraken2_db \
   --proband-id HG002
 
-# Discovery mode
-docker run --rm -v $PWD:/data ghcr.io/jlanej/kmer_denovo_filter:latest \
+# Discovery mode (override entrypoint)
+docker run --rm --entrypoint kmer-discovery \
+  -v $PWD:/data ghcr.io/jlanej/kmer_denovo_filter:latest \
   --child /data/child.bam \
   --mother /data/mother.bam \
   --father /data/father.bam \
@@ -674,7 +695,7 @@ apptainer exec kmer_denovo.sif kmer-denovo \
   --threads 8
 
 # Discovery mode
-apptainer exec kmer_denovo.sif kmer-denovo \
+apptainer exec kmer_denovo.sif kmer-discovery \
   --child   child.bam \
   --mother  mother.bam \
   --father  father.bam \
@@ -737,7 +758,7 @@ apptainer exec --bind /data,/scratch "$SIF" kmer-denovo \
 # Use --memory to tell the tool how much RAM your SLURM job has
 # so that worker counts are tuned correctly (system-reported memory
 # may reflect the full node, not your allocation).
-# apptainer exec --bind /data,/scratch "$SIF" kmer-denovo \
+# apptainer exec --bind /data,/scratch "$SIF" kmer-discovery \
 #   --child   /data/trio/child.bam \
 #   --mother  /data/trio/mother.bam \
 #   --father  /data/trio/father.bam \
