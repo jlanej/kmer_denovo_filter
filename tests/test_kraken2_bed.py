@@ -990,3 +990,68 @@ class TestWriteKraken2ExpandedSpanBed:
             data = [l for l in lines if not l.startswith("#")]
             f = data[0].strip().split("\t")
             assert len(f) == 17
+
+    def test_sort_order_with_varying_softclips(self):
+        """Expanded BED is sorted by expanded coordinates, not aligned.
+
+        When two reads have similar aligned starts but different
+        soft-clip lengths, the expanded (soft-clip–extended) start
+        positions can reverse the order.  The output must be sorted
+        by the *expanded* coordinates so that tabix indexing succeeds.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = os.path.join(tmpdir, "test.expanded.bed.gz")
+
+            # readA: aligned_start=631718, softclip_left=0
+            #        → expanded_start = 631718
+            # readB: aligned_start=631720, softclip_left=44
+            #        → expanded_start = 631676
+            # Sorted by aligned start: readA(631718), readB(631720)
+            # Sorted by expanded start: readB(631676), readA(631718)
+            alignment_meta = {
+                "readA": [{
+                    "chrom": "chr1", "start": 631718, "end": 631850,
+                    "mapq": 60, "softclip_left": 0, "softclip_right": 0,
+                    "has_sa": False, "is_supplementary": False,
+                }],
+                "readB": [{
+                    "chrom": "chr1", "start": 631720, "end": 631860,
+                    "mapq": 60, "softclip_left": 44, "softclip_right": 10,
+                    "has_sa": False, "is_supplementary": False,
+                }],
+            }
+            informative = {
+                "chr1:631750:A:T": {"readA", "readB"},
+            }
+            detail = {}
+            for rname in alignment_meta:
+                detail[rname] = {
+                    "status": "C", "taxid": 562, "domain": "Bacteria",
+                    "guard_status": "PASS", "is_nonhuman": True,
+                    "kmer_string": "562:10",
+                }
+            result = self._make_result_with_detail(detail)
+
+            _write_kraken2_expanded_span_bed(
+                out_path, alignment_meta,
+                informative, {}, result, None,
+            )
+
+            # Must be tabix-indexable (implies sorted)
+            tbx = pysam.TabixFile(out_path)
+            rows = list(tbx.fetch("chr1", 631670, 631870))
+            assert len(rows) == 2
+            tbx.close()
+
+            # Verify expanded coordinates are in ascending order
+            with gzip.open(out_path, "rt") as fh:
+                data = [l for l in fh if not l.startswith("#")]
+
+            starts = [int(l.split("\t")[1]) for l in data]
+            assert starts == sorted(starts), (
+                f"Expanded BED not sorted by position: {starts}"
+            )
+            # readB (expanded_start=631676) must come before
+            # readA (expanded_start=631718)
+            assert starts[0] == 631676
+            assert starts[1] == 631718
