@@ -103,7 +103,7 @@ jobs:
       - name: Run GIAB discovery-mode integration pipeline
         run: |
           mkdir -p integration_output_discovery
-          kmer-denovo \
+          kmer-discovery \
             --child   tests/data/giab/HG002_child.bam   \
             --father  tests/data/giab/HG003_father.bam  \
             --mother  tests/data/giab/HG004_mother.bam  \
