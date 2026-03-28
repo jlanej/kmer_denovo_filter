@@ -230,7 +230,15 @@ def _estimate_fasta_sequence_count(fasta_path, sample_lines=1000):
 def _validate_inputs(args):
     """Validate pipeline inputs before starting computation.
 
-    Raises SystemExit with a clear error message for any invalid input.
+    Args:
+        args: ``argparse.Namespace`` produced by :func:`~kmer_denovo_filter.cli.parse_args`.
+            Expected attributes include *child*, *mother*, *father*,
+            *ref_fasta*, *vcf* (``None`` in discovery mode), *kmer_size*,
+            *min_baseq*, *threads*, and mode-specific options such as
+            *ref_jf*, *min_child_count* (discovery) or *min_mapq* (VCF).
+
+    Raises:
+        SystemExit: with a clear error message for any invalid input.
     """
     errors = []
 
