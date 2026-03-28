@@ -59,14 +59,21 @@ jobs:
       - name: Validate BED file sort order and indexability
         run: |
           echo "--- Checking BED files ---"
-          for bed in integration_output/*.bed.gz; do
-            echo "Validating: $bed"
-            # Check file exists and is non-empty
-            [ -s "$bed" ] || { echo "FAIL: $bed is empty"; exit 1; }
-            # Check tabix index exists
-            [ -f "${bed}.tbi" ] || { echo "FAIL: ${bed}.tbi missing"; exit 1; }
-            # Verify positions are sorted (chrom lexicographic, start numeric)
-            python3 -c "
+          # Use nullglob so the loop is skipped when no BED files exist
+          # (BED files are only produced when --kraken2-db is provided)
+          shopt -s nullglob
+          beds=(integration_output/*.bed.gz)
+          if [ ${#beds[@]} -eq 0 ]; then
+            echo "No BED files found (Kraken2 DB not configured) – skipping"
+          else
+            for bed in "${beds[@]}"; do
+              echo "Validating: $bed"
+              # Check file exists and is non-empty
+              [ -s "$bed" ] || { echo "FAIL: $bed is empty"; exit 1; }
+              # Check tabix index exists
+              [ -f "${bed}.tbi" ] || { echo "FAIL: ${bed}.tbi missing"; exit 1; }
+              # Verify positions are sorted (chrom lexicographic, start numeric)
+              python3 -c "
           import gzip, sys
           prev_chrom, prev_start = '', -1
           with gzip.open('$bed', 'rt') as fh:
@@ -81,16 +88,17 @@ jobs:
                   prev_chrom, prev_start = chrom, start
           print('  Sort order OK')
           "
-            # Verify tabix can open the file
-            python3 -c "
+              # Verify tabix can open the file
+              python3 -c "
           import pysam
           tbx = pysam.TabixFile('$bed')
           contigs = list(tbx.contigs)
           tbx.close()
           print(f'  Tabix OK – contigs: {contigs}')
           "
-          done
-          echo "--- All BED files valid ---"
+            done
+          fi
+          echo "--- BED file check complete ---"
 
       - name: Run GIAB discovery-mode integration pipeline
         run: |
