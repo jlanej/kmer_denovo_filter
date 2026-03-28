@@ -3221,7 +3221,10 @@ class TestJellyfishBatchScanMemory:
             seen_reads.append((read.query_sequence, unique_in_read))
             return 0
 
-        monkeypatch.setattr(bam_scanner_mod, "pysam", type('', (), {"AlignmentFile": _FakeBam})())
+        class _FakePysam:
+            AlignmentFile = _FakeBam
+
+        monkeypatch.setattr(bam_scanner_mod, "pysam", _FakePysam)
         monkeypatch.setattr(
             bam_scanner_mod, "_extract_read_kmers", _fake_extract_read_kmers,
         )
