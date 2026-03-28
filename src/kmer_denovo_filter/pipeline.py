@@ -15,6 +15,26 @@ import time
 
 import pysam
 
+from kmer_denovo_filter.core.bam_scanner import (
+    _collect_read_alignment_metadata,
+    _extract_softclips,
+    _init_scan_worker,
+    _scan_contig_for_hits,
+)
+from kmer_denovo_filter.core.jellyfish_wrappers import (
+    _build_proband_jf_index,
+    _ensure_ref_jf,
+    _merge_jf_files,
+    _scan_parent_jellyfish,
+)
+from kmer_denovo_filter.core.memory_utils import (
+    _get_available_memory_gb,
+    _log_children_memory,
+    _log_dir_size,
+    _log_disk_usage,
+    _log_memory,
+    _log_subprocess_memory,
+)
 from kmer_denovo_filter.kmer_utils import (
     JellyfishKmerQuery,
     Kraken2Runner,
@@ -35,15 +55,9 @@ from kmer_denovo_filter.utils import (
     _find_jf_files,
     _format_elapsed,
     _format_file_size,
-    _get_available_memory_gb,
     _infer_sv_type,
     _is_tmpfs,
     _load_kmers_from_fasta,
-    _log_children_memory,
-    _log_dir_size,
-    _log_disk_usage,
-    _log_memory,
-    _log_subprocess_memory,
     _resolve_tmp_dir,
     _write_kmer_fasta,
 )
@@ -332,144 +346,6 @@ def _write_kraken2_read_detail_bed(
         meta_char="#",
     )
 
-
-def _extract_softclips(cigartuples):
-    """Extract left and right soft-clip lengths from CIGAR tuples.
-
-    Args:
-        cigartuples: List of ``(operation, length)`` tuples from
-            ``pysam.AlignedSegment.cigartuples``.  May be ``None``
-            for unmapped reads.
-
-    Returns:
-        ``(softclip_left, softclip_right)`` tuple of integers.
-    """
-    if not cigartuples:
-        return (0, 0)
-    # CIGAR ops: 4 = CSOFT_CLIP, 5 = CHARD_CLIP
-    # Hard clips may appear outside soft clips: e.g. 5H10S80M5S3H
-    left = 0
-    for op, length in cigartuples:
-        if op == 4:  # soft clip
-            left = length
-            break
-        elif op == 5:  # hard clip — skip and keep looking
-            continue
-        else:
-            break
-
-    right = 0
-    for op, length in reversed(cigartuples):
-        if op == 4:
-            right = length
-            break
-        elif op == 5:
-            continue
-        else:
-            break
-
-    # Avoid double-counting when there is only one non-hard-clip CIGAR op
-    non_hard = [t for t in cigartuples if t[0] != 5]
-    if len(non_hard) == 1 and non_hard[0][0] == 4:
-        right = 0
-
-    return (left, right)
-
-
-def _collect_read_alignment_metadata(
-    child_bam, ref_fasta, read_names,
-    informative_reads_by_variant=None,
-):
-    """Collect alignment metadata for informative reads from a BAM/CRAM.
-
-    For each read in *read_names*, collects **all** alignment records
-    (primary + supplementary) and stores per-alignment metadata needed
-    for the genomic span BED file.
-
-    Args:
-        child_bam: Path to child BAM/CRAM.
-        ref_fasta: Path to reference FASTA (may be ``None`` for BAM).
-        read_names: Set of read names to collect metadata for.
-        informative_reads_by_variant: Optional dict mapping variant keys
-            to read-name sets for targeted BAM fetching.
-
-    Returns:
-        Dict mapping ``read_name`` → list of alignment record dicts,
-        each with keys:
-
-        - ``chrom`` (str): Reference contig name.
-        - ``start`` (int): 0-based aligned start (``reference_start``).
-        - ``end`` (int): 0-based exclusive aligned end (``reference_end``).
-        - ``mapq`` (int): Mapping quality.
-        - ``softclip_left`` (int): Soft-clipped bases at left end.
-        - ``softclip_right`` (int): Soft-clipped bases at right end.
-        - ``has_sa`` (bool): Whether the read has an SA tag.
-        - ``is_supplementary`` (bool): Whether this record is supplementary.
-    """
-    if not read_names:
-        return {}
-
-    alignment_meta = {}  # read_name -> list of record dicts
-
-    bam = pysam.AlignmentFile(
-        child_bam, reference_filename=ref_fasta if ref_fasta else None,
-    )
-
-    def _process_read(read):
-        if read.query_name not in read_names:
-            return
-        if read.is_unmapped:
-            return
-        sc_left, sc_right = _extract_softclips(read.cigartuples)
-        has_sa = read.has_tag("SA")
-        rec = {
-            "chrom": read.reference_name,
-            "start": read.reference_start,
-            "end": read.reference_end,
-            "mapq": read.mapping_quality,
-            "softclip_left": sc_left,
-            "softclip_right": sc_right,
-            "has_sa": has_sa,
-            "is_supplementary": read.is_supplementary,
-        }
-        alignment_meta.setdefault(read.query_name, []).append(rec)
-
-    used_targeted_fetch = False
-    if informative_reads_by_variant:
-        loci_to_names = {}
-        for var_key, names in informative_reads_by_variant.items():
-            if not names:
-                continue
-            parts = var_key.split(":")
-            if len(parts) < 2:
-                continue
-            chrom = parts[0]
-            try:
-                pos = int(parts[1])
-            except ValueError:
-                continue
-            target_names = set(names).intersection(read_names)
-            if not target_names:
-                continue
-            loci_to_names.setdefault((chrom, pos), set()).update(target_names)
-
-        if loci_to_names:
-            used_targeted_fetch = True
-            seen = set()  # (read_name, is_supplementary, start) dedup key
-            for (chrom, pos), target_names in sorted(loci_to_names.items()):
-                for read in bam.fetch(chrom, pos, pos + 1):
-                    key = (read.query_name, read.is_supplementary,
-                           read.reference_start)
-                    if key not in seen:
-                        seen.add(key)
-                        _process_read(read)
-
-    if not used_targeted_fetch:
-        for read in bam.fetch(until_eof=True):
-            _process_read(read)
-
-    bam.close()
-    return alignment_meta
 
 
 def _build_span_bed_rows(
@@ -976,127 +852,6 @@ def _collect_child_kmers(
     bam.close()
     return total_written, variant_read_kmers
 
-
-def _scan_parent_jellyfish(
-    parent_bam, ref_fasta, kmer_fasta, kmer_size, parent_dir, threads=4,
-):
-    """Scan a parent BAM and find which child k-mers are present.
-
-    Uses ``jellyfish count`` with the ``--if`` filter so only child k-mers
-    are tracked while the parent BAM is streamed.  The dump output is
-    streamed line-by-line and the parent Jellyfish index is removed after
-    the dump to free disk space.
-
-    Returns:
-        Dict mapping canonical k-mer string to its count in the parent.
-    """
-    os.makedirs(parent_dir, exist_ok=True)
-    jf_output = os.path.join(parent_dir, "parent.jf")
-
-    samtools_threads = max(1, threads // 4)
-    samtools_cmd = [
-        "samtools", "fasta", "-F", "0xD00",
-        "-@", str(samtools_threads),
-        parent_bam,
-    ]
-    if ref_fasta:
-        samtools_cmd.extend(["--reference", ref_fasta])
-
-    jellyfish_cmd = [
-        "jellyfish", "count",
-        "-m", str(kmer_size),
-        "-s", "10M",
-        "-t", str(threads),
-        "-C",
-        "--if", kmer_fasta,
-        "-o", jf_output,
-        "/dev/fd/0",
-    ]
-
-    bam_size = _format_file_size(parent_bam)
-    logger.info(
-        "Scanning parent BAM (%s): %s", bam_size, parent_bam,
-    )
-    logger.info(
-        "  samtools fasta → jellyfish count (k=%d, threads=%d)",
-        kmer_size, threads,
-    )
-
-    scan_start = time.monotonic()
-
-    p_samtools = subprocess.Popen(
-        samtools_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    p_jellyfish = subprocess.Popen(
-        jellyfish_cmd,
-        stdin=p_samtools.stdout,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    p_samtools.stdout.close()
-
-    # Poll for completion, logging periodic progress
-    poll_interval = 30  # seconds between progress updates
-    last_log = scan_start
-    while True:
-        try:
-            p_jellyfish.wait(timeout=poll_interval)
-            break  # process finished
-        except subprocess.TimeoutExpired:
-            now = time.monotonic()
-            elapsed = now - scan_start
-            # Report jellyfish output file size as a proxy for progress
-            jf_size = _format_file_size(jf_output) if os.path.exists(jf_output) else "pending"
-            logger.info(
-                "  … still scanning (%s elapsed, jf index: %s)",
-                _format_elapsed(elapsed), jf_size,
-            )
-            _log_memory("parent scanning")
-            _log_subprocess_memory(p_jellyfish, "jellyfish-count")
-            _log_subprocess_memory(p_samtools, "samtools-fasta")
-            last_log = now
-
-    p_samtools.communicate()
-    jf_stderr = p_jellyfish.stderr.read()
-
-    if p_jellyfish.returncode != 0:
-        raise RuntimeError(
-            f"jellyfish count failed: {jf_stderr.decode()}"
-        )
-
-    scan_elapsed = time.monotonic() - scan_start
-    logger.info(
-        "  Jellyfish counting complete (%s)", _format_elapsed(scan_elapsed),
-    )
-
-    found_kmers = {}
-    if os.path.exists(jf_output):
-        jf_size = _format_file_size(jf_output)
-        logger.info("  Dumping jellyfish results (%s index)…", jf_size)
-        dump_cmd = ["jellyfish", "dump", "-c", "-L", "1", jf_output]
-        with tempfile.TemporaryFile(mode="w+") as stderr_f:
-            p_dump = subprocess.Popen(
-                dump_cmd, stdout=subprocess.PIPE, stderr=stderr_f,
-                text=True,
-            )
-            for line in p_dump.stdout:
-                line = line.rstrip("\n")
-                if line:
-                    parts = line.split()
-                    found_kmers[parts[0]] = int(parts[1])
-            p_dump.wait()
-            if p_dump.returncode != 0:
-                stderr_f.seek(0)
-                raise RuntimeError(
-                    f"jellyfish dump (parent) failed: {stderr_f.read()}"
-                )
-
-        # Remove the parent jellyfish index to free disk/cache.
-        os.remove(jf_output)
-
-    return found_kmers
 
 
 def _parse_vcf_variants(vcf_path):
@@ -1755,89 +1510,6 @@ def _write_summary(summary_path, variants, annotations):
 # ── Discovery-mode helpers ────────────────────────────────────────
 
 
-def _ensure_ref_jf(ref_fasta, kmer_size, threads, ref_jf=None):
-    """Ensure a Jellyfish reference index exists, building it if necessary.
-
-    Args:
-        ref_fasta: Path to the reference FASTA file.
-        kmer_size: K-mer size.
-        threads: Number of threads for jellyfish.
-        ref_jf: Explicit path to the Jellyfish index; when *None*,
-            defaults to ``{ref_fasta}.k{kmer_size}.jf``.
-
-    Returns:
-        Path to the Jellyfish reference index.
-    """
-    if ref_jf is None:
-        ref_jf = f"{ref_fasta}.k{kmer_size}.jf"
-
-    if os.path.isfile(ref_jf):
-        logger.info("Reference Jellyfish index found: %s", ref_jf)
-        return ref_jf
-
-    logger.info(
-        "Building reference Jellyfish index: %s (k=%d, threads=%d)",
-        ref_jf, kmer_size, threads,
-    )
-    ref_hash_size = _estimate_jf_hash_size(ref_fasta, kmer_size, default="3G")
-    logger.info("  Reference JF hash size: %s", ref_hash_size)
-    build_start = time.monotonic()
-    cmd = [
-        "jellyfish", "count",
-        "-m", str(kmer_size),
-        "-s", ref_hash_size,
-        "-t", str(threads),
-        "-C",
-        ref_fasta,
-        "-o", ref_jf,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"jellyfish count (reference) failed: {result.stderr}"
-        )
-    logger.info(
-        "Reference index built in %s (%s)",
-        _format_elapsed(time.monotonic() - build_start),
-        _format_file_size(ref_jf),
-    )
-    return ref_jf
-
-
-def _merge_jf_files(jf_files, merged_path, threads=4):
-    """Merge multiple Jellyfish chunk files into one.
-
-    When Jellyfish count produces multiple output files (hash overflow),
-    they must be merged before querying.  Uses ``jellyfish merge`` which
-    streams chunks and requires memory proportional to one chunk at a
-    time.
-    """
-    if len(jf_files) <= 1:
-        return jf_files[0] if jf_files else None
-
-    logger.info(
-        "Merging %d Jellyfish chunks into %s…",
-        len(jf_files), merged_path,
-    )
-    merge_start = time.monotonic()
-    cmd = ["jellyfish", "merge", "-o", merged_path] + jf_files
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"jellyfish merge failed: {result.stderr}")
-
-    # Remove chunk files to free disk
-    for f in jf_files:
-        if f != merged_path and os.path.exists(f):
-            os.remove(f)
-
-    logger.info(
-        "Jellyfish merge complete (%s, merged: %s)",
-        _format_elapsed(time.monotonic() - merge_start),
-        _format_file_size(merged_path),
-    )
-    return merged_path
-
-
 def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
                                    min_child_count, threads, tmpdir,
                                    jf_hash_size=None):
@@ -2382,349 +2054,6 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
     )
     _log_memory("after parent filtering")
     return n_proband, proband_unique_fa
-
-
-def _build_proband_jf_index(proband_unique_fa, kmer_size, tmpdir,
-                            n_proband_unique=None):
-    """Build a Jellyfish index from proband-unique k-mers.
-
-    Creates a ``.jf`` hash file that can be queried via
-    ``jellyfish query`` or :class:`JellyfishKmerQuery` to check k-mer
-    membership without loading the set into Python memory.
-
-    For WGS-scale data with hundreds of millions of proband-unique k-mers,
-    the resulting index is typically 2–10 GB on disk and memory-mapped by
-    each ``jellyfish query`` subprocess.  Multiple workers share the same
-    OS page-cache mapping, so N workers ≈ 1× the hash file memory.
-
-    Args:
-        proband_unique_fa: Path to FASTA of proband-unique k-mers.
-        kmer_size: K-mer length.
-        tmpdir: Working directory for the index.
-        n_proband_unique: Number of k-mers (for hash size estimation).
-
-    Returns:
-        Path to the Jellyfish index file.
-    """
-    if n_proband_unique is None:
-        n_proband_unique = 0
-        with open(proband_unique_fa) as fh:
-            for line in fh:
-                if line.rstrip() and not line.startswith(">"):
-                    n_proband_unique += 1
-
-    # Set hash size slightly larger than the k-mer count to avoid
-    # overflow / multi-file output.
-    hash_size = max(n_proband_unique * 2, 1_000_000)
-    hash_size_str = f"{hash_size}"
-
-    proband_jf = os.path.join(tmpdir, "proband_unique.jf")
-
-    logger.info(
-        "Building Jellyfish index from %d proband-unique k-mers "
-        "(hash size: %s)…",
-        n_proband_unique, hash_size_str,
-    )
-
-    jf_cmd = [
-        "jellyfish", "count",
-        "-m", str(kmer_size),
-        "-s", hash_size_str,
-        "-t", "1",
-        "-C",
-        "-o", proband_jf,
-        proband_unique_fa,
-    ]
-
-    build_start = time.monotonic()
-    result = subprocess.run(
-        jf_cmd, capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"jellyfish count (proband index) failed: {result.stderr}"
-        )
-
-    logger.info(
-        "Proband Jellyfish index built (%s, index: %s)",
-        _format_elapsed(time.monotonic() - build_start),
-        _format_file_size(proband_jf),
-    )
-    _log_memory("after proband index build")
-    return proband_jf
-
-
-# ── Multiprocessing helpers for _anchor_and_cluster ────────────────────
-
-_worker_automaton = None       # Aho-Corasick automaton (small k-mer sets)
-_worker_jf_query = None        # JellyfishKmerQuery (large k-mer sets)
-_worker_kmer_size = None
-_worker_min_distinct_kmers_per_read = 1
-
-# Number of reads to accumulate before issuing a single jellyfish
-# subprocess call.  Larger batches amortize subprocess overhead
-# but temporarily hold more read objects in memory.
-_JF_READ_BATCH_SIZE = 5000
-
-
-def _init_scan_worker(proband_data, kmer_size,
-                      min_distinct_kmers_per_read=1):
-    """Initializer for per-contig scan workers.
-
-    *proband_data* may be:
-    - A path ending in ``.jf`` — opens a :class:`JellyfishKmerQuery`
-      that queries k-mers against a memory-mapped jellyfish hash.
-      This is the low-memory path used for WGS discovery mode with
-      hundreds of millions of proband-unique k-mers.
-    - A FASTA file path — loads k-mers into a Python set and builds
-      an Aho-Corasick automaton (fast but memory-intensive).
-    - A Python set — builds an Aho-Corasick automaton directly.
-    """
-    global _worker_automaton, _worker_jf_query, _worker_kmer_size
-    global _worker_min_distinct_kmers_per_read
-
-    _worker_automaton = None
-    _worker_jf_query = None
-
-    if isinstance(proband_data, str) and proband_data.endswith(".jf"):
-        # Jellyfish-backed mode: each query subprocess memory-maps
-        # the same .jf file; the OS page cache is shared across workers.
-        _worker_jf_query = JellyfishKmerQuery(proband_data)
-    elif isinstance(proband_data, str):
-        kmers = _load_kmers_from_fasta(proband_data)
-        _worker_automaton = build_kmer_automaton(kmers)
-        del kmers
-    else:
-        _worker_automaton = build_kmer_automaton(proband_data)
-
-    _worker_kmer_size = kmer_size
-    _worker_min_distinct_kmers_per_read = min_distinct_kmers_per_read
-
-
-def _process_informative_read(read, unique_in_read, kmer_hit_indices,
-                              kmer_size, reads_seen, read_hits,
-                              read_sv_meta, kmer_coverage, read_coverage):
-    """Record an informative read's hits, coverage, and SV metadata.
-
-    Returns 1 if the read is unmapped-informative, 0 otherwise.
-    Mutates *reads_seen*, *read_hits*, *read_sv_meta*, *kmer_coverage*,
-    and *read_coverage* in place.
-    """
-    dedup_key = (read.query_name, read.is_supplementary)
-    if dedup_key in reads_seen:
-        return 0
-
-    reads_seen.add(dedup_key)
-    if read.is_unmapped:
-        return 1
-
-    read_hits.append((
-        read.reference_name,
-        read.reference_start,
-        read.reference_end,
-        read.query_name,
-        unique_in_read,
-        read.is_supplementary,
-    ))
-    # Map novel k-mer query positions to reference coords
-    chrom = read.reference_name
-    cov = _collect_kmer_ref_positions(
-        read, kmer_hit_indices, kmer_size,
-    )
-    kmer_coverage[chrom] += cov
-    # Count one read per touched position
-    for pos in cov:
-        read_coverage[chrom][pos] += 1
-
-    # Collect SV metadata for this informative read
-    max_clip = 0
-    if read.cigartuples:
-        for op, length in read.cigartuples:
-            if op == 4 and length > max_clip:  # soft clip
-                max_clip = length
-    read_sv_meta[dedup_key] = {
-        "has_sa": read.has_tag("SA"),
-        "sa_str": read.get_tag("SA") if (
-            read.has_tag("SA") and not read.is_supplementary
-        ) else None,
-        "is_paired": read.is_paired,
-        "is_proper_pair": read.is_proper_pair,
-        "mate_is_unmapped": (
-            read.mate_is_unmapped if read.is_paired else False
-        ),
-        "max_clip": max_clip,
-    }
-    return 0
-
-
-def _scan_contig_for_hits(child_bam, ref_fasta, contig):
-    """Scan reads mapped to *contig* for proband-unique k-mers.
-
-    When *contig* is ``None``, unmapped reads are scanned instead.
-
-    Supports two scanning backends:
-    - **Aho-Corasick automaton** (``_worker_automaton``) — fast C-level
-      multi-pattern matching; used when the k-mer set fits in memory.
-    - **JellyfishKmerQuery** (``_worker_jf_query``) — disk-backed
-      queries via ``jellyfish query``; used for large k-mer sets in
-      discovery mode where the set is too large for Aho-Corasick.
-
-    Returns:
-        (read_hits, reads_seen, unmapped_informative, total_reads_scanned,
-         read_sv_meta, kmer_coverage, read_coverage)
-
-    ``read_sv_meta`` is a dict keyed by ``(query_name, is_supplementary)``
-    with per-read SV metadata (has_sa, sa_str, is_paired, is_proper_pair,
-    mate_is_unmapped, max_clip) collected for each informative read so
-    that annotation and linking can be done without re-scanning the BAM.
-
-    ``kmer_coverage`` is a dict mapping chrom to a Counter of reference
-    positions overlapped by novel k-mers (counts total k-mer base
-    overlaps across all reads).
-
-    ``read_coverage`` is a dict mapping chrom to a Counter of reference
-    positions where at least one novel k-mer was found, counting the
-    number of distinct reads touching each position.
-    """
-    automaton = _worker_automaton
-    jf_query = _worker_jf_query
-    kmer_size = _worker_kmer_size
-    min_dk_per_read = _worker_min_distinct_kmers_per_read
-    bam = pysam.AlignmentFile(
-        child_bam, reference_filename=ref_fasta if ref_fasta else None,
-    )
-
-    read_hits = []
-    reads_seen = set()
-    read_sv_meta = {}
-    kmer_coverage = collections.defaultdict(collections.Counter)
-    read_coverage = collections.defaultdict(collections.Counter)
-    unmapped_informative = 0
-    total_reads_scanned = 0
-
-    if contig is None:
-        try:
-            iterator = bam.fetch("*")
-        except (ValueError, KeyError):
-            bam.close()
-            return (read_hits, reads_seen, unmapped_informative,
-                    total_reads_scanned, read_sv_meta, kmer_coverage,
-                    read_coverage)
-    else:
-        iterator = bam.fetch(contig=contig)
-
-    if jf_query is not None:
-        # ── Batched jellyfish path ─────────────────────────────────
-        # Reads are accumulated in batches so that k-mers from many
-        # reads are queried in a single jellyfish subprocess call.
-        # This reduces subprocess overhead from O(n_reads) to
-        # O(n_reads / batch_size).
-        pending = []   # (read, canon_at_pos)
-        pending_kmers = set()
-
-        for read in iterator:
-            if read.is_secondary:
-                continue
-            if read.is_duplicate:
-                continue
-
-            total_reads_scanned += 1
-            seq = read.query_sequence
-            if seq is None:
-                continue
-
-            canon_at_pos, unique_candidates = _extract_read_kmers(
-                seq, kmer_size,
-            )
-            pending_kmers.update(unique_candidates)
-            pending.append((read, canon_at_pos))
-
-            if len(pending) < _JF_READ_BATCH_SIZE:
-                continue
-
-            # Query all unique k-mers from this batch in one subprocess.
-            # Avoid unbounded per-worker cache growth by processing each
-            # batch against this local hit set, then clearing cache.
-            batch_hits = set()
-            if pending_kmers:
-                batch_hits = jf_query.query_batch(list(pending_kmers))
-                pending_kmers = set()
-
-            # Process each read against batch-level hits
-            for read_obj, c_at_pos in pending:
-                unique_in_read = set()
-                kmer_hit_indices = set()
-                for pos, canon in c_at_pos.items():
-                    if canon in batch_hits:
-                        unique_in_read.add(canon)
-                        kmer_hit_indices.add(pos)
-
-                if len(unique_in_read) < min_dk_per_read:
-                    continue
-
-                unmapped_informative += _process_informative_read(
-                    read_obj, unique_in_read, kmer_hit_indices,
-                    kmer_size, reads_seen, read_hits,
-                    read_sv_meta, kmer_coverage, read_coverage,
-                )
-            pending = []
-            jf_query.close()
-
-        # Flush remaining reads
-        if pending:
-            batch_hits = set()
-            if pending_kmers:
-                batch_hits = jf_query.query_batch(list(pending_kmers))
-            for read_obj, c_at_pos in pending:
-                unique_in_read = set()
-                kmer_hit_indices = set()
-                for pos, canon in c_at_pos.items():
-                    if canon in batch_hits:
-                        unique_in_read.add(canon)
-                        kmer_hit_indices.add(pos)
-
-                if len(unique_in_read) < min_dk_per_read:
-                    continue
-
-                unmapped_informative += _process_informative_read(
-                    read_obj, unique_in_read, kmer_hit_indices,
-                    kmer_size, reads_seen, read_hits,
-                    read_sv_meta, kmer_coverage, read_coverage,
-                )
-            jf_query.close()
-    else:
-        # ── Aho-Corasick path (or no backend) ──────────────────────
-        for read in iterator:
-            if read.is_secondary:
-                continue
-            if read.is_duplicate:
-                continue
-
-            total_reads_scanned += 1
-            seq = read.query_sequence
-            if seq is None:
-                continue
-
-            unique_in_read = set()
-            kmer_hit_indices = set()
-            if automaton is not None:
-                for _end_idx, canonical_kmer in automaton.iter(seq):
-                    unique_in_read.add(canonical_kmer)
-                    kmer_hit_indices.add(_end_idx - kmer_size + 1)
-
-            if len(unique_in_read) < min_dk_per_read:
-                continue
-
-            unmapped_informative += _process_informative_read(
-                read, unique_in_read, kmer_hit_indices,
-                kmer_size, reads_seen, read_hits,
-                read_sv_meta, kmer_coverage, read_coverage,
-            )
-
-    bam.close()
-    return (read_hits, reads_seen, unmapped_informative,
-            total_reads_scanned, read_sv_meta, kmer_coverage,
-            read_coverage)
 
 
 def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
@@ -4281,7 +3610,7 @@ def run_discovery_pipeline(args):
 
     # Resolve temp directory — avoid RAM-backed /tmp on HPC systems
     out_dir = os.path.dirname(os.path.abspath(out_prefix)) or "."
-    tmp_root = _resolve_tmp_dir(args, out_dir)
+    tmp_root = _resolve_tmp_dir(args.tmp_dir, out_dir)
     logger.info("  Temp directory root: %s", tmp_root)
     if _is_tmpfs(tmp_root):
         logger.warning(
@@ -4787,7 +4116,7 @@ def run_pipeline(args):
     parent_found_kmers = collections.Counter()
 
     out_dir = os.path.dirname(os.path.abspath(args.output)) or "."
-    tmp_root = _resolve_tmp_dir(args, out_dir)
+    tmp_root = _resolve_tmp_dir(args.tmp_dir, out_dir)
     logger.info("  Temp directory root: %s", tmp_root)
     if _is_tmpfs(tmp_root):
         logger.warning(
