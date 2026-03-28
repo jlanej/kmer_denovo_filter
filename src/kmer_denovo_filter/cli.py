@@ -3,7 +3,7 @@
 import argparse
 import sys
 
-from kmer_denovo_filter.pipeline import run_pipeline
+from kmer_denovo_filter.vcf.pipeline import run_pipeline
 
 
 def parse_args(argv=None):
@@ -219,5 +219,5 @@ def main(argv=None):
                   "(for discovery mode) must be provided",
                   file=sys.stderr)
             sys.exit(2)
-        from kmer_denovo_filter.pipeline import run_discovery_pipeline
+        from kmer_denovo_filter.discovery.pipeline import run_discovery_pipeline
         run_discovery_pipeline(args)

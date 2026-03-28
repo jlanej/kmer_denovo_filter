@@ -20,6 +20,7 @@ sub-modules and are re-exported here for backward compatibility.
 import logging
 import os
 import shutil
+import sys
 
 from kmer_denovo_filter.core.bam_scanner import (  # noqa: F401
     _collect_kmer_ref_positions,
@@ -221,3 +222,120 @@ def _estimate_fasta_sequence_count(fasta_path, sample_lines=1000):
     return max(estimated, 1), True
 
 
+# ---------------------------------------------------------------------------
+# Input validation
+# ---------------------------------------------------------------------------
+
+
+def _validate_inputs(args):
+    """Validate pipeline inputs before starting computation.
+
+    Raises SystemExit with a clear error message for any invalid input.
+    """
+    errors = []
+
+    # Check required input files exist
+    required_files = [
+        ("Child BAM/CRAM (--child)", args.child),
+        ("Mother BAM/CRAM (--mother)", args.mother),
+        ("Father BAM/CRAM (--father)", args.father),
+    ]
+    if args.vcf is not None:
+        required_files.append(("Input VCF (--vcf)", args.vcf))
+    for label, path in required_files:
+        if not os.path.isfile(path):
+            errors.append(f"{label}: file not found: {path}")
+
+    # Check ref-fasta exists when provided
+    if args.ref_fasta is not None:
+        if not os.path.isfile(args.ref_fasta):
+            errors.append(
+                f"Reference FASTA (--ref-fasta): file not found: "
+                f"{args.ref_fasta}"
+            )
+
+    # CRAM files require a reference FASTA
+    for label, path in [
+        ("--child", args.child),
+        ("--mother", args.mother),
+        ("--father", args.father),
+    ]:
+        if path.endswith(".cram") and args.ref_fasta is None:
+            errors.append(
+                f"{label} is a CRAM file but --ref-fasta was not provided"
+            )
+
+    # Check BAM/CRAM indexes exist
+    for label, path in [
+        ("--child", args.child),
+        ("--mother", args.mother),
+        ("--father", args.father),
+    ]:
+        if os.path.isfile(path):
+            bai = path + ".bai"
+            csi = path + ".csi"
+            crai = path + ".crai"
+            # .bam.bai or .bai (some tools drop the .bam prefix)
+            alt_bai = path.rsplit(".", 1)[0] + ".bai" if "." in path else None
+            if not any(
+                os.path.isfile(p) for p in [bai, csi, crai]
+                if p is not None
+            ) and not (alt_bai and os.path.isfile(alt_bai)):
+                errors.append(
+                    f"{label}: no index found for {path} "
+                    f"(expected .bai, .csi, or .crai)"
+                )
+
+    # Validate parameter ranges
+    if args.kmer_size < 3:
+        errors.append(
+            f"--kmer-size must be >= 3, got {args.kmer_size}"
+        )
+    if args.kmer_size > 201:
+        errors.append(
+            f"--kmer-size must be <= 201, got {args.kmer_size}"
+        )
+    if args.kmer_size % 2 == 0:
+        errors.append(
+            f"--kmer-size should be odd for canonical k-mer symmetry, "
+            f"got {args.kmer_size}"
+        )
+    if args.min_baseq < 0:
+        errors.append(
+            f"--min-baseq must be >= 0, got {args.min_baseq}"
+        )
+    if args.threads < 1:
+        errors.append(
+            f"--threads must be >= 1, got {args.threads}"
+        )
+
+    # Discovery-mode-specific validation
+    if args.vcf is None:
+        if args.ref_fasta is None and getattr(args, 'ref_jf', None) is None:
+            errors.append(
+                "Discovery mode requires --ref-fasta (or --ref-jf) "
+                "to subtract reference k-mers"
+            )
+        ref_jf = getattr(args, 'ref_jf', None)
+        if ref_jf is not None and not os.path.isfile(ref_jf):
+            errors.append(
+                f"Reference Jellyfish index (--ref-jf): file not found: "
+                f"{ref_jf}"
+            )
+        min_child_count = getattr(args, 'min_child_count', 3)
+        if min_child_count < 1:
+            errors.append(
+                f"--min-child-count must be >= 1, got {min_child_count}"
+            )
+
+    # VCF-mode-specific validation
+    if args.vcf is not None:
+        if args.min_mapq < 0:
+            errors.append(
+                f"--min-mapq must be >= 0, got {args.min_mapq}"
+            )
+
+    if errors:
+        for err in errors:
+            logger.error("Validation error: %s", err)
+        sys.exit(1)

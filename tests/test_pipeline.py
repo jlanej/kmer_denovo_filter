@@ -10,6 +10,8 @@ import pysam
 import pytest
 
 import kmer_denovo_filter.pipeline as pipeline_mod
+import kmer_denovo_filter.vcf.pipeline as vcf_pipeline_mod
+import kmer_denovo_filter.discovery.pipeline as discovery_pipeline_mod
 import kmer_denovo_filter.core.bam_scanner as bam_scanner_mod
 from kmer_denovo_filter.cli import parse_args
 from kmer_denovo_filter.pipeline import (
@@ -246,9 +248,9 @@ class TestPipelineIntegration:
             result.nonhuman_read_names.add("read1")
             return result
 
-        monkeypatch.setattr(pipeline_mod, "_check_tool", _mock_check_tool)
+        monkeypatch.setattr(vcf_pipeline_mod, "_check_tool", _mock_check_tool)
         monkeypatch.setattr(
-            pipeline_mod, "_run_kraken2_on_reads", _mock_run_kraken2,
+            vcf_pipeline_mod, "_run_kraken2_on_reads", _mock_run_kraken2,
         )
 
         args = parse_args([
@@ -378,9 +380,9 @@ class TestPipelineIntegration:
             result.univec_core_read_names.add("read_ucf")
             return result
 
-        monkeypatch.setattr(pipeline_mod, "_check_tool", _mock_check_tool)
+        monkeypatch.setattr(vcf_pipeline_mod, "_check_tool", _mock_check_tool)
         monkeypatch.setattr(
-            pipeline_mod, "_run_kraken2_on_reads", _mock_run_kraken2,
+            vcf_pipeline_mod, "_run_kraken2_on_reads", _mock_run_kraken2,
         )
 
         args = parse_args([
@@ -481,9 +483,9 @@ class TestPipelineIntegration:
             def classify_sequences(self, _sequences, tmpdir=None):
                 return self.Result()
 
-        monkeypatch.setattr(pipeline_mod, "Kraken2Runner", _FakeKraken2Runner)
+        monkeypatch.setattr(vcf_pipeline_mod, "Kraken2Runner", _FakeKraken2Runner)
 
-        pipeline_mod._run_kraken2_on_reads(
+        vcf_pipeline_mod._run_kraken2_on_reads(
             child_bam=child_bam,
             ref_fasta=ref_fa,
             read_names={"read1"},
@@ -1844,10 +1846,7 @@ class TestDiscoveryPipeline:
             result = pipeline_mod.Kraken2Runner.Result()
             return result
 
-        monkeypatch.setattr(pipeline_mod, "_check_tool", _check_tool_no_kraken)
-        monkeypatch.setattr(
-            pipeline_mod, "_run_kraken2_on_reads", _track_if_called,
-        )
+        monkeypatch.setattr(discovery_pipeline_mod, "_check_tool", _check_tool_no_kraken)
 
         args = parse_args([
             "--child", child_bam,
