@@ -248,8 +248,9 @@ def _validate_inputs(args):
         ("Mother BAM/CRAM (--mother)", args.mother),
         ("Father BAM/CRAM (--father)", args.father),
     ]
-    if args.vcf is not None:
-        required_files.append(("Input VCF (--vcf)", args.vcf))
+    _vcf = getattr(args, 'vcf', None)
+    if _vcf is not None:
+        required_files.append(("Input VCF (--vcf)", _vcf))
     for label, path in required_files:
         if not os.path.isfile(path):
             errors.append(f"{label}: file not found: {path}")
@@ -318,7 +319,7 @@ def _validate_inputs(args):
         )
 
     # Discovery-mode-specific validation
-    if args.vcf is None:
+    if _vcf is None:
         if args.ref_fasta is None and getattr(args, 'ref_jf', None) is None:
             errors.append(
                 "Discovery mode requires --ref-fasta (or --ref-jf) "
@@ -337,7 +338,7 @@ def _validate_inputs(args):
             )
 
     # VCF-mode-specific validation
-    if args.vcf is not None:
+    if _vcf is not None:
         if args.min_mapq < 0:
             errors.append(
                 f"--min-mapq must be >= 0, got {args.min_mapq}"
