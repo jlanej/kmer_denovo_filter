@@ -2,7 +2,7 @@
 
 import pytest
 
-from kmer_denovo_filter.cli import parse_args
+from kmer_denovo_filter.cli import parse_args, parse_vcf_args, parse_discovery_args
 
 
 class TestParseArgs:
@@ -246,3 +246,234 @@ class TestParseArgs:
             self.REQUIRED_ARGS + ["--kraken2-read-detail", "/tmp/detail.bed.gz"],
         )
         assert args.kraken2_read_detail == "/tmp/detail.bed.gz"
+
+
+class TestParseVcfArgs:
+    """Tests for the VCF-mode parser (kmer-denovo)."""
+
+    REQUIRED_ARGS = [
+        "--child", "child.bam",
+        "--mother", "mother.bam",
+        "--father", "father.bam",
+        "--vcf", "input.vcf",
+        "--output", "output.vcf",
+    ]
+
+    def test_required_args(self):
+        args = parse_vcf_args(self.REQUIRED_ARGS)
+        assert args.child == "child.bam"
+        assert args.mother == "mother.bam"
+        assert args.father == "father.bam"
+        assert args.vcf == "input.vcf"
+        assert args.output == "output.vcf"
+
+    def test_vcf_is_required(self):
+        """--vcf is required in the VCF parser."""
+        with pytest.raises(SystemExit):
+            parse_vcf_args([
+                "--child", "child.bam",
+                "--mother", "mother.bam",
+                "--father", "father.bam",
+                "--output", "output.vcf",
+            ])
+
+    def test_output_is_required(self):
+        """--output is required in the VCF parser."""
+        with pytest.raises(SystemExit):
+            parse_vcf_args([
+                "--child", "child.bam",
+                "--mother", "mother.bam",
+                "--father", "father.bam",
+                "--vcf", "input.vcf",
+            ])
+
+    def test_defaults(self):
+        args = parse_vcf_args(self.REQUIRED_ARGS)
+        assert args.kmer_size == 31
+        assert args.min_baseq == 20
+        assert args.min_mapq == 20
+        assert args.threads == 4
+        assert args.debug_kmers is False
+        assert args.memory is None
+        assert args.metrics is None
+        assert args.informative_reads is None
+        assert args.summary is None
+        assert args.ref_fasta is None
+        assert args.kraken2_memory_mapping is False
+        assert args.proband_id is None
+
+    def test_no_discovery_flags(self):
+        """VCF parser must not accept discovery-only flags."""
+        for flag in ("--out-prefix", "--ref-jf", "--min-child-count",
+                     "--cluster-distance", "--min-supporting-reads",
+                     "--min-distinct-kmers", "--min-bedgraph-reads",
+                     "--min-distinct-kmers-per-read", "--parent-max-count",
+                     "--sv-bedpe", "--candidate-summary"):
+            with pytest.raises(SystemExit):
+                parse_vcf_args(self.REQUIRED_ARGS + [flag, "value"])
+
+    def test_vcf_accepts_kraken2_flags(self):
+        args = parse_vcf_args(
+            self.REQUIRED_ARGS + [
+                "--kraken2-db", "/db",
+                "--kraken2-confidence", "0.5",
+                "--kraken2-memory-mapping",
+                "--kraken2-read-detail", "/tmp/detail.bed.gz",
+                "--kraken2-span-bed", "/tmp/span.bed.gz",
+                "--no-expanded-bed",
+            ]
+        )
+        assert args.kraken2_db == "/db"
+        assert args.kraken2_confidence == 0.5
+        assert args.kraken2_memory_mapping is True
+        assert args.kraken2_read_detail == "/tmp/detail.bed.gz"
+        assert args.kraken2_span_bed == "/tmp/span.bed.gz"
+        assert args.no_expanded_bed is True
+
+    def test_shared_args(self):
+        args = parse_vcf_args(self.REQUIRED_ARGS + [
+            "--kmer-size", "25",
+            "--min-baseq", "30",
+            "--threads", "8",
+            "--memory", "64",
+            "--debug-kmers",
+            "--jf-hash-size", "2G",
+            "--tmp-dir", "/scratch",
+            "--ref-fasta", "ref.fa",
+        ])
+        assert args.kmer_size == 25
+        assert args.min_baseq == 30
+        assert args.threads == 8
+        assert args.memory == 64.0
+        assert args.debug_kmers is True
+        assert args.jf_hash_size == "2G"
+        assert args.tmp_dir == "/scratch"
+        assert args.ref_fasta == "ref.fa"
+
+
+class TestParseDiscoveryArgs:
+    """Tests for the discovery-mode parser (kmer-discovery)."""
+
+    REQUIRED_ARGS = [
+        "--child", "child.bam",
+        "--mother", "mother.bam",
+        "--father", "father.bam",
+        "--out-prefix", "trio1",
+    ]
+
+    def test_required_args(self):
+        args = parse_discovery_args(self.REQUIRED_ARGS)
+        assert args.child == "child.bam"
+        assert args.mother == "mother.bam"
+        assert args.father == "father.bam"
+        assert args.out_prefix == "trio1"
+
+    def test_out_prefix_is_required(self):
+        """--out-prefix is required in the discovery parser."""
+        with pytest.raises(SystemExit):
+            parse_discovery_args([
+                "--child", "child.bam",
+                "--mother", "mother.bam",
+                "--father", "father.bam",
+            ])
+
+    def test_defaults(self):
+        args = parse_discovery_args(self.REQUIRED_ARGS)
+        assert args.kmer_size == 31
+        assert args.min_baseq == 20
+        assert args.threads == 4
+        assert args.debug_kmers is False
+        assert args.memory is None
+        assert args.ref_fasta is None
+        assert args.ref_jf is None
+        assert args.min_child_count == 3
+        assert args.cluster_distance == 500
+        assert args.min_supporting_reads == 1
+        assert args.min_distinct_kmers == 1
+        assert args.min_bedgraph_reads == 3
+        assert args.min_distinct_kmers_per_read is None
+        assert args.parent_max_count == 0
+        assert args.sv_bedpe is None
+        assert args.candidate_summary is None
+
+    def test_no_vcf_flags(self):
+        """Discovery parser must not accept VCF-only flags."""
+        for flag in ("--vcf", "--output", "--min-mapq", "--proband-id",
+                     "--informative-reads", "--metrics", "--summary",
+                     "--kraken2-db", "--kraken2-confidence",
+                     "--kraken2-memory-mapping", "--kraken2-read-detail",
+                     "--kraken2-span-bed", "--no-expanded-bed"):
+            with pytest.raises(SystemExit):
+                parse_discovery_args(self.REQUIRED_ARGS + [flag, "value"])
+
+    def test_discovery_specific_args(self):
+        args = parse_discovery_args(self.REQUIRED_ARGS + [
+            "--ref-fasta", "ref.fa",
+            "--ref-jf", "ref.k31.jf",
+            "--min-child-count", "5",
+            "--cluster-distance", "250",
+            "--min-supporting-reads", "4",
+            "--min-distinct-kmers", "3",
+            "--min-bedgraph-reads", "5",
+            "--min-distinct-kmers-per-read", "7",
+            "--parent-max-count", "1",
+            "--sv-bedpe", "out.bedpe",
+            "--candidate-summary", "summary.txt",
+        ])
+        assert args.ref_fasta == "ref.fa"
+        assert args.ref_jf == "ref.k31.jf"
+        assert args.min_child_count == 5
+        assert args.cluster_distance == 250
+        assert args.min_supporting_reads == 4
+        assert args.min_distinct_kmers == 3
+        assert args.min_bedgraph_reads == 5
+        assert args.min_distinct_kmers_per_read == 7
+        assert args.parent_max_count == 1
+        assert args.sv_bedpe == "out.bedpe"
+        assert args.candidate_summary == "summary.txt"
+
+    def test_shared_args(self):
+        args = parse_discovery_args(self.REQUIRED_ARGS + [
+            "--kmer-size", "25",
+            "--min-baseq", "30",
+            "--threads", "8",
+            "--memory", "64",
+            "--debug-kmers",
+            "--jf-hash-size", "2G",
+            "--tmp-dir", "/scratch",
+        ])
+        assert args.kmer_size == 25
+        assert args.min_baseq == 30
+        assert args.threads == 8
+        assert args.memory == 64.0
+        assert args.debug_kmers is True
+        assert args.jf_hash_size == "2G"
+        assert args.tmp_dir == "/scratch"
+
+
+class TestEntryPoints:
+    """Tests that entry point functions are importable and callable."""
+
+    def test_vcf_main_importable(self):
+        from kmer_denovo_filter.cli import vcf_main
+        assert callable(vcf_main)
+
+    def test_discovery_main_importable(self):
+        from kmer_denovo_filter.cli import discovery_main
+        assert callable(discovery_main)
+
+    def test_main_still_importable(self):
+        from kmer_denovo_filter.cli import main
+        assert callable(main)
+
+    def test_vcf_main_missing_args_exits(self):
+        """vcf_main exits when required args are missing."""
+        from kmer_denovo_filter.cli import vcf_main
+        with pytest.raises(SystemExit):
+            vcf_main([])
+
+    def test_discovery_main_missing_args_exits(self):
+        """discovery_main exits when required args are missing."""
+        from kmer_denovo_filter.cli import discovery_main
+        with pytest.raises(SystemExit):
+            discovery_main([])
