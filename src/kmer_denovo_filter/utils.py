@@ -12,13 +12,31 @@ package.  Functions are organised into sections:
   entry counts.
 * **Alignment helpers** — mapping k-mer query hits to reference
   coordinates, SV-type inference.
+
+Several functions have been moved to :mod:`kmer_denovo_filter.core`
+sub-modules and are re-exported here for backward compatibility.
 """
 
-import collections
-import glob
 import logging
 import os
 import shutil
+
+from kmer_denovo_filter.core.bam_scanner import (  # noqa: F401
+    _collect_kmer_ref_positions,
+    _infer_sv_type,
+)
+from kmer_denovo_filter.core.jellyfish_wrappers import (  # noqa: F401
+    _estimate_jf_hash_size,
+    _find_jf_files,
+)
+from kmer_denovo_filter.core.memory_utils import (  # noqa: F401
+    _get_available_memory_gb,
+    _log_children_memory,
+    _log_dir_size,
+    _log_disk_usage,
+    _log_memory,
+    _log_subprocess_memory,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,45 +111,34 @@ def _is_tmpfs(path):
 # ---------------------------------------------------------------------------
 
 
-def _resolve_tmp_dir(args, fallback_dir):
+def _resolve_tmp_dir(tmp_dir, fallback_dir):
     """Resolve the temporary directory for intermediate files.
 
-    Uses ``args.tmp_dir`` when provided.  Otherwise creates a
-    subdirectory next to the output files to avoid RAM-backed ``/tmp``
-    (tmpfs) on HPC systems.
+    Uses *tmp_dir* when provided.  Otherwise creates a subdirectory
+    next to the output files to avoid RAM-backed ``/tmp`` (tmpfs) on
+    HPC systems.
 
     Args:
-        args: Parsed CLI arguments (may have ``tmp_dir`` attribute).
-        fallback_dir: Directory to use when ``--tmp-dir`` is not set
+        tmp_dir: Explicit temporary directory path, or ``None``.
+            For backward compatibility this may also be an
+            ``argparse.Namespace`` with a ``tmp_dir`` attribute.
+        fallback_dir: Directory to use when *tmp_dir* is not set
             (typically the parent directory of the output prefix or
             output file).
 
     Returns:
         Absolute path to the temporary directory root (created if needed).
     """
-    tmp_dir = getattr(args, "tmp_dir", None)
-    if tmp_dir:
-        os.makedirs(tmp_dir, exist_ok=True)
-        return os.path.abspath(tmp_dir)
+    # Backward compatibility: accept an argparse.Namespace transparently.
+    resolved = getattr(tmp_dir, "tmp_dir", tmp_dir)
+    if resolved:
+        os.makedirs(resolved, exist_ok=True)
+        return os.path.abspath(resolved)
 
     # Default: create a subdirectory next to the output
     tmp_root = os.path.join(fallback_dir, "kmer_denovo_tmp")
     os.makedirs(tmp_root, exist_ok=True)
     return os.path.abspath(tmp_root)
-
-
-def _find_jf_files(base_path):
-    """Find all Jellyfish output files for a given base path.
-
-    When Jellyfish's hash table overflows, it produces numbered files
-    (``base.jf_0``, ``base.jf_1``, …) rather than a single ``base.jf``.
-    Returns a sorted list of existing ``.jf`` / ``.jf_N`` files.
-    """
-    files = []
-    if os.path.exists(base_path):
-        files.append(base_path)
-    files.extend(sorted(glob.glob(base_path + "_[0-9]*")))
-    return files
 
 
 # ---------------------------------------------------------------------------
@@ -214,269 +221,3 @@ def _estimate_fasta_sequence_count(fasta_path, sample_lines=1000):
     return max(estimated, 1), True
 
 
-# ---------------------------------------------------------------------------
-# Logging / monitoring helpers
-# ---------------------------------------------------------------------------
-
-
-def _log_disk_usage(path, label=""):
-    """Log disk usage and available space for the filesystem containing *path*."""
-    try:
-        stat = os.statvfs(path)
-        total_gb = (stat.f_blocks * stat.f_frsize) / (1024**3)
-        avail_gb = (stat.f_bavail * stat.f_frsize) / (1024**3)
-        used_gb = total_gb - avail_gb
-        logger.info(
-            "  [Disk] %s — %.1f GB used / %.1f GB total (%.1f GB available) — %s",
-            label, used_gb, total_gb, avail_gb, path,
-        )
-    except OSError:
-        pass
-
-
-def _log_dir_size(path, label=""):
-    """Log the total size of files in a directory."""
-    try:
-        total = 0
-        for entry in os.scandir(path):
-            if entry.is_file(follow_symlinks=False):
-                total += entry.stat().st_size
-        logger.info(
-            "  [TmpDir] %s — %.2f GB in %s",
-            label, total / (1024**3), path,
-        )
-    except OSError:
-        pass
-
-
-def _log_memory(label=""):
-    """Log current and peak process memory usage.
-
-    Works on Linux (``/proc/self/status``) and macOS/BSD
-    (``resource.getrusage``).  Falls back silently when neither source
-    is available.
-    """
-    try:
-        info = {}
-        # Linux: read from /proc
-        try:
-            with open("/proc/self/status") as f:
-                for line in f:
-                    if line.startswith("VmRSS:"):
-                        info["RSS"] = int(line.split()[1]) / (1024 * 1024)
-                    elif line.startswith("VmPeak:"):
-                        info["Peak"] = int(line.split()[1]) / (1024 * 1024)
-        except FileNotFoundError:
-            pass
-        # Fallback: resource module (works on macOS & Linux)
-        if not info:
-            import resource
-            rusage = resource.getrusage(resource.RUSAGE_SELF)
-            import platform
-            if platform.system() == "Darwin":
-                # macOS reports maxrss in bytes
-                info["Peak_RSS"] = rusage.ru_maxrss / (1024**3)
-            else:
-                # Linux reports maxrss in KB
-                info["Peak_RSS"] = rusage.ru_maxrss / (1024 * 1024)
-        if info:
-            parts = [f"{k}={v:.2f} GB" for k, v in sorted(info.items())]
-            logger.info("  [Memory] %s — %s", label, ", ".join(parts))
-    except Exception:
-        pass
-
-
-def _log_subprocess_memory(proc, label=""):
-    """Log memory usage of a subprocess (Linux only).
-
-    Reads ``VmRSS`` from ``/proc/{pid}/status`` for the given
-    :class:`subprocess.Popen` object.  Silently skipped on non-Linux
-    or when the process has already exited.
-    """
-    if proc is None or proc.poll() is not None:
-        return
-    try:
-        rss_kb = 0
-        with open(f"/proc/{proc.pid}/status") as f:
-            for line in f:
-                if line.startswith("VmRSS:"):
-                    rss_kb = int(line.split()[1])
-                    break
-        if rss_kb:
-            logger.info(
-                "  [SubprocessMem] %s (pid=%d) — RSS=%.2f GB",
-                label, proc.pid, rss_kb / (1024 * 1024),
-            )
-    except Exception:
-        pass
-
-
-def _get_available_memory_gb():
-    """Return total system memory in GB, or None if unavailable.
-
-    On Linux reads ``/proc/meminfo`` for ``MemTotal`` and ``MemAvailable``.
-    On macOS/BSD uses ``os.sysconf`` for total memory.
-
-    Returns:
-        Tuple of (total_gb, available_gb).  *available_gb* may be None
-        on macOS where ``MemAvailable`` is not reported.
-    """
-    total_gb = None
-    available_gb = None
-
-    # Linux: parse /proc/meminfo
-    try:
-        with open("/proc/meminfo") as f:
-            for line in f:
-                if line.startswith("MemTotal:"):
-                    total_gb = int(line.split()[1]) / (1024 * 1024)
-                elif line.startswith("MemAvailable:"):
-                    available_gb = int(line.split()[1]) / (1024 * 1024)
-        if total_gb is not None:
-            return total_gb, available_gb
-    except (FileNotFoundError, PermissionError, OSError):
-        pass
-
-    # macOS / POSIX fallback
-    try:
-        pages = os.sysconf("SC_PHYS_PAGES")
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        if pages > 0 and page_size > 0:
-            total_gb = (pages * page_size) / (1024**3)
-    except (ValueError, OSError, AttributeError):
-        pass
-
-    return total_gb, available_gb
-
-
-def _log_children_memory(label=""):
-    """Log aggregate memory of all child processes (Linux only).
-
-    Reads ``/proc/{pid}/status`` for each child process to report total
-    RSS across all subprocesses.
-    """
-    try:
-        my_pid = os.getpid()
-        total_rss_kb = 0
-        n_children = 0
-
-        # Walk /proc for children
-        proc_path = f"/proc/{my_pid}/task/{my_pid}/children"
-        try:
-            with open(proc_path) as f:
-                child_pids = f.read().split()
-        except (FileNotFoundError, PermissionError):
-            # Alternative: use /proc/*/stat
-            child_pids = []
-            for entry in os.listdir("/proc"):
-                if not entry.isdigit():
-                    continue
-                try:
-                    with open(f"/proc/{entry}/stat") as f:
-                        stat = f.read().split()
-                    ppid = stat[3]
-                    if int(ppid) == my_pid:
-                        child_pids.append(entry)
-                except (FileNotFoundError, PermissionError, IndexError):
-                    continue
-
-        for cpid in child_pids:
-            try:
-                with open(f"/proc/{cpid}/status") as f:
-                    for line in f:
-                        if line.startswith("VmRSS:"):
-                            total_rss_kb += int(line.split()[1])
-                            n_children += 1
-                            break
-            except (FileNotFoundError, PermissionError):
-                continue
-
-        if n_children > 0:
-            logger.info(
-                "  [ChildProcessMem] %s — %d children, total RSS=%.2f GB",
-                label, n_children, total_rss_kb / (1024 * 1024),
-            )
-    except Exception:
-        pass
-
-
-# ---------------------------------------------------------------------------
-# Estimation helpers
-# ---------------------------------------------------------------------------
-
-
-def _estimate_jf_hash_size(bam_path, kmer_size, default="1G"):
-    """Estimate a reasonable ``-s`` hash size for Jellyfish count.
-
-    Uses the BAM file size as a rough proxy for the number of k-mers
-    (approximately ``file_size / 4`` for compressed BAM → approximate
-    bases, divided by reasonable overhead).  The result is capped to
-    keep initial memory reasonable.
-
-    Returns a string suitable for Jellyfish's ``-s`` argument
-    (e.g. ``"2G"``, ``"500M"``).
-    """
-    try:
-        file_size = os.path.getsize(bam_path)
-    except OSError:
-        return default
-
-    # Rough heuristic: BAM compresses ~3:1, so uncompressed bases ≈
-    # file_size * 3.  Distinct k-mers are typically much less than
-    # total bases.  Jellyfish hash entry is ~(k+8) bytes.
-    # Aim for hash that can hold ~75% of distinct k-mers without
-    # resizing while staying within memory budget.
-    #
-    # Conservative estimate: 1 entry per 10 uncompressed bases,
-    # capped between 100M and 4G.
-    estimated_bases = file_size * 3
-    estimated_distinct = estimated_bases // 10
-
-    # Cap between 100M and 4G entries (not bytes)
-    min_entries = 100_000_000   # 100M
-    max_entries = 4_000_000_000  # 4G
-    entries = max(min_entries, min(estimated_distinct, max_entries))
-
-    if entries >= 1_000_000_000:
-        return f"{entries // 1_000_000_000}G"
-    return f"{entries // 1_000_000}M"
-
-
-# ---------------------------------------------------------------------------
-# Alignment / SV helpers
-# ---------------------------------------------------------------------------
-
-
-def _collect_kmer_ref_positions(read, kmer_hit_indices, kmer_size):
-    """Map query-level k-mer hit positions to reference coordinates.
-
-    Args:
-        read: A pysam.AlignedSegment (must be mapped).
-        kmer_hit_indices: Set of query start indices where novel k-mers
-            were found.
-        kmer_size: Length of k-mers.
-
-    Returns:
-        Counter keyed by reference position with coverage counts.
-    """
-    cov = collections.Counter()
-    aligned_pairs = read.get_aligned_pairs(matches_only=True)
-    query_to_ref = {qpos: rpos for qpos, rpos in aligned_pairs}
-    for start_idx in kmer_hit_indices:
-        for qpos in range(start_idx, start_idx + kmer_size):
-            rpos = query_to_ref.get(qpos)
-            if rpos is not None:
-                cov[rpos] += 1
-    return cov
-
-
-def _infer_sv_type(region_a, region_b):
-    """Infer SV type from two linked regions.
-
-    Returns one of: INTRA (same chromosome) or BND (translocation).
-    Distinguishing DEL/DUP/INV would require SA tag strand information
-    which is not carried in the region data structure.
-    """
-    if region_a[0] != region_b[0]:
-        return "BND"
-    return "INTRA"

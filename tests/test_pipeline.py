@@ -10,6 +10,7 @@ import pysam
 import pytest
 
 import kmer_denovo_filter.pipeline as pipeline_mod
+import kmer_denovo_filter.core.bam_scanner as bam_scanner_mod
 from kmer_denovo_filter.cli import parse_args
 from kmer_denovo_filter.pipeline import (
     _classify_regions,
@@ -3220,20 +3221,20 @@ class TestJellyfishBatchScanMemory:
             seen_reads.append((read.query_sequence, unique_in_read))
             return 0
 
-        monkeypatch.setattr(pipeline_mod.pysam, "AlignmentFile", _FakeBam)
+        monkeypatch.setattr(bam_scanner_mod, "pysam", type('', (), {"AlignmentFile": _FakeBam})())
         monkeypatch.setattr(
-            pipeline_mod, "_extract_read_kmers", _fake_extract_read_kmers,
+            bam_scanner_mod, "_extract_read_kmers", _fake_extract_read_kmers,
         )
         monkeypatch.setattr(
-            pipeline_mod, "_process_informative_read",
+            bam_scanner_mod, "_process_informative_read",
             _fake_process_informative_read,
         )
-        monkeypatch.setattr(pipeline_mod, "_JF_READ_BATCH_SIZE", 2)
-        monkeypatch.setattr(pipeline_mod, "_worker_automaton", None)
-        monkeypatch.setattr(pipeline_mod, "_worker_jf_query", jf_query)
-        monkeypatch.setattr(pipeline_mod, "_worker_kmer_size", 5)
+        monkeypatch.setattr(bam_scanner_mod, "_JF_READ_BATCH_SIZE", 2)
+        monkeypatch.setattr(bam_scanner_mod, "_worker_automaton", None)
+        monkeypatch.setattr(bam_scanner_mod, "_worker_jf_query", jf_query)
+        monkeypatch.setattr(bam_scanner_mod, "_worker_kmer_size", 5)
         monkeypatch.setattr(
-            pipeline_mod, "_worker_min_distinct_kmers_per_read", 1,
+            bam_scanner_mod, "_worker_min_distinct_kmers_per_read", 1,
         )
 
         (
@@ -3244,7 +3245,7 @@ class TestJellyfishBatchScanMemory:
             _read_sv_meta,
             _kmer_coverage,
             _read_coverage,
-        ) = pipeline_mod._scan_contig_for_hits("child.bam", "ref.fa", "chr1")
+        ) = bam_scanner_mod._scan_contig_for_hits("child.bam", "ref.fa", "chr1")
 
         assert total_reads_scanned == 3
         assert len(jf_query.query_calls) == 2
