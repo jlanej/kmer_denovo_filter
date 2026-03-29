@@ -25,4 +25,6 @@ COPY scripts/ scripts/
 
 RUN pip install --no-cache-dir .
 
+# Default entrypoint is kmer-denovo (VCF mode).
+# For discovery mode, override with: --entrypoint kmer-discovery
 ENTRYPOINT ["kmer-denovo"]

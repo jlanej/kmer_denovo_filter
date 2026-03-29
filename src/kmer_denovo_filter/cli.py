@@ -20,7 +20,8 @@ def _add_shared_args(parser):
     )
     parser.add_argument(
         "--ref-fasta", "-r", default=None,
-        help="Reference FASTA with .fai index (required for CRAM input)",
+        help="Reference FASTA with .fai index (required for CRAM input; "
+             "also required for kmer-discovery unless --ref-jf is provided)",
     )
     parser.add_argument(
         "--kmer-size", "-k", type=int, default=31,
@@ -106,9 +107,9 @@ def parse_vcf_args(argv=None):
     )
     parser.add_argument(
         "--kraken2-db", default=None,
-        help="Path to a Kraken2 database for bacterial content flagging. "
+        help="Path to a Kraken2 database for non-human content classification. "
              "Informative reads are classified with kraken2 and "
-             "bacterial fraction annotations are added to the output VCF. "
+             "non-human fraction annotations are added to the output VCF. "
              "Requires kraken2 to be on PATH.",
     )
     parser.add_argument(
@@ -161,7 +162,9 @@ def parse_discovery_args(argv=None):
         "--out-prefix", required=True,
         help="Output prefix for discovery mode files "
              "([prefix].bed, [prefix].informative.bam, "
-             "[prefix].sv.bedpe, [prefix].metrics.json)",
+             "[prefix].sv.bedpe, [prefix].kmer_coverage.bedgraph, "
+             "[prefix].read_coverage.bed, [prefix].metrics.json, "
+             "[prefix].summary.txt)",
     )
     parser.add_argument(
         "--ref-jf", default=None,
@@ -254,7 +257,9 @@ def parse_args(argv=None):
         "--out-prefix", default=None,
         help="Output prefix for discovery mode files "
              "([prefix].bed, [prefix].informative.bam, "
-             "[prefix].sv.bedpe, [prefix].metrics.json)",
+             "[prefix].sv.bedpe, [prefix].kmer_coverage.bedgraph, "
+             "[prefix].read_coverage.bed, [prefix].metrics.json, "
+             "[prefix].summary.txt)",
     )
     parser.add_argument(
         "--metrics", default=None, help="Output summary metrics JSON file"
@@ -328,9 +333,9 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--kraken2-db", default=None,
-        help="Path to a Kraken2 database for bacterial content flagging. "
+        help="Path to a Kraken2 database for non-human content classification. "
              "In VCF mode, informative reads are classified with kraken2 and "
-             "bacterial fraction annotations are added to the output VCF. "
+             "non-human fraction annotations are added to the output VCF. "
              "Currently ignored in discovery mode. Requires kraken2 to be on "
              "PATH.",
     )
