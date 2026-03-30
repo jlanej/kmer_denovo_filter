@@ -1455,7 +1455,7 @@ class TestScanParentHashSizing:
                     n_filter_kmers=100,
                 )
 
-        # min(100*2, 10M) = 10M
+        # max(100*2, 10M) = 10M
         s_idx = captured_jf_cmd.index("-s")
         assert captured_jf_cmd[s_idx + 1] == "10000000"
 

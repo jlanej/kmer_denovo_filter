@@ -216,11 +216,12 @@ def _scan_parent_jellyfish(
                     os.path.getsize(f) for f in jf_files_progress
                     if os.path.exists(f)
                 )
-                jf_size = f"{total_size / (1024**3):.1f} GB" if total_size >= 1024**3 else (
-                    _format_file_size(jf_files_progress[0])
-                    if len(jf_files_progress) == 1 else
-                    f"{total_size / (1024**2):.1f} MB"
-                )
+                if total_size >= 1024**3:
+                    jf_size = f"{total_size / (1024**3):.1f} GB"
+                elif len(jf_files_progress) == 1:
+                    jf_size = _format_file_size(jf_files_progress[0])
+                else:
+                    jf_size = f"{total_size / (1024**2):.1f} MB"
             else:
                 jf_size = "pending"
             logger.info(
