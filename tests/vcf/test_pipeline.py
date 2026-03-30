@@ -1360,6 +1360,152 @@ class TestEstimateFastaSequenceCount:
         assert estimate == n_entries
 
 
+class TestScanParentHashSizing:
+    """Verify that _scan_parent_jellyfish sizes hash dynamically."""
+
+    def test_hash_size_from_n_filter_kmers(self, tmp_path, monkeypatch):
+        """When n_filter_kmers is provided, hash_size = max(2*n, 10M)."""
+        from unittest.mock import MagicMock, patch, call
+        from kmer_denovo_filter.core import jellyfish_wrappers as jfw
+
+        # Create dummy files
+        kmer_fa = tmp_path / "kmers.fa"
+        kmer_fa.write_text(">0\nACGT\n>1\nTTTT\n")
+        parent_bam = tmp_path / "parent.bam"
+        parent_bam.write_bytes(b"dummy")
+        parent_dir = str(tmp_path / "pdir")
+
+        # Build a mock that simulates jellyfish producing a single jf file
+        captured_jf_cmd = []
+
+        class FakeProc:
+            def __init__(self, cmd, **kw):
+                if cmd[0] == "jellyfish" and cmd[1] == "count":
+                    captured_jf_cmd.clear()
+                    captured_jf_cmd.extend(cmd)
+                    # Create the output file so the dump path is exercised
+                    jf_out = cmd[cmd.index("-o") + 1]
+                    open(jf_out, "wb").close()
+                self.stdout = MagicMock()
+                self.stdout.close = MagicMock()
+                self.stderr = MagicMock()
+                self.stderr.read = MagicMock(return_value=b"")
+                self.returncode = 0
+                self.pid = 1234
+
+            def wait(self, timeout=None):
+                pass
+
+            def communicate(self):
+                return (b"", b"")
+
+        # Patch subprocess.Popen and the dump Popen
+        with patch.object(jfw.subprocess, "Popen", side_effect=FakeProc):
+            # Also mock the dump to avoid real jellyfish dump
+            with patch.object(jfw.os.path, "exists", return_value=False):
+                result = jfw._scan_parent_jellyfish(
+                    str(parent_bam), None, str(kmer_fa), 31,
+                    parent_dir, threads=4,
+                    n_filter_kmers=15_000_000,
+                )
+
+        # Verify hash size: max(15M * 2, 10M) = 30M
+        assert "-s" in captured_jf_cmd
+        s_idx = captured_jf_cmd.index("-s")
+        assert captured_jf_cmd[s_idx + 1] == "30000000"
+
+    def test_hash_size_defaults_to_10m_minimum(self, tmp_path, monkeypatch):
+        """When n_filter_kmers is small, hash stays at 10M minimum."""
+        from unittest.mock import MagicMock, patch
+        from kmer_denovo_filter.core import jellyfish_wrappers as jfw
+
+        kmer_fa = tmp_path / "kmers.fa"
+        kmer_fa.write_text(">0\nACGT\n>1\nTTTT\n")
+        parent_bam = tmp_path / "parent.bam"
+        parent_bam.write_bytes(b"dummy")
+        parent_dir = str(tmp_path / "pdir")
+
+        captured_jf_cmd = []
+
+        class FakeProc:
+            def __init__(self, cmd, **kw):
+                if cmd[0] == "jellyfish" and cmd[1] == "count":
+                    captured_jf_cmd.clear()
+                    captured_jf_cmd.extend(cmd)
+                    jf_out = cmd[cmd.index("-o") + 1]
+                    open(jf_out, "wb").close()
+                self.stdout = MagicMock()
+                self.stdout.close = MagicMock()
+                self.stderr = MagicMock()
+                self.stderr.read = MagicMock(return_value=b"")
+                self.returncode = 0
+                self.pid = 1234
+
+            def wait(self, timeout=None):
+                pass
+
+            def communicate(self):
+                return (b"", b"")
+
+        with patch.object(jfw.subprocess, "Popen", side_effect=FakeProc):
+            with patch.object(jfw.os.path, "exists", return_value=False):
+                result = jfw._scan_parent_jellyfish(
+                    str(parent_bam), None, str(kmer_fa), 31,
+                    parent_dir, threads=4,
+                    n_filter_kmers=100,
+                )
+
+        # min(100*2, 10M) = 10M
+        s_idx = captured_jf_cmd.index("-s")
+        assert captured_jf_cmd[s_idx + 1] == "10000000"
+
+    def test_counts_fasta_entries_when_n_filter_kmers_is_none(
+        self, tmp_path, monkeypatch,
+    ):
+        """When n_filter_kmers is None, k-mer count is read from FASTA."""
+        from unittest.mock import MagicMock, patch
+        from kmer_denovo_filter.core import jellyfish_wrappers as jfw
+
+        # Write a FASTA with 5 entries
+        kmer_fa = tmp_path / "kmers.fa"
+        entries = "".join(f">{i}\nACGTACGT\n" for i in range(5))
+        kmer_fa.write_text(entries)
+        parent_bam = tmp_path / "parent.bam"
+        parent_bam.write_bytes(b"dummy")
+        parent_dir = str(tmp_path / "pdir")
+
+        captured_jf_cmd = []
+
+        class FakeProc:
+            def __init__(self, cmd, **kw):
+                if cmd[0] == "jellyfish" and cmd[1] == "count":
+                    captured_jf_cmd.clear()
+                    captured_jf_cmd.extend(cmd)
+                    jf_out = cmd[cmd.index("-o") + 1]
+                    open(jf_out, "wb").close()
+                self.stdout = MagicMock()
+                self.stdout.close = MagicMock()
+                self.stderr = MagicMock()
+                self.stderr.read = MagicMock(return_value=b"")
+                self.returncode = 0
+                self.pid = 1234
+
+            def wait(self, timeout=None):
+                pass
+
+            def communicate(self):
+                return (b"", b"")
+
+        with patch.object(jfw.subprocess, "Popen", side_effect=FakeProc):
+            with patch.object(jfw.os.path, "exists", return_value=False):
+                result = jfw._scan_parent_jellyfish(
+                    str(parent_bam), None, str(kmer_fa), 31,
+                    parent_dir, threads=4,
+                )
+
+        # 5 entries → max(5*2, 10M) = 10M
+        s_idx = captured_jf_cmd.index("-s")
+        assert captured_jf_cmd[s_idx + 1] == "10000000"
 
 
 
