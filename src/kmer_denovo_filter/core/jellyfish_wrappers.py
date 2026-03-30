@@ -114,6 +114,7 @@ def _estimate_jf_hash_size(bam_path, kmer_size, default="1G"):
 
 def _scan_parent_jellyfish(
     parent_bam, ref_fasta, kmer_fasta, kmer_size, parent_dir, threads=4,
+    n_filter_kmers=None,
 ):
     """Scan a parent BAM and find which child k-mers are present.
 
@@ -122,11 +123,37 @@ def _scan_parent_jellyfish(
     streamed line-by-line and the parent Jellyfish index is removed after
     the dump to free disk space.
 
+    The hash size is set to ``2 × n_filter_kmers`` (clamped to a
+    10 M minimum) so that Jellyfish has enough room for all filtered
+    k-mers.  When *n_filter_kmers* is not provided, the entries in
+    *kmer_fasta* are counted.  If Jellyfish still produces multiple
+    chunk files (hash overflow), they are merged automatically.
+
+    Args:
+        parent_bam: Path to parent BAM/CRAM.
+        ref_fasta: Path to reference FASTA (or None).
+        kmer_fasta: FASTA file of k-mers to track (``--if`` filter).
+        kmer_size: K-mer length.
+        parent_dir: Working directory for the index.
+        threads: Number of threads for jellyfish count.
+        n_filter_kmers: Number of k-mers in *kmer_fasta*.  When ``None``
+            this is estimated by counting entries in the file.
+
     Returns:
         Dict mapping canonical k-mer string to its count in the parent.
     """
     os.makedirs(parent_dir, exist_ok=True)
     jf_output = os.path.join(parent_dir, "parent.jf")
+
+    # Size hash to fit the filter k-mers without overflow.
+    if n_filter_kmers is None:
+        n_filter_kmers = 0
+        with open(kmer_fasta) as fh:
+            for line in fh:
+                if line.rstrip() and not line.startswith(">"):
+                    n_filter_kmers += 1
+    hash_size = max(n_filter_kmers * 2, 10_000_000)
+    hash_size_str = str(hash_size)
 
     samtools_threads = max(1, threads // 4)
     samtools_cmd = [
@@ -140,7 +167,7 @@ def _scan_parent_jellyfish(
     jellyfish_cmd = [
         "jellyfish", "count",
         "-m", str(kmer_size),
-        "-s", "10M",
+        "-s", hash_size_str,
         "-t", str(threads),
         "-C",
         "--if", kmer_fasta,
@@ -153,8 +180,8 @@ def _scan_parent_jellyfish(
         "Scanning parent BAM (%s): %s", bam_size, parent_bam,
     )
     logger.info(
-        "  samtools fasta → jellyfish count (k=%d, threads=%d)",
-        kmer_size, threads,
+        "  samtools fasta → jellyfish count (k=%d, threads=%d, hash=%s)",
+        kmer_size, threads, hash_size_str,
     )
 
     scan_start = time.monotonic()
@@ -183,7 +210,20 @@ def _scan_parent_jellyfish(
             now = time.monotonic()
             elapsed = now - scan_start
             # Report jellyfish output file size as a proxy for progress
-            jf_size = _format_file_size(jf_output) if os.path.exists(jf_output) else "pending"
+            jf_files_progress = _find_jf_files(jf_output)
+            if jf_files_progress:
+                total_size = sum(
+                    os.path.getsize(f) for f in jf_files_progress
+                    if os.path.exists(f)
+                )
+                if total_size >= 1024**3:
+                    jf_size = f"{total_size / (1024**3):.1f} GB"
+                elif len(jf_files_progress) == 1:
+                    jf_size = _format_file_size(jf_files_progress[0])
+                else:
+                    jf_size = f"{total_size / (1024**2):.1f} MB"
+            else:
+                jf_size = "pending"
             logger.info(
                 "  … still scanning (%s elapsed, jf index: %s)",
                 _format_elapsed(elapsed), jf_size,
@@ -200,6 +240,15 @@ def _scan_parent_jellyfish(
         raise RuntimeError(
             f"jellyfish count failed: {jf_stderr.decode()}"
         )
+
+    # Handle multi-file output (hash overflow) — merge if needed
+    jf_files = _find_jf_files(jf_output)
+    if len(jf_files) > 1:
+        merged_path = os.path.join(parent_dir, "parent_merged.jf")
+        jf_output = _merge_jf_files(jf_files, merged_path)
+    elif jf_files and jf_files[0] != jf_output:
+        # Single numbered file (e.g. parent.jf_0) — rename to expected name
+        os.rename(jf_files[0], jf_output)
 
     scan_elapsed = time.monotonic() - scan_start
     logger.info(

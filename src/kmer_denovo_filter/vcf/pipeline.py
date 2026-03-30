@@ -1523,6 +1523,7 @@ def run_pipeline(args):
             mother_kmers = _scan_parent_jellyfish(
                 args.mother, args.ref_fasta, kmer_fasta, args.kmer_size,
                 os.path.join(tmpdir, "mother"), args.threads,
+                n_filter_kmers=total_child_kmers,
             )
             parent_found_kmers.update(mother_kmers)
             logger.info(
@@ -1539,6 +1540,7 @@ def run_pipeline(args):
             father_kmers = _scan_parent_jellyfish(
                 args.father, args.ref_fasta, kmer_fasta, args.kmer_size,
                 os.path.join(tmpdir, "father"), args.threads,
+                n_filter_kmers=total_child_kmers,
             )
             parent_found_kmers.update(father_kmers)
             logger.info(
