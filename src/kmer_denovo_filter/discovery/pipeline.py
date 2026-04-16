@@ -2555,7 +2555,7 @@ def run_discovery_pipeline(args):
     # ── Optional interactive HTML report ───────────────────────────
     report_path = getattr(args, "report", None)
     if report_path:
-        logger.info("[Module 4] Generating interactive HTML report: %s", report_path)
+        logger.info("[Report] Generating interactive HTML report: %s", report_path)
         from kmer_denovo_filter.report import generate_report
         generate_report(
             output_path=report_path,
