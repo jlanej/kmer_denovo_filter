@@ -241,7 +241,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 4 – Build bcftools query format string
+# Build bcftools query format string
 #
 # Columns extracted per variant:
 #   chrom  pos  ref  alt  quality  filter  child_gt  [DK*…]
@@ -257,7 +257,7 @@ done
 QUERY_FMT+='\n'
 
 # ---------------------------------------------------------------------------
-# Step 5 – Build TSV header row
+# Build TSV header row
 # ---------------------------------------------------------------------------
 # Required IGV review columns: chrom, pos, ref, alt
 # Recommended: quality, filter, child_gt, inheritance, file/vcf columns
