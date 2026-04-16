@@ -2552,6 +2552,17 @@ def run_discovery_pipeline(args):
         _format_elapsed(time.monotonic() - step_start),
     )
 
+    # ── Optional interactive HTML report ───────────────────────────
+    report_path = getattr(args, "report", None)
+    if report_path:
+        logger.info("[Report] Generating interactive HTML report: %s", report_path)
+        from kmer_denovo_filter.report import generate_report
+        generate_report(
+            output_path=report_path,
+            discovery_metrics_path=metrics_path,
+            discovery_summary_path=summary_path,
+        )
+
     # ── User guidance ──────────────────────────────────────────────
     logger.info("")
     logger.info("=" * 60)

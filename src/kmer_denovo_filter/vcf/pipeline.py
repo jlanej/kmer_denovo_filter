@@ -1890,6 +1890,18 @@ def run_pipeline(args):
         logger.info("[Step 5/5] Writing summary: %s", args.summary)
         _write_summary(args.summary, variants, annotations)
 
+    # ── Optional interactive HTML report ───────────────────────────
+    report_path = getattr(args, "report", None)
+    if report_path:
+        logger.info("[Report] Generating interactive HTML report: %s", report_path)
+        from kmer_denovo_filter.report import generate_report
+        generate_report(
+            output_path=report_path,
+            vcf_metrics_path=args.metrics,
+            vcf_summary_path=args.summary,
+            vcf_path=actual_output,
+        )
+
     logger.info(
         "[Step 5/5] Output complete (%s)",
         _format_elapsed(time.monotonic() - step_start),

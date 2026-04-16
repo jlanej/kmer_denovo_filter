@@ -145,10 +145,13 @@ def parse_vcf_args(argv=None):
              "span BED and an expanded span BED (coordinates extended by "
              "soft-clip lengths) are written.",
     )
+    parser.add_argument(
+        "--report", default=None,
+        help="Output path for an interactive HTML report summarizing "
+             "the k-mer filtering results with Plotly visualizations. "
+             "When omitted, no report is generated.",
+    )
     return parser.parse_args(argv)
-
-
-# ── Discovery-mode parser ───────────────────────────────────────────
 
 
 def parse_discovery_args(argv=None):
@@ -218,10 +221,13 @@ def parse_discovery_args(argv=None):
         help="Output BEDPE file for linked SV breakpoint pairs "
              "(default: [out-prefix].sv.bedpe)",
     )
+    parser.add_argument(
+        "--report", default=None,
+        help="Output path for an interactive HTML report summarizing "
+             "the discovery results with Plotly visualizations. "
+             "When omitted, no report is generated.",
+    )
     return parser.parse_args(argv)
-
-
-# ── Backward-compatible combined parser (used by legacy callers) ─────
 
 
 def parse_args(argv=None):
@@ -372,10 +378,13 @@ def parse_args(argv=None):
              "span BED and an expanded span BED (coordinates extended by "
              "soft-clip lengths) are written.",
     )
+    parser.add_argument(
+        "--report", default=None,
+        help="Output path for an interactive HTML report summarizing "
+             "the k-mer filtering results with Plotly visualizations. "
+             "When omitted, no report is generated.",
+    )
     return parser.parse_args(argv)
-
-
-# ── Entry points ─────────────────────────────────────────────────────
 
 
 def vcf_main(argv=None):

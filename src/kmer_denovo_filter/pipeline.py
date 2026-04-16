@@ -63,3 +63,6 @@ from kmer_denovo_filter.kmer_utils import Kraken2Runner  # noqa: F401
 # Re-export names from core.bam_scanner that were previously importable
 # from this module (e.g. _extract_softclips used in test_kraken2_bed.py)
 from kmer_denovo_filter.core.bam_scanner import _extract_softclips  # noqa: F401
+
+# Re-export the report generator
+from kmer_denovo_filter.report import generate_report  # noqa: F401
