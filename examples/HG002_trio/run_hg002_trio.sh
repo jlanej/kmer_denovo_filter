@@ -20,6 +20,8 @@
 #   3. Subset the child VCF to putative de novo variants.
 #   4. Run kmer-denovo via Apptainer to annotate each candidate with
 #      k-mer–based evidence of de novo origin.
+#   5. Extract "mini" alignment files (CRAM or BAM) around each candidate
+#      for IGV review (±1 kb by default).
 #
 # Usage
 # -----
@@ -81,6 +83,7 @@ REF_FASTA="${REF_FASTA:-}"         # optional; required only for CRAM input
 VARIANT_TYPES="${VARIANT_TYPES:-}" # e.g. "snps" or "snps,indels"; empty = all
 PROBAND_ID="${PROBAND_ID:-HG002}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"       # additional kmer-denovo arguments
+MINI_CRAM_PADDING="${MINI_CRAM_PADDING:-1000}"  # ±bp for mini CRAM extraction
 
 # ── GIAB data paths (NCBI FTP) ─────────────────────────────────────────────
 NCBI_FTP_HOST="anonftp@ftp.ncbi.nlm.nih.gov"
@@ -139,6 +142,7 @@ Analysis:
                           scan (e.g. "snps", "snps,indels"; default: all)
   --proband-id ID         Proband sample ID in VCF (default: HG002)
   --extra-args "ARGS"     Additional arguments passed to kmer-denovo
+  --mini-cram-padding N   Padding in bp for mini CRAM extraction (default: 1000)
 
 General:
   -h, --help              Show this help
@@ -241,6 +245,7 @@ while [[ $# -gt 0 ]]; do
         --variant-types)    VARIANT_TYPES="${2:-}";     shift 2 ;;
         --proband-id)       PROBAND_ID="${2:-}";        shift 2 ;;
         --extra-args)       EXTRA_ARGS="${2:-}";        shift 2 ;;
+        --mini-cram-padding) MINI_CRAM_PADDING="${2:-}"; shift 2 ;;
         -h|--help)          usage ;;
         *)                  die "Unknown argument: $1" ;;
     esac
@@ -478,7 +483,34 @@ mkdir -p "$TMP_DIR/kmer_denovo"
     "${KMER_CMD[@]}"
 
 # ============================================================================
-# STEP 5 – Report results
+# STEP 5 – Extract mini alignment files for IGV review
+# ============================================================================
+log ""
+log "Step 5: Extracting mini alignment files (±${MINI_CRAM_PADDING} bp) ..."
+
+MINI_DIR="$RESULTS_DIR/mini_crams"
+
+EXTRACT_SCRIPT="${SCRIPT_DIR}/extract_mini_crams.sh"
+[[ -f "$EXTRACT_SCRIPT" ]] \
+    || die "Helper script not found: $EXTRACT_SCRIPT"
+
+EXTRACT_ARGS=(
+    --vcf        "$DENOVO_VCF"
+    --child-bam  "$CHILD_BAM"
+    --father-bam "$FATHER_BAM"
+    --mother-bam "$MOTHER_BAM"
+    --output-dir "$MINI_DIR"
+    --padding    "$MINI_CRAM_PADDING"
+    --prefix     "HG002_trio"
+)
+if [[ -n "$REF_FASTA" ]]; then
+    EXTRACT_ARGS+=(--ref-fasta "$REF_FASTA")
+fi
+
+bash "$EXTRACT_SCRIPT" "${EXTRACT_ARGS[@]}"
+
+# ============================================================================
+# STEP 6 – Report results
 # ============================================================================
 log ""
 log "========================================================================"
@@ -493,6 +525,7 @@ log "    Metrics (JSON)       : $METRICS_JSON"
 log "    Summary              : $SUMMARY_TXT"
 log "    Informative reads    : $INFO_READS_BAM"
 log "    Putative de novos    : $DENOVO_VCF"
+log "    Mini alignments dir  : $MINI_DIR"
 log ""
 
 if [[ -f "$SUMMARY_TXT" ]]; then

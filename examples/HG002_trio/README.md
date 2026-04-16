@@ -48,7 +48,12 @@ All files are hosted on the NCBI FTP:
 └─────────────────────┬───────────────────────────────────────┘
                       │
 ┌─────────────────────▼───────────────────────────────────────┐
-│  Step 5: Report results                                     │
+│  Step 5: Extract mini CRAMs/BAMs for IGV review             │
+│          (±1 kb around each candidate site, per trio member) │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+┌─────────────────────▼───────────────────────────────────────┐
+│  Step 6: Report results                                     │
 │          (annotated VCF, metrics, summary, reads BAM)       │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -176,6 +181,7 @@ If Aspera is not available, the script falls back to `wget` over HTTPS.
 | `--variant-types` | all     | Variant types for de novo scan (e.g. `snps`)     |
 | `--proband-id`    | `HG002` | Proband sample ID in the VCF                     |
 | `--extra-args`    | –       | Additional arguments passed to `kmer-denovo`     |
+| `--mini-cram-padding` | 1000 | Padding in bp for mini CRAM extraction (±bp)  |
 
 Parameters can also be set via environment variables (e.g. `DATA_DIR`,
 `THREADS`, `MEMORY_GB`). Command-line arguments take precedence.
@@ -199,6 +205,12 @@ Parameters can also be set via environment variables (e.g. `DATA_DIR`,
 | `HG002_metrics.json`            | Per-variant metrics in JSON format             |
 | `HG002_summary.txt`             | Human-readable summary of results              |
 | `HG002_informative_reads.bam`   | BAM with reads carrying child-unique k-mers    |
+| `mini_crams/`                   | Directory with mini alignment files for IGV    |
+| `mini_crams/HG002_trio_child.*` | Child reads ±1 kb around each candidate        |
+| `mini_crams/HG002_trio_father.*`| Father reads ±1 kb around each candidate       |
+| `mini_crams/HG002_trio_mother.*`| Mother reads ±1 kb around each candidate       |
+| `mini_crams/HG002_trio_regions.bed` | Extraction regions BED file                |
+| `mini_crams/HG002_trio_regions_merged.bed` | Merged extraction regions         |
 
 ## Scripts
 
@@ -225,6 +237,28 @@ bash examples/HG002_trio/identify_putative_denovos.sh \
     --father-vcf father.vcf.gz \
     --mother-vcf mother.vcf.gz \
     --output     putative_denovos.vcf.gz
+```
+
+### `extract_mini_crams.sh`
+
+Reusable helper script that extracts small alignment files (CRAM or BAM)
+containing only reads within ±padding of candidate variant sites.  These
+"mini" files are ideal for IGV review without requiring hundreds of
+gigabytes of full-genome alignment data.
+
+When `--ref-fasta` is provided the output is CRAM (highly compressed);
+otherwise BAM is produced. Overlapping regions are automatically merged
+to reduce redundant extraction.
+
+```bash
+bash examples/HG002_trio/extract_mini_crams.sh \
+    --vcf         candidates.vcf.gz \
+    --child-bam   child.bam         \
+    --father-bam  father.bam        \
+    --mother-bam  mother.bam        \
+    --output-dir  mini_crams/       \
+    --ref-fasta   GRCh38.fa         \
+    --padding     1000
 ```
 
 ## Troubleshooting

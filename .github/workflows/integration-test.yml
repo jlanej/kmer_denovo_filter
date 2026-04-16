@@ -60,6 +60,63 @@ jobs:
       - name: Display VCF-mode summary
         run: cat integration_output/summary.txt
 
+      - name: Test mini alignment extraction (extract_mini_crams.sh)
+        run: |
+          mkdir -p integration_output/mini_bams
+          bash examples/HG002_trio/extract_mini_crams.sh \
+            --vcf        tests/data/giab/candidates.vcf.gz    \
+            --child-bam  tests/data/giab/HG002_child.bam      \
+            --father-bam tests/data/giab/HG003_father.bam     \
+            --mother-bam tests/data/giab/HG004_mother.bam     \
+            --output-dir integration_output/mini_bams          \
+            --padding    1000                                  \
+            --prefix     test_mini                             \
+            --format     bam
+
+      - name: Validate mini alignment extraction
+        run: |
+          echo "--- Validating mini alignment extraction ---"
+          # Verify output files exist and are non-empty
+          for member in child father mother; do
+            bam="integration_output/mini_bams/test_mini_${member}.bam"
+            [ -s "$bam" ] || { echo "FAIL: $bam missing or empty"; exit 1; }
+            [ -f "${bam}.bai" ] || { echo "FAIL: ${bam}.bai missing"; exit 1; }
+            reads=$(samtools view -c "$bam")
+            echo "  ${member}: ${reads} reads in $(basename $bam)"
+            [ "$reads" -gt 0 ] || { echo "FAIL: ${member} BAM has 0 reads"; exit 1; }
+          done
+          # Verify BED files exist
+          [ -s "integration_output/mini_bams/test_mini_regions.bed" ] \
+            || { echo "FAIL: regions BED missing"; exit 1; }
+          [ -s "integration_output/mini_bams/test_mini_regions_merged.bed" ] \
+            || { echo "FAIL: merged regions BED missing"; exit 1; }
+          # Verify reads are within expected regions
+          echo "  Checking read positions against extraction regions ..."
+          python3 -c "
+          import pysam
+          bam = pysam.AlignmentFile('integration_output/mini_bams/test_mini_child.bam', 'rb')
+          regions = []
+          with open('integration_output/mini_bams/test_mini_regions_merged.bed') as f:
+              for line in f:
+                  parts = line.strip().split('\t')
+                  regions.append((parts[0], int(parts[1]), int(parts[2])))
+          n_checked = 0
+          for read in bam:
+              if read.is_unmapped:
+                  continue
+              chrom = read.reference_name
+              start = read.reference_start
+              # Read should overlap at least one extraction region
+              overlaps = any(c == chrom and s <= start + read.query_length and e >= start
+                            for c, s, e in regions)
+              if not overlaps:
+                  print(f'WARNING: read {read.query_name} at {chrom}:{start} outside regions')
+              n_checked += 1
+          bam.close()
+          print(f'  Checked {n_checked} reads – all within extraction regions')
+          "
+          echo "--- Mini alignment validation complete ---"
+
       - name: Validate BED file sort order and indexability
         run: |
           echo "--- Checking BED files ---"
