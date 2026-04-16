@@ -424,6 +424,7 @@ OUTPUT_VCF="$RESULTS_DIR/HG002_denovo_annotated.vcf"
 METRICS_JSON="$RESULTS_DIR/HG002_metrics.json"
 SUMMARY_TXT="$RESULTS_DIR/HG002_summary.txt"
 INFO_READS_BAM="$RESULTS_DIR/HG002_informative_reads.bam"
+REPORT_HTML="$RESULTS_DIR/HG002_report.html"
 
 # Build bind mount list: every unique parent directory that contains our files
 # Apptainer needs --bind for any path not in the default bind list.
@@ -457,6 +458,7 @@ KMER_CMD=(
     --metrics "$METRICS_JSON"
     --summary "$SUMMARY_TXT"
     --informative-reads "$INFO_READS_BAM"
+    --report  "$REPORT_HTML"
     --tmp-dir "$TMP_DIR/kmer_denovo"
 )
 
@@ -543,6 +545,7 @@ log "  Output files:"
 log "    Annotated VCF        : $OUTPUT_VCF"
 log "    Metrics (JSON)       : $METRICS_JSON"
 log "    Summary              : $SUMMARY_TXT"
+log "    Interactive report   : $REPORT_HTML"
 log "    Informative reads    : $INFO_READS_BAM"
 log "    Putative de novos    : $DENOVO_VCF"
 log "    Mini alignments dir  : $MINI_DIR"
