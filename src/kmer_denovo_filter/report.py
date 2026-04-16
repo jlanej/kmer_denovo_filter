@@ -10,7 +10,6 @@ k-mer de novo filtering strategy.
 import json
 import logging
 import os
-import re
 
 logger = logging.getLogger(__name__)
 
@@ -261,23 +260,17 @@ def _make_sankey_diagram(metrics, mode="vcf"):
         total = metrics.get("total_child_kmers", 0)
         parent_found = metrics.get("parent_found_kmers", 0)
         unique = metrics.get("child_unique_kmers", 0)
-        with_reads = metrics.get("variants_with_unique_reads", 0)
-        total_variants = metrics.get("total_variants", 0)
-        without_reads = total_variants - with_reads
 
         node_labels = [
-            f"Total Child K-mers ({total:,})",
-            f"Found in Parents ({parent_found:,})",
-            f"Child-Unique ({unique:,})",
-            f"Variants with Unique Reads ({with_reads})",
-            f"Variants without Unique Reads ({without_reads})",
+            f"Total Child K-mers<br>({total:,})",
+            f"Found in Parents<br>({parent_found:,})",
+            f"Child-Unique K-mers<br>({unique:,})",
         ]
-        node_colors = ["#4C78A8", "#E45756", "#54A24B", "#72B7B2", "#BAB0AC"]
+        node_colors = ["#4C78A8", "#E45756", "#54A24B"]
 
-        source = [0, 0, 2, 2]
-        target = [1, 2, 3, 4]
-        value = [parent_found, unique,
-                 max(1, with_reads), max(1, without_reads)]
+        source = [0, 0]
+        target = [1, 2]
+        value = [max(1, parent_found), max(1, unique)]
     else:
         child_cand = metrics.get("child_candidate_kmers", 0)
         non_ref = metrics.get("non_ref_kmers", 0)
@@ -383,9 +376,11 @@ def _make_dka_vs_dkt_scatter(variants):
         customdata=[[v["dku"], v["dka_dkt"], v["call"]] for v in variants],
     ))
 
-    # Add quadrant lines
-    fig.add_hline(y=10, line_dash="dot", line_color="#ccc", line_width=1)
-    fig.add_vline(x=0, line_dash="dot", line_color="#ccc", line_width=1)
+    # Add DKA=10 threshold line (minimum high-quality evidence requirement)
+    fig.add_hline(y=10, line_dash="dot", line_color="#E45756", line_width=1.5,
+                  annotation_text="DKA ≥ 10 threshold",
+                  annotation_position="right",
+                  annotation_font=dict(size=10, color="#E45756"))
 
     fig.update_layout(
         title=dict(
@@ -472,7 +467,13 @@ def _make_evidence_heatmap(variants):
 
 
 def _make_pkc_boxplot(variants):
-    """Create box plots of PKC metrics by call type."""
+    """Create box plots of ALT-specific PKC metrics by call type.
+
+    Uses ALT-allele parental k-mer counts (PKC_ALT), not total PKC, because
+    reference-allele k-mers are present in parents for all variants.  Only
+    the ALT-allele k-mer abundance in parents distinguishes de novo (absent)
+    from inherited (present) variants.
+    """
     import plotly.graph_objects as go
 
     denovo = [v for v in variants if v["call"] == "DE_NOVO"]
@@ -486,9 +487,9 @@ def _make_pkc_boxplot(variants):
         if not group:
             continue
         for metric, name in [
-            ("max_pkc", "MAX_PKC"),
-            ("avg_pkc", "AVG_PKC"),
-            ("min_pkc", "MIN_PKC"),
+            ("max_pkc_alt", "MAX_PKC_ALT"),
+            ("avg_pkc_alt", "AVG_PKC_ALT"),
+            ("min_pkc_alt", "MIN_PKC_ALT"),
         ]:
             fig.add_trace(go.Box(
                 y=[v[metric] for v in group],
@@ -499,10 +500,10 @@ def _make_pkc_boxplot(variants):
 
     fig.update_layout(
         title=dict(
-            text="Parental K-mer Count (PKC) by Call Type",
+            text="ALT-Allele Parental K-mer Count (PKC_ALT) by Call Type",
             font=dict(size=18),
         ),
-        yaxis_title="K-mer Count in Parents",
+        yaxis_title="ALT-Allele K-mer Count in Parents",
         template="plotly_white",
         height=450,
         margin=dict(t=60, b=40),
@@ -512,7 +513,15 @@ def _make_pkc_boxplot(variants):
 
 
 def _make_pkc_vs_dka_dkt_scatter(variants):
-    """Create AVG_PKC vs DKA_DKT scatter plot."""
+    """Create AVG_PKC_ALT vs DKA_DKT scatter plot.
+
+    Uses ALT-allele parental k-mer count (avg_pkc_alt) on the y-axis.
+    For genuine de novos, avg_pkc_alt should be near zero because the
+    ALT-allele k-mers are absent from both parents.  For inherited variants,
+    avg_pkc_alt is non-zero because the ALT allele is present in at least
+    one parent.  This demonstrates the null hypothesis (parental coverage
+    gap) can be rejected when inherited variants show high avg_pkc_alt.
+    """
     import plotly.graph_objects as go
 
     colors = ["#54A24B" if v["call"] == "DE_NOVO" else "#E45756"
@@ -521,26 +530,35 @@ def _make_pkc_vs_dka_dkt_scatter(variants):
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=[v["dka_dkt"] for v in variants],
-        y=[v["avg_pkc"] for v in variants],
+        y=[v["avg_pkc_alt"] for v in variants],
         mode="markers",
         marker=dict(size=10, color=colors, line=dict(width=1, color="#333")),
         text=[f"{v['label']}<br>Call: {v['call']}" for v in variants],
         hovertemplate=(
             "<b>%{text}</b><br>"
-            "DKA_DKT: %{x:.4f}<br>AVG_PKC: %{y:.1f}"
+            "DKA_DKT: %{x:.4f}<br>AVG_PKC_ALT: %{y:.1f}"
             "<extra></extra>"
         ),
     ))
+    # DKA_DKT threshold line
+    fig.add_vline(
+        x=0.25, line_dash="dash", line_color="#ccc", line_width=1,
+        annotation_text="DKA_DKT ≥ 0.25",
+        annotation_position="top right",
+        annotation_font=dict(size=10, color="#666"),
+    )
     fig.update_layout(
         title=dict(
-            text="AVG_PKC vs. DKA_DKT Ratio",
-            font=dict(size=18),
+            text="AVG_PKC_ALT vs. DKA_DKT Ratio<br>"
+                 "<sup>De novo (green) should cluster at low AVG_PKC_ALT; "
+                 "inherited (red) at high AVG_PKC_ALT</sup>",
+            font=dict(size=16),
         ),
         xaxis_title="DKA_DKT Ratio",
-        yaxis_title="AVG_PKC (Average Parental K-mer Count)",
+        yaxis_title="AVG_PKC_ALT (Avg. ALT-Allele K-mer Count in Parents)",
         template="plotly_white",
         height=450,
-        margin=dict(t=60, b=40),
+        margin=dict(t=80, b=40),
     )
     return _plotly_json(fig)
 
@@ -998,11 +1016,16 @@ _HTML_TEMPLATE = """\
 <h2>5. Parental K-mer Count (PKC) Analysis</h2>
 <div class="section-rationale">
   <strong>Scientific rationale:</strong> If k-mers are absent from parents,
-  is that a coverage gap or true absence?  High parental k-mer counts at
-  inherited sites confirm the parents are well-sequenced; absence at
-  de novo sites is therefore meaningful.  This directly addresses the
-  null hypothesis that child-unique k-mers are artifacts of parental
-  under-sequencing.
+  is that a coverage gap or true absence?  We use <strong>ALT-allele</strong>
+  parental k-mer counts (PKC_ALT) — the number of times ALT-allele k-mers
+  appear in each parent.  For genuine de novo variants, ALT-allele k-mers
+  should be absent from both parents (PKC_ALT ≈ 0).  For inherited variants,
+  the ALT allele is present in at least one parent, so PKC_ALT is non-zero.
+  High PKC_ALT at inherited sites confirms the parents are well-sequenced;
+  zero PKC_ALT at de novo sites is therefore meaningful and not an artifact
+  of parental under-sequencing.  Note: total PKC (including REF-allele
+  k-mers) is not shown here as REF k-mers are present in parents for all
+  variants regardless of de novo status.
 </div>
 <div class="plot-container">
   <div id="pkc-box-plot" class="plot-div"></div>
@@ -1236,9 +1259,14 @@ _HTML_TEMPLATE = """\
     <strong>DKA_DKT</strong> — Ratio of DKA to DKT; the primary signal
     metric. Values &ge; 0.25 with DKA &ge; 10 indicate high-quality
     de novo candidates.<br>
-    <strong>PKC (MAX/AVG/MIN)</strong> — Parental K-mer Count: how many
-    times the variant's k-mers appear in parents. High PKC at inherited
-    sites confirms parental sequencing depth is adequate.<br>
+    <strong>PKC_ALT (MAX/AVG/MIN_PKC_ALT)</strong> — ALT-allele Parental K-mer
+    Count: how many times the variant's ALT-allele k-mers appear in the
+    parents.  For genuine de novo variants these values should be near zero
+    (the ALT allele is absent from both parents). For inherited variants
+    PKC_ALT is non-zero because the ALT allele is present in at least one
+    parent. Note that total PKC (ref + alt k-mers) is not shown in the PKC
+    analysis because REF k-mers are present in parents regardless of de novo
+    status.<br>
     <strong>NHF (DKA_NHF)</strong> — Non-human fraction of informative
     reads. Values &gt; 0.1 warrant caution as the signal may be driven
     by microbial contamination.

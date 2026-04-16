@@ -305,3 +305,70 @@ class TestGenerateReport:
             assert "chr8:125785997" in html or "chr11:55003995" in html
         finally:
             os.unlink(out)
+
+    def test_pkc_analysis_uses_alt_specific_metrics(self):
+        """PKC box/scatter must use ALT-allele PKC, not total PKC.
+
+        Scientific rationale: REF-allele k-mers are present in parents for
+        all variants; only ALT-allele PKC distinguishes de novo (absent) from
+        inherited (present).
+        """
+        with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as fh:
+            out = fh.name
+        try:
+            generate_report(
+                output_path=out,
+                vcf_metrics_path=os.path.join(
+                    EXAMPLE_OUTPUT_DIR, "metrics.json",
+                ),
+                vcf_summary_path=os.path.join(
+                    EXAMPLE_OUTPUT_DIR, "summary.txt",
+                ),
+            )
+            with open(out) as fh:
+                html = fh.read()
+            # Report should use ALT-specific PKC labels
+            assert "AVG_PKC_ALT" in html, (
+                "PKC analysis must show ALT-allele parental k-mer counts"
+            )
+            assert "ALT-Allele Parental K-mer Count" in html, (
+                "PKC box plot title must specify ALT-allele"
+            )
+            assert "ALT-allele k-mers" in html.lower() or "avg_pkc_alt" in html.lower()
+        finally:
+            os.unlink(out)
+
+    def test_sankey_does_not_mix_units(self):
+        """Sankey diagram must not mix k-mer and variant-level counts.
+
+        Scientific rationale: Flowing k-mer counts (1294) into variant
+        counts (12) in the same Sankey is logically invalid and visually
+        misleading due to scale differences.
+        """
+        with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as fh:
+            out = fh.name
+        try:
+            generate_report(
+                output_path=out,
+                vcf_metrics_path=os.path.join(
+                    EXAMPLE_OUTPUT_DIR, "metrics.json",
+                ),
+                vcf_summary_path=os.path.join(
+                    EXAMPLE_OUTPUT_DIR, "summary.txt",
+                ),
+            )
+            with open(out) as fh:
+                html = fh.read()
+            # The Sankey JSON should contain only k-mer node labels
+            # (no "Variants with Unique Reads" node which would mix units)
+            assert "Variants with Unique Reads" not in html, (
+                "Sankey must not mix k-mer and variant-level flow nodes"
+            )
+            assert "Variants without Unique Reads" not in html, (
+                "Sankey must not mix k-mer and variant-level flow nodes"
+            )
+            # K-mer level nodes should be present
+            assert "Child-Unique K-mers" in html
+            assert "Found in Parents" in html
+        finally:
+            os.unlink(out)
