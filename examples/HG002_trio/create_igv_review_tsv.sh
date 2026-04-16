@@ -151,7 +151,10 @@ log "  Prefix        : $PREFIX"
 log "  Proband ID    : $PROBAND_ID"
 log "  Output        : $OUTPUT_TSV"
 
-if [[ "$ANNOTATED_VCF" == *.vcf && ! "$ANNOTATED_VCF" == *.vcf.gz ]]; then
+if [[ "$ANNOTATED_VCF" == *.vcf.gz ]]; then
+    VCF_GZ="$ANNOTATED_VCF"
+    log "Step 1: VCF is already bgzipped: $(basename "$VCF_GZ")"
+elif [[ "$ANNOTATED_VCF" == *.vcf ]]; then
     VCF_GZ="${ANNOTATED_VCF}.gz"
     if [[ ! -f "$VCF_GZ" ]]; then
         log "Step 1: Compressing VCF with bgzip → $(basename "$VCF_GZ") ..."
@@ -159,9 +162,6 @@ if [[ "$ANNOTATED_VCF" == *.vcf && ! "$ANNOTATED_VCF" == *.vcf.gz ]]; then
     else
         log "Step 1: Found existing bgzipped VCF: $(basename "$VCF_GZ")"
     fi
-elif [[ "$ANNOTATED_VCF" == *.vcf.gz ]]; then
-    VCF_GZ="$ANNOTATED_VCF"
-    log "Step 1: VCF is already bgzipped: $(basename "$VCF_GZ")"
 else
     die "Unrecognised VCF extension (expected .vcf or .vcf.gz): $ANNOTATED_VCF"
 fi
@@ -273,7 +273,7 @@ HEADER+="\tmother_file\tmother_index"
 HEADER+="\tchild_vcf\tchild_vcf_index\tchild_vcf_id"
 
 # ---------------------------------------------------------------------------
-# Step 6 – Write TSV
+# Step 4 – Write TSV
 # ---------------------------------------------------------------------------
 log "Step 4: Writing TSV to $(basename "$OUTPUT_TSV") ..."
 
@@ -290,12 +290,12 @@ bcftools query -f "$QUERY_FMT" "$VCF_GZ" \
     | awk \
         -v inherit="de_novo" \
         -v cf="$CHILD_FILE"  -v ci="$CHILD_INDEX"  \
-        -v ff="$FATHER_FILE" -v fi_="$FATHER_INDEX" \
+        -v ff="$FATHER_FILE" -v fi="$FATHER_INDEX" \
         -v mf="$MOTHER_FILE" -v mi="$MOTHER_INDEX"  \
         -v vf="$VCF_ABS"     -v vt="$VCF_TBI"       \
         -v pi="$PROBAND_ID"  \
         'BEGIN{OFS="\t"} {
-            print $0, inherit, cf, ci, ff, fi_, mf, mi, vf, vt, pi
+            print $0, inherit, cf, ci, ff, fi, mf, mi, vf, vt, pi
         }' \
     >> "$OUTPUT_TSV"
 
