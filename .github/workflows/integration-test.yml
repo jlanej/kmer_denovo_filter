@@ -117,6 +117,86 @@ jobs:
           "
           echo "--- Mini alignment validation complete ---"
 
+      - name: Test IGV review TSV generation (create_igv_review_tsv.sh)
+        run: |
+          bash examples/HG002_trio/create_igv_review_tsv.sh \
+            --vcf         integration_output/annotated.vcf.gz      \
+            --mini-dir    integration_output/mini_bams              \
+            --output      integration_output/igv_review.tsv         \
+            --prefix      test_mini                                  \
+            --proband-id  HG002
+
+      - name: Validate IGV review TSV
+        run: |
+          echo "--- Validating IGV review TSV ---"
+          TSV="integration_output/igv_review.tsv"
+          [ -s "$TSV" ] || { echo "FAIL: $TSV missing or empty"; exit 1; }
+
+          # Header must contain all required IGV columns
+          HEADER=$(head -1 "$TSV")
+          for col in chrom pos ref alt quality filter child_gt inheritance \
+                     child_file child_index father_file father_index \
+                     mother_file mother_index child_vcf child_vcf_index child_vcf_id; do
+            echo "$HEADER" | grep -qw "$col" \
+              || { echo "FAIL: required column '$col' missing from header"; exit 1; }
+          done
+
+          # Header must include kmer-denovo DK* columns
+          for col in dku dkt dka dku_dkt dka_dkt; do
+            echo "$HEADER" | grep -qw "$col" \
+              || { echo "FAIL: kmer-denovo column '$col' missing from header"; exit 1; }
+          done
+
+          # All rows must have identical column count
+          N_COLS=$(head -1 "$TSV" | awk -F'\t' '{print NF}')
+          BAD=$(awk -F'\t' -v n="$N_COLS" 'NR>1 && NF!=n {print NR}' "$TSV")
+          [ -z "$BAD" ] || { echo "FAIL: rows with wrong column count: $BAD"; exit 1; }
+
+          # Correct number of data rows (one per VCF variant)
+          N_VARIANTS=$(bcftools view -H tests/data/giab/candidates.vcf.gz | wc -l)
+          N_ROWS=$(tail -n +2 "$TSV" | wc -l)
+          [ "$N_ROWS" -eq "$N_VARIANTS" ] \
+            || { echo "FAIL: expected $N_VARIANTS rows, got $N_ROWS"; exit 1; }
+
+          # inheritance column must be "de_novo" for every row
+          python3 -c "
+          with open('$TSV') as f:
+              header = f.readline().strip().split('\t')
+              idx = header.index('inheritance')
+              for i, line in enumerate(f, 2):
+                  val = line.strip().split('\t')[idx]
+                  assert val == 'de_novo', f'Row {i}: inheritance={val!r}, expected de_novo'
+          print('  inheritance column: all rows = de_novo ✓')
+          "
+
+          # File paths in child_file must point to existing files
+          python3 -c "
+          import os
+          with open('$TSV') as f:
+              header = f.readline().strip().split('\t')
+              cf_idx = header.index('child_file')
+              vf_idx = header.index('child_vcf')
+              for i, line in enumerate(f, 2):
+                  parts = line.strip().split('\t')
+                  cf = parts[cf_idx]
+                  vf = parts[vf_idx]
+                  assert os.path.isfile(cf), f'Row {i}: child_file not found: {cf}'
+                  assert os.path.isfile(vf), f'Row {i}: child_vcf not found: {vf}'
+          print('  child_file and child_vcf paths: all exist ✓')
+          "
+
+          # No literal \n in any cell
+          python3 -c "
+          with open('$TSV') as f:
+              for i, line in enumerate(f, 1):
+                  cells = line.rstrip('\n').split('\t')
+                  for j, cell in enumerate(cells):
+                      if r'\n' in cell:
+                          raise AssertionError(f'Row {i} col {j+1}: literal \\\\n in cell: {cell!r}')
+          print('  No literal newlines in cells ✓')
+          "
+          echo "--- IGV review TSV validation complete ---"
+
       - name: Validate BED file sort order and indexability
         run: |
           echo "--- Checking BED files ---"

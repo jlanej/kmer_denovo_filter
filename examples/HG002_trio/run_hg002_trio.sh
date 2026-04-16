@@ -510,7 +510,27 @@ fi
 bash "$EXTRACT_SCRIPT" "${EXTRACT_ARGS[@]}"
 
 # ============================================================================
-# STEP 6 – Report results
+# STEP 6 – Create IGV variant review TSV
+# ============================================================================
+log ""
+log "Step 6: Creating IGV variant review TSV ..."
+
+IGV_TSV="$RESULTS_DIR/HG002_igv_review.tsv"
+
+IGV_TSV_SCRIPT="${SCRIPT_DIR}/create_igv_review_tsv.sh"
+[[ -f "$IGV_TSV_SCRIPT" ]] \
+    || die "Helper script not found: $IGV_TSV_SCRIPT"
+
+# Use the annotated VCF as the source; the script handles bgzip/tabix if needed
+bash "$IGV_TSV_SCRIPT" \
+    --vcf         "$OUTPUT_VCF" \
+    --mini-dir    "$MINI_DIR"   \
+    --prefix      "HG002_trio"  \
+    --output      "$IGV_TSV"    \
+    --proband-id  "$PROBAND_ID"
+
+# ============================================================================
+# STEP 7 – Report results
 # ============================================================================
 log ""
 log "========================================================================"
@@ -526,6 +546,7 @@ log "    Summary              : $SUMMARY_TXT"
 log "    Informative reads    : $INFO_READS_BAM"
 log "    Putative de novos    : $DENOVO_VCF"
 log "    Mini alignments dir  : $MINI_DIR"
+log "    IGV review TSV       : $IGV_TSV"
 log ""
 
 if [[ -f "$SUMMARY_TXT" ]]; then

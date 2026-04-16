@@ -53,7 +53,12 @@ All files are hosted on the NCBI FTP:
 └─────────────────────┬───────────────────────────────────────┘
                       │
 ┌─────────────────────▼───────────────────────────────────────┐
-│  Step 6: Report results                                     │
+│  Step 6: Create IGV variant review TSV                      │
+│          (variant table + mini CRAM + annotated VCF paths)  │
+└─────────────────────┬───────────────────────────────────────┘
+                      │
+┌─────────────────────▼───────────────────────────────────────┐
+│  Step 7: Report results                                     │
 │          (annotated VCF, metrics, summary, reads BAM)       │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -211,6 +216,7 @@ Parameters can also be set via environment variables (e.g. `DATA_DIR`,
 | `mini_crams/HG002_trio_mother.*`| Mother reads ±1 kb around each candidate       |
 | `mini_crams/HG002_trio_regions.bed` | Extraction regions BED file                |
 | `mini_crams/HG002_trio_regions_merged.bed` | Merged extraction regions         |
+| `HG002_igv_review.tsv`                  | IGV variant review server input (variant table with mini CRAM + annotated VCF paths) |
 
 ## Scripts
 
@@ -239,7 +245,46 @@ bash examples/HG002_trio/identify_putative_denovos.sh \
     --output     putative_denovos.vcf.gz
 ```
 
-### `extract_mini_crams.sh`
+### `create_igv_review_tsv.sh`
+
+Generates a variant TSV file ready for the
+[IGV de novo variant review server](https://github.com/jlanej/igv.js/tree/master/server).
+
+The TSV contains all required IGV server columns:
+
+- `chrom`, `pos`, `ref`, `alt` — required variant coordinates
+- `quality`, `filter`, `child_gt` — from the annotated VCF
+- `dku`, `dkt`, `dka`, `dku_dkt`, `dka_dkt` — kmer-denovo evidence scores
+  (plus any Kraken2 contamination fractions if the pipeline was run with a
+  Kraken2 database)
+- `inheritance` — set to `de_novo` for every row
+- `child_file` / `father_file` / `mother_file` + index — absolute paths to
+  the mini CRAM/BAM files from `extract_mini_crams.sh`
+- `child_vcf` / `child_vcf_index` / `child_vcf_id` — bgzipped annotated VCF
+  (bgzipped + tabix-indexed automatically if the input is a plain `.vcf`)
+
+Population frequency, variant impact, and gene annotations are not available
+from the kmer-denovo pipeline and are therefore omitted.
+
+```bash
+bash examples/HG002_trio/create_igv_review_tsv.sh \
+    --vcf         HG002_denovo_annotated.vcf.gz \
+    --mini-dir    mini_crams/                   \
+    --output      HG002_igv_review.tsv          \
+    --prefix      HG002_trio                    \
+    --proband-id  HG002
+```
+
+Start the review server (requires [igv.js](https://github.com/jlanej/igv.js)):
+
+```bash
+node /path/to/igv.js/server/server.js \
+    --variants  HG002_igv_review.tsv \
+    --data-dir  /results             \
+    --genome    hg38                 \
+    --port      3000
+# Open: http://127.0.0.1:3000
+```
 
 Reusable helper script that extracts small alignment files (CRAM or BAM)
 containing only reads within ±padding of candidate variant sites.  These
