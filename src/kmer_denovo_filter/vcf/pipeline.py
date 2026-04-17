@@ -1429,7 +1429,10 @@ def _write_summary(summary_path, variants, annotations):
     for var in variants:
         ref = var["ref"]
         alts = var["alts"]
-        alt = alts[0] if alts else "."
+        # Use the genotype-informed alt allele (set during VCF parsing) so that
+        # multiallelic variants where --proband-id selected a non-first ALT are
+        # looked up with the same key used during annotation.
+        alt = var.get("alt") if var.get("alt") is not None else (alts[0] if alts else ".")
         var_key = f"{var['chrom']}:{var['pos']}:{ref}:{alt}"
         ann = annotations.get(var_key, {"dku": 0, "dkt": 0, "dka": 0, "dku_dkt": 0.0, "dka_dkt": 0.0, "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0, "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0})
         label = f"{var['chrom']}:{var['pos'] + 1} {ref}>{alt}"
