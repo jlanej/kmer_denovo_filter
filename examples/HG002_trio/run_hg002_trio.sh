@@ -59,6 +59,8 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 
+module load bcftools
+module load aspera
 set -euo pipefail
 
 # ── Resolve script directory (for locating helper scripts) ──────────────────
