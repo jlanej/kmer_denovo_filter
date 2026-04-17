@@ -159,7 +159,7 @@ log "Step 1: Removing variants present in father ..."
 
 STEP1_OUT="$TMP_DIR/child_not_father.vcf.gz"
 
-bcftools isec -C \
+bcftools isec -C -w1 \
     "$INPUT_VCF" "$FATHER_VCF" \
     -Oz -o "$STEP1_OUT"
 
@@ -175,7 +175,7 @@ log "  After removing father  : $STEP1_COUNT"
 # ---------------------------------------------------------------------------
 log "Step 2: Removing variants present in mother ..."
 
-bcftools isec -C \
+bcftools isec -C -w1 \
     "$STEP1_OUT" "$MOTHER_VCF" \
     -Oz -o "$OUTPUT_VCF"
 

@@ -60,6 +60,44 @@ jobs:
       - name: Display VCF-mode summary
         run: cat integration_output/summary.txt
 
+      - name: Test identify_putative_denovos.sh helper script
+        run: |
+          mkdir -p integration_output/identify_denovos_test
+          TESTDIR="integration_output/identify_denovos_test"
+
+          # Create minimal trio VCFs:
+          #   child  : chr1  100 (de novo), 200 (shared with father), 300 (shared with mother)
+          #   father : chr1  200
+          #   mother : chr1  300
+          # Expected putative de novos after both passes: only chr1:100
+
+          for sample in child father mother; do
+            case "$sample" in
+              child)  variants=$'chr1\t100\t.\tA\tT\t50\tPASS\t.\tGT\t0/1\nchr1\t200\t.\tC\tG\t50\tPASS\t.\tGT\t0/1\nchr1\t300\t.\tG\tA\t50\tPASS\t.\tGT\t0/1' ;;
+              father) variants=$'chr1\t200\t.\tC\tG\t50\tPASS\t.\tGT\t0/1' ;;
+              mother) variants=$'chr1\t300\t.\tG\tA\t50\tPASS\t.\tGT\t0/1' ;;
+            esac
+            printf '##fileformat=VCFv4.2\n##contig=<ID=chr1,length=248956422>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t%s\n%s\n' \
+              "$sample" "$variants" \
+              | bgzip > "$TESTDIR/${sample}.vcf.gz"
+            tabix -p vcf "$TESTDIR/${sample}.vcf.gz"
+          done
+
+          bash examples/HG002_trio/identify_putative_denovos.sh \
+            --child-vcf   "$TESTDIR/child.vcf.gz"  \
+            --father-vcf  "$TESTDIR/father.vcf.gz" \
+            --mother-vcf  "$TESTDIR/mother.vcf.gz" \
+            --output      "$TESTDIR/putative_denovos.vcf.gz"
+
+          N=$(zcat "$TESTDIR/putative_denovos.vcf.gz" | grep -v '^#' | wc -l)
+          echo "Putative de novos: $N"
+          [ "$N" -eq 1 ] || { echo "FAIL: expected 1 de novo, got $N"; exit 1; }
+
+          POS=$(zcat "$TESTDIR/putative_denovos.vcf.gz" | grep -v '^#' | awk '{print $2}')
+          [ "$POS" -eq 100 ] || { echo "FAIL: expected pos 100, got $POS"; exit 1; }
+
+          echo "identify_putative_denovos.sh: PASS"
+
       - name: Test mini alignment extraction (extract_mini_crams.sh)
         run: |
           mkdir -p integration_output/mini_bams
