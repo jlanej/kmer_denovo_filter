@@ -56,14 +56,14 @@ jobs:
 
           # Verify all helper scripts are present inside the image
           for script in identify_putative_denovos.sh extract_mini_crams.sh create_igv_review_tsv.sh; do
-            docker run --rm "$IMAGE_TAG" \
-              test -f "/app/examples/HG002_trio/${script}" \
+            docker run --rm --entrypoint /bin/bash "$IMAGE_TAG" \
+              -c "test -f '/app/examples/HG002_trio/${script}'" \
               && echo "OK: /app/examples/HG002_trio/${script} exists" \
               || { echo "FAIL: ${script} missing from image"; exit 1; }
           done
 
           # Verify bcftools is available in the image
-          docker run --rm "$IMAGE_TAG" bcftools --version | head -1
+          docker run --rm --entrypoint bcftools "$IMAGE_TAG" --version | head -1
 
           # Functional test: run identify_putative_denovos.sh entirely inside the
           # container using synthetic trio VCFs created with the image's own tools.
@@ -71,7 +71,7 @@ jobs:
           #   father : chr1:200
           #   mother : chr1:300
           # Expected output: exactly 1 putative de novo at chr1:100
-          docker run --rm "$IMAGE_TAG" bash << 'INNERSCRIPT'
+          docker run --rm --entrypoint bash "$IMAGE_TAG" << 'INNERSCRIPT'
           set -euo pipefail
           TESTDIR=$(mktemp -d)
           trap 'rm -rf "$TESTDIR"' EXIT
