@@ -16,6 +16,10 @@ from kmer_denovo_filter.pipeline import (
     run_pipeline,
     run_discovery_pipeline,
 )
+from kmer_denovo_filter.vcf.pipeline import (
+    _parse_vcf_variants,
+    _select_alt_from_gt,
+)
 from kmer_denovo_filter.utils import (
     _estimate_fasta_sequence_count,
     _format_elapsed,
@@ -1284,6 +1288,283 @@ class TestPipelineIntegration:
         assert rec_alt1[0].samples["HG002"]["DKA"] > 0
         # alt2 record: child does NOT carry this allele → DKA == 0
         assert rec_alt2[0].samples["HG002"]["DKA"] == 0
+        vcf_out.close()
+
+
+def _create_multiallelic_vcf(path, chrom, pos_1based, ref, alts, gt, sample="HG002"):
+    """Create a VCF with a single multiallelic record and a specific GT.
+
+    *alts* is a tuple of ALT allele strings, e.g. ``("G", "T")``.
+    *gt* is a tuple of allele indices, e.g. ``(0, 2)``.
+    """
+    header = pysam.VariantHeader()
+    header.add_sample(sample)
+    header.add_line(f"##contig=<ID={chrom},length=300>")
+    header.add_line(
+        '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">'
+    )
+    with pysam.VariantFile(path, "w", header=header) as vcf:
+        rec = vcf.new_record(
+            contig=chrom,
+            start=pos_1based - 1,
+            stop=pos_1based - 1 + len(ref),
+            alleles=(ref,) + tuple(alts),
+        )
+        rec.samples[sample]["GT"] = gt
+        vcf.write(rec)
+
+
+class TestSelectAltFromGt:
+    """Unit tests for the _select_alt_from_gt helper."""
+
+    def test_het_first_alt(self):
+        """GT 0/1 should select alts[0]."""
+        alts = ("G", "T")
+        alt, indices = _select_alt_from_gt(alts, (0, 1))
+        assert alt == "G"
+        assert indices == [1]
+
+    def test_het_second_alt(self):
+        """GT 0/2 should select alts[1]."""
+        alts = ("G", "T")
+        alt, indices = _select_alt_from_gt(alts, (0, 2))
+        assert alt == "T"
+        assert indices == [2]
+
+    def test_het_non_ref(self):
+        """GT 1/2 should select first non-ref (alts[0])."""
+        alts = ("G", "T")
+        alt, indices = _select_alt_from_gt(alts, (1, 2))
+        assert alt == "G"
+        assert indices == [1, 2]
+
+    def test_hom_ref(self):
+        """GT 0/0 should fall back to alts[0] with empty indices."""
+        alts = ("G", "T")
+        alt, indices = _select_alt_from_gt(alts, (0, 0))
+        assert alt == "G"
+        assert indices == []
+
+    def test_missing_gt(self):
+        """None GT should fall back to alts[0]."""
+        alts = ("G", "T")
+        alt, indices = _select_alt_from_gt(alts, None)
+        assert alt == "G"
+        assert indices == []
+
+    def test_partial_missing_gt(self):
+        """GT with one None allele (./1) should select the non-ref allele."""
+        alts = ("G", "T")
+        alt, indices = _select_alt_from_gt(alts, (None, 1))
+        assert alt == "G"
+        assert indices == [1]
+
+    def test_hom_alt2(self):
+        """GT 2/2 should select alts[1]."""
+        alts = ("G", "T")
+        alt, indices = _select_alt_from_gt(alts, (2, 2))
+        assert alt == "T"
+        assert indices == [2]
+
+
+class TestParseVcfMultiallelic:
+    """Tests for _parse_vcf_variants with multiallelic records."""
+
+    @pytest.fixture()
+    def tmpdir(self, tmp_path):
+        return str(tmp_path)
+
+    def test_proband_carries_alt2(self, tmpdir):
+        """When proband is 0/2, the second ALT should be selected."""
+        chrom = "chr1"
+        vcf_path = os.path.join(tmpdir, "multi.vcf")
+        _create_multiallelic_vcf(
+            vcf_path, chrom, 51, "A", ("G", "T"), gt=(0, 2),
+        )
+        variants = _parse_vcf_variants(vcf_path, proband_id="HG002")
+        assert len(variants) == 1
+        assert variants[0]["alt"] == "T"
+
+    def test_proband_het_non_ref(self, tmpdir, caplog):
+        """When proband is 1/2, first non-ref ALT (alts[0]) selected and warning logged."""
+        chrom = "chr1"
+        vcf_path = os.path.join(tmpdir, "multi.vcf")
+        _create_multiallelic_vcf(
+            vcf_path, chrom, 51, "A", ("G", "T"), gt=(1, 2),
+        )
+        with caplog.at_level(logging.WARNING):
+            variants = _parse_vcf_variants(vcf_path, proband_id="HG002")
+        assert len(variants) == 1
+        assert variants[0]["alt"] == "G"
+        assert any("het non-ref" in m for m in caplog.messages)
+
+    def test_no_proband_id_fallback(self, tmpdir, caplog):
+        """Without proband_id, first ALT is used and warning is logged."""
+        chrom = "chr1"
+        vcf_path = os.path.join(tmpdir, "multi.vcf")
+        _create_multiallelic_vcf(
+            vcf_path, chrom, 51, "A", ("G", "T"), gt=(0, 2),
+        )
+        with caplog.at_level(logging.WARNING):
+            variants = _parse_vcf_variants(vcf_path, proband_id=None)
+        assert len(variants) == 1
+        assert variants[0]["alt"] == "G"
+        assert any("only the first ALT" in m for m in caplog.messages)
+
+    def test_proband_hom_ref_fallback(self, tmpdir, caplog):
+        """When proband is 0/0, fall back to alts[0] with warning."""
+        chrom = "chr1"
+        vcf_path = os.path.join(tmpdir, "multi.vcf")
+        _create_multiallelic_vcf(
+            vcf_path, chrom, 51, "A", ("G", "T"), gt=(0, 0),
+        )
+        with caplog.at_level(logging.WARNING):
+            variants = _parse_vcf_variants(vcf_path, proband_id="HG002")
+        assert len(variants) == 1
+        assert variants[0]["alt"] == "G"
+        assert any("only the first ALT" in m for m in caplog.messages)
+
+    def test_proband_not_in_vcf_fallback(self, tmpdir, caplog):
+        """When proband_id doesn't match a VCF sample, fall back to alts[0]."""
+        chrom = "chr1"
+        vcf_path = os.path.join(tmpdir, "multi.vcf")
+        _create_multiallelic_vcf(
+            vcf_path, chrom, 51, "A", ("G", "T"), gt=(0, 2),
+        )
+        with caplog.at_level(logging.WARNING):
+            variants = _parse_vcf_variants(
+                vcf_path, proband_id="NONEXISTENT",
+            )
+        assert len(variants) == 1
+        assert variants[0]["alt"] == "G"
+        assert any("only the first ALT" in m for m in caplog.messages)
+
+    def test_single_alt_no_change(self, tmpdir):
+        """Single-ALT records should be unaffected by proband_id."""
+        chrom = "chr1"
+        vcf_path = os.path.join(tmpdir, "single.vcf")
+        _create_vcf(vcf_path, chrom, [(51, "A", "G")])
+        variants = _parse_vcf_variants(vcf_path, proband_id="HG002")
+        assert len(variants) == 1
+        assert variants[0]["alt"] == "G"
+
+
+class TestMultiallelicPipelineIntegration:
+    """Integration tests for multiallelic variant handling."""
+
+    @pytest.fixture()
+    def tmpdir(self, tmp_path):
+        return str(tmp_path)
+
+    def test_multiallelic_proband_alt2(self, tmpdir):
+        """Multiallelic record where proband carries ALT2 (0/2).
+
+        The pipeline should select the second ALT for evaluation.
+        """
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        var_pos_0 = 50
+        ref_base = ref_seq[var_pos_0]
+        alt1 = "G" if ref_base != "G" else "T"
+        alt2 = "T" if ref_base != "T" else "C"
+
+        # Child read carries alt2
+        child_seq = list(ref_seq[40:80])
+        child_seq[10] = alt2
+        child_seq = "".join(child_seq)
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(child_bam, ref_fa, chrom,
+                     [("read1", 40, child_seq, None)])
+
+        # Parents match reference
+        parent_seq = ref_seq[40:80]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom,
+                     [("mread1", 40, parent_seq, None)])
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(father_bam, ref_fa, chrom,
+                     [("fread1", 40, parent_seq, None)])
+
+        # Create multiallelic VCF with GT 0/2 (proband carries alt2)
+        in_vcf = os.path.join(tmpdir, "input.vcf")
+        _create_multiallelic_vcf(
+            in_vcf, chrom, var_pos_0 + 1, ref_base, (alt1, alt2), gt=(0, 2),
+        )
+
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
+        args = parse_args([
+            "--child", child_bam,
+            "--mother", mother_bam,
+            "--father", father_bam,
+            "--ref-fasta", ref_fa,
+            "--vcf", in_vcf,
+            "--output", out_vcf,
+            "--kmer-size", "5",
+            "--proband-id", "HG002",
+        ])
+        run_pipeline(args)
+
+        vcf_out = pysam.VariantFile(out_vcf)
+        records = list(vcf_out)
+        assert len(records) == 1
+        # Pipeline should have selected alt2 based on proband GT (0/2)
+        # and the child read carries alt2 → DKA should be > 0
+        assert records[0].samples["HG002"]["DKA"] > 0
+        vcf_out.close()
+
+    def test_multiallelic_no_proband_id(self, tmpdir):
+        """Without --proband-id, first ALT is used (existing behaviour)."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+
+        var_pos_0 = 50
+        ref_base = ref_seq[var_pos_0]
+        alt1 = "G" if ref_base != "G" else "T"
+        alt2 = "T" if ref_base != "T" else "C"
+
+        # Child read carries alt1
+        child_seq = list(ref_seq[40:80])
+        child_seq[10] = alt1
+        child_seq = "".join(child_seq)
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam(child_bam, ref_fa, chrom,
+                     [("read1", 40, child_seq, None)])
+
+        # Parents match reference
+        parent_seq = ref_seq[40:80]
+        mother_bam = os.path.join(tmpdir, "mother.bam")
+        _create_bam(mother_bam, ref_fa, chrom,
+                     [("mread1", 40, parent_seq, None)])
+        father_bam = os.path.join(tmpdir, "father.bam")
+        _create_bam(father_bam, ref_fa, chrom,
+                     [("fread1", 40, parent_seq, None)])
+
+        # Create multiallelic VCF — no proband_id so GT not checked
+        in_vcf = os.path.join(tmpdir, "input.vcf")
+        _create_multiallelic_vcf(
+            in_vcf, chrom, var_pos_0 + 1, ref_base, (alt1, alt2), gt=(0, 1),
+        )
+
+        out_vcf = os.path.join(tmpdir, "output.vcf.gz")
+        args = parse_args([
+            "--child", child_bam,
+            "--mother", mother_bam,
+            "--father", father_bam,
+            "--ref-fasta", ref_fa,
+            "--vcf", in_vcf,
+            "--output", out_vcf,
+            "--kmer-size", "5",
+        ])
+        run_pipeline(args)
+
+        vcf_out = pysam.VariantFile(out_vcf)
+        records = list(vcf_out)
+        assert len(records) == 1
+        # Without proband_id, annotations are INFO fields; first ALT used
+        assert records[0].info["DKA"] > 0
         vcf_out.close()
 
 

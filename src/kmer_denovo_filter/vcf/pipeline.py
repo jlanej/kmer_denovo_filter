@@ -655,14 +655,7 @@ def _collect_child_kmers(
         chrom = var["chrom"]
         pos = var["pos"]  # 0-based
         ref = var["ref"]
-        alts = var["alts"]
-        alt = alts[0] if alts else None
-        if alts and len(alts) > 1:
-            logger.warning(
-                "Multiallelic variant %s:%d has %d ALT alleles; "
-                "only the first ALT (%s) will be evaluated",
-                chrom, pos + 1, len(alts), alt,
-            )
+        alt = var["alt"]
         alt_str = alt if alt is not None else "."
         var_key = f"{chrom}:{pos}:{ref}:{alt_str}"
         if alt is not None and _is_symbolic(alt):
@@ -734,19 +727,83 @@ def _collect_child_kmers(
 
 
 
-def _parse_vcf_variants(vcf_path):
+def _select_alt_from_gt(alts, gt):
+    """Select the ALT allele to evaluate based on a genotype tuple.
+
+    *gt* is a pysam GT tuple, e.g. ``(0, 1)``, ``(1, 2)``, or ``None``.
+    Returns ``(selected_alt, alt_indices)`` where *alt_indices* are the
+    sorted non-ref allele indices present in *gt*.  If *gt* is missing or
+    contains no non-ref alleles, returns ``(alts[0], [])``.  When *alts*
+    is empty or ``None``, returns ``(None, [])`` in fallback cases.
+    """
+    if gt is None:
+        return alts[0] if alts else None, []
+    alt_indices = sorted(set(i for i in gt if i is not None and i > 0))
+    if not alt_indices:
+        return alts[0] if alts else None, []
+    return alts[alt_indices[0] - 1], alt_indices
+
+
+def _parse_vcf_variants(vcf_path, proband_id=None):
     """Parse VCF file and return a list of variant dicts.
 
-    Each dict contains chrom, pos (0-based), ref, alts, and id.
+    Each dict contains chrom, pos (0-based), ref, alts, alt, and id.
+
+    When *proband_id* is provided and matches a sample in the VCF header,
+    the proband's genotype is used to select which ALT allele to evaluate
+    for multiallelic records.  If the proband carries multiple non-ref
+    alleles (het non-ref, e.g. ``1/2``), the first non-ref allele is used.
     """
     vcf = pysam.VariantFile(vcf_path)
+    proband_in_vcf = (
+        proband_id is not None
+        and proband_id in list(vcf.header.samples)
+    )
     variants = []
     for rec in vcf:
+        alts = rec.alts
+        alt = alts[0] if alts else None
+
+        if alts and len(alts) > 1:
+            if proband_in_vcf:
+                gt = rec.samples[proband_id]["GT"]
+                alt, alt_indices = _select_alt_from_gt(alts, gt)
+                if len(alt_indices) > 1:
+                    gt_str = "/".join(
+                        str(i) if i is not None else "." for i in gt
+                    )
+                    logger.warning(
+                        "Multiallelic variant %s:%d — proband is het "
+                        "non-ref (%s); only the first non-ref ALT (%s) "
+                        "will be evaluated",
+                        rec.chrom, rec.pos, gt_str, alt,
+                    )
+                elif alt_indices:
+                    logger.info(
+                        "Multiallelic variant %s:%d — using proband "
+                        "genotype-informed ALT (%s) for evaluation",
+                        rec.chrom, rec.pos, alt,
+                    )
+                else:
+                    # Proband is hom-ref or GT is missing; fall back
+                    logger.warning(
+                        "Multiallelic variant %s:%d has %d ALT alleles; "
+                        "only the first ALT (%s) will be evaluated",
+                        rec.chrom, rec.pos, len(alts), alt,
+                    )
+            else:
+                logger.warning(
+                    "Multiallelic variant %s:%d has %d ALT alleles; "
+                    "only the first ALT (%s) will be evaluated",
+                    rec.chrom, rec.pos, len(alts), alt,
+                )
+
         variants.append({
             "chrom": rec.chrom,
             "pos": rec.start,  # 0-based
             "ref": rec.ref,
             "alts": rec.alts,
+            "alt": alt,
             "id": rec.id,
         })
     vcf.close()
@@ -1132,6 +1189,10 @@ def _write_annotated_vcf(input_vcf, output_vcf, annotations, proband_id=None):
 
     for rec in vcf_in:
         alt_str = rec.alts[0] if rec.alts else "."
+        if use_format and rec.alts and len(rec.alts) > 1:
+            gt = rec.samples[proband_id]["GT"]
+            selected, _ = _select_alt_from_gt(rec.alts, gt)
+            alt_str = selected if selected is not None else "."
         var_key = f"{rec.chrom}:{rec.start}:{rec.ref}:{alt_str}"
         if var_key in annotations:
             ann = annotations[var_key]
@@ -1451,7 +1512,7 @@ def run_pipeline(args):
     # ── Step 1: Parse VCF ──────────────────────────────────────────
     step_start = time.monotonic()
     logger.info("[Step 1/5] Parsing VCF: %s", args.vcf)
-    variants = _parse_vcf_variants(args.vcf)
+    variants = _parse_vcf_variants(args.vcf, proband_id=args.proband_id)
     logger.info(
         "[Step 1/5] Found %d candidate variants (%s)",
         len(variants), _format_elapsed(time.monotonic() - step_start),
@@ -1596,7 +1657,7 @@ def run_pipeline(args):
     )
 
     for idx, var in enumerate(variants, 1):
-        alt = var['alts'][0] if var['alts'] else "."
+        alt = var["alt"] if var["alt"] is not None else "."
         var_key = f"{var['chrom']}:{var['pos']}:{var['ref']}:{alt}"
         read_kmers_list = variant_read_kmers.get(var_key, [])
 
