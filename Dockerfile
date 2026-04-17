@@ -9,6 +9,8 @@ RUN apt-get update && \
         perl \
         zlib1g-dev \
         samtools \
+        bcftools \
+        tabix \
         jellyfish \
         wget \
     && git clone --depth 1 --branch "${KRAKEN2_VERSION}" \
@@ -22,6 +24,7 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src/ src/
 COPY scripts/ scripts/
+COPY examples/ examples/
 
 RUN pip install --no-cache-dir .
 

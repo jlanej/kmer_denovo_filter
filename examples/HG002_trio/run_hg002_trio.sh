@@ -63,26 +63,11 @@ module load bcftools
 module load aspera
 set -euo pipefail
 
-# ── Resolve script directory (for locating helper scripts) ──────────────────
-# Under SLURM, the batch script is staged to a spool directory that does NOT
-# contain the companion helper scripts.  If the helpers are not found next to
-# BASH_SOURCE[0], search several candidate locations in order:
-#   1. SLURM_SUBMIT_DIR        – the directory from which sbatch was invoked
-#   2. SLURM_SUBMIT_DIR/examples/HG002_trio – when submitted from the repo root
-#   3. PWD                     – current working directory (interactive / non-SLURM)
-#   4. PWD/examples/HG002_trio – when run interactively from the repo root
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ ! -f "${SCRIPT_DIR}/identify_putative_denovos.sh" ]]; then
-    for _cand in \
-        "${SLURM_SUBMIT_DIR:-}" \
-        "${SLURM_SUBMIT_DIR:+${SLURM_SUBMIT_DIR}/examples/HG002_trio}" \
-        "$PWD" \
-        "$PWD/examples/HG002_trio"; do
-        [[ -n "$_cand" && -f "${_cand}/identify_putative_denovos.sh" ]] \
-            && { SCRIPT_DIR="$_cand"; break; }
-    done
-    unset _cand
-fi
+# ── Constant: in-container path to helper scripts ───────────────────────────
+# All companion scripts are packaged in the Docker/Apptainer image at this
+# well-known path, guaranteeing they are available regardless of where this
+# script is staged (e.g. SLURM spool directories).
+CONTAINER_SCRIPT_DIR="/app/examples/HG002_trio"
 
 # ── Configurable defaults ───────────────────────────────────────────────────
 # All defaults can be overridden via command-line arguments or environment
@@ -402,6 +387,24 @@ else
     fi
 fi
 
+# ── Build bind mount list ────────────────────────────────────────────────────
+# Compute once here so it is available for all apptainer exec calls below.
+# Apptainer needs --bind for any path not in its default bind list.
+declare -A BIND_DIRS
+for d in "$(cd "$DATA_DIR" && pwd)" \
+         "$(cd "$RESULTS_DIR" && pwd)" \
+         "$(cd "$TMP_DIR" && pwd)"; do
+    BIND_DIRS["$d"]=1
+done
+if [[ -n "$REF_FASTA" && -f "$REF_FASTA" ]]; then
+    BIND_DIRS["$(cd "$(dirname "$REF_FASTA")" && pwd)"]=1
+fi
+
+BIND_ARGS=""
+for d in "${!BIND_DIRS[@]}"; do
+    BIND_ARGS="${BIND_ARGS:+${BIND_ARGS},}${d}"
+done
+
 # ============================================================================
 # STEP 3 – Identify putative de novo variants
 # ============================================================================
@@ -409,10 +412,6 @@ log ""
 log "Step 3: Identifying putative de novo variants ..."
 
 DENOVO_VCF="$RESULTS_DIR/putative_denovos.vcf.gz"
-
-HELPER_SCRIPT="${SCRIPT_DIR}/identify_putative_denovos.sh"
-[[ -f "$HELPER_SCRIPT" ]] \
-    || die "Helper script not found: $HELPER_SCRIPT"
 
 HELPER_ARGS=(
     --child-vcf  "$CHILD_VCF"
@@ -425,7 +424,10 @@ if [[ -n "$VARIANT_TYPES" ]]; then
     HELPER_ARGS+=(--variant-types "$VARIANT_TYPES")
 fi
 
-bash "$HELPER_SCRIPT" "${HELPER_ARGS[@]}"
+"$APPTAINER_CMD" exec \
+    --bind "$BIND_ARGS" \
+    "$SIF_FILE" \
+    bash "${CONTAINER_SCRIPT_DIR}/identify_putative_denovos.sh" "${HELPER_ARGS[@]}"
 
 DENOVO_COUNT=$(bcftools view -H "$DENOVO_VCF" | wc -l)
 log "  Putative de novo variants: $DENOVO_COUNT"
@@ -445,23 +447,6 @@ METRICS_JSON="$RESULTS_DIR/HG002_metrics.json"
 SUMMARY_TXT="$RESULTS_DIR/HG002_summary.txt"
 INFO_READS_BAM="$RESULTS_DIR/HG002_informative_reads.bam"
 REPORT_HTML="$RESULTS_DIR/HG002_report.html"
-
-# Build bind mount list: every unique parent directory that contains our files
-# Apptainer needs --bind for any path not in the default bind list.
-declare -A BIND_DIRS
-for d in "$(cd "$DATA_DIR" && pwd)" \
-         "$(cd "$RESULTS_DIR" && pwd)" \
-         "$(cd "$TMP_DIR" && pwd)"; do
-    BIND_DIRS["$d"]=1
-done
-if [[ -n "$REF_FASTA" && -f "$REF_FASTA" ]]; then
-    BIND_DIRS["$(cd "$(dirname "$REF_FASTA")" && pwd)"]=1
-fi
-
-BIND_ARGS=""
-for d in "${!BIND_DIRS[@]}"; do
-    BIND_ARGS="${BIND_ARGS:+${BIND_ARGS},}${d}"
-done
 
 # Build kmer-denovo command
 KMER_CMD=(
@@ -512,10 +497,6 @@ log "Step 5: Extracting mini alignment files (±${MINI_CRAM_PADDING} bp) ..."
 
 MINI_DIR="$RESULTS_DIR/mini_crams"
 
-EXTRACT_SCRIPT="${SCRIPT_DIR}/extract_mini_crams.sh"
-[[ -f "$EXTRACT_SCRIPT" ]] \
-    || die "Helper script not found: $EXTRACT_SCRIPT"
-
 EXTRACT_ARGS=(
     --vcf        "$DENOVO_VCF"
     --child-bam  "$CHILD_BAM"
@@ -529,7 +510,10 @@ if [[ -n "$REF_FASTA" ]]; then
     EXTRACT_ARGS+=(--ref-fasta "$REF_FASTA")
 fi
 
-bash "$EXTRACT_SCRIPT" "${EXTRACT_ARGS[@]}"
+"$APPTAINER_CMD" exec \
+    --bind "$BIND_ARGS" \
+    "$SIF_FILE" \
+    bash "${CONTAINER_SCRIPT_DIR}/extract_mini_crams.sh" "${EXTRACT_ARGS[@]}"
 
 # ============================================================================
 # STEP 6 – Create IGV variant review TSV
@@ -539,17 +523,16 @@ log "Step 6: Creating IGV variant review TSV ..."
 
 IGV_TSV="$RESULTS_DIR/HG002_igv_review.tsv"
 
-IGV_TSV_SCRIPT="${SCRIPT_DIR}/create_igv_review_tsv.sh"
-[[ -f "$IGV_TSV_SCRIPT" ]] \
-    || die "Helper script not found: $IGV_TSV_SCRIPT"
-
 # Use the annotated VCF as the source; the script handles bgzip/tabix if needed
-bash "$IGV_TSV_SCRIPT" \
-    --vcf         "$OUTPUT_VCF" \
-    --mini-dir    "$MINI_DIR"   \
-    --prefix      "HG002_trio"  \
-    --output      "$IGV_TSV"    \
-    --proband-id  "$PROBAND_ID"
+"$APPTAINER_CMD" exec \
+    --bind "$BIND_ARGS" \
+    "$SIF_FILE" \
+    bash "${CONTAINER_SCRIPT_DIR}/create_igv_review_tsv.sh" \
+        --vcf         "$OUTPUT_VCF" \
+        --mini-dir    "$MINI_DIR"   \
+        --prefix      "HG002_trio"  \
+        --output      "$IGV_TSV"    \
+        --proband-id  "$PROBAND_ID"
 
 # ============================================================================
 # STEP 7 – Report results
