@@ -64,7 +64,20 @@ module load aspera
 set -euo pipefail
 
 # ── Resolve script directory (for locating helper scripts) ──────────────────
+# Under SLURM, the batch script is staged to a spool directory that does NOT
+# contain the companion helper scripts.  If the helpers are not found next to
+# BASH_SOURCE[0], fall back to SLURM_SUBMIT_DIR (the directory from which
+# sbatch was invoked) and a common sub-path within it.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ ! -f "${SCRIPT_DIR}/identify_putative_denovos.sh" ]]; then
+    for _cand in \
+        "${SLURM_SUBMIT_DIR:-}" \
+        "${SLURM_SUBMIT_DIR:-}/examples/HG002_trio"; do
+        [[ -n "$_cand" && -f "${_cand}/identify_putative_denovos.sh" ]] \
+            && { SCRIPT_DIR="$_cand"; break; }
+    done
+    unset _cand
+fi
 
 # ── Configurable defaults ───────────────────────────────────────────────────
 # All defaults can be overridden via command-line arguments or environment
