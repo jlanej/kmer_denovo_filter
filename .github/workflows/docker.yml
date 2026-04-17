@@ -46,5 +46,60 @@ jobs:
         with:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
+          load: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Test helper scripts in image
+        run: |
+          IMAGE_TAG=$(echo "${{ steps.meta.outputs.tags }}" | head -1)
+
+          # Verify all helper scripts are present inside the image
+          for script in identify_putative_denovos.sh extract_mini_crams.sh create_igv_review_tsv.sh; do
+            docker run --rm --entrypoint /bin/bash "$IMAGE_TAG" \
+              -c "test -f '/app/examples/HG002_trio/${script}'" \
+              && echo "OK: /app/examples/HG002_trio/${script} exists" \
+              || { echo "FAIL: ${script} missing from image"; exit 1; }
+          done
+
+          # Verify bcftools is available in the image
+          docker run --rm --entrypoint bcftools "$IMAGE_TAG" --version | head -1
+
+          # Functional test: run identify_putative_denovos.sh entirely inside the
+          # container using synthetic trio VCFs created with the image's own tools.
+          #   child  : chr1:100 (de novo), chr1:200 (shared with father), chr1:300 (shared with mother)
+          #   father : chr1:200
+          #   mother : chr1:300
+          # Expected output: exactly 1 putative de novo at chr1:100
+          docker run --rm --entrypoint bash "$IMAGE_TAG" << 'INNERSCRIPT'
+          set -euo pipefail
+          TESTDIR=$(mktemp -d)
+          trap 'rm -rf "$TESTDIR"' EXIT
+
+          for sample in child father mother; do
+            case "$sample" in
+              child)  variants=$'chr1\t100\t.\tA\tT\t50\tPASS\t.\tGT\t0/1\nchr1\t200\t.\tC\tG\t50\tPASS\t.\tGT\t0/1\nchr1\t300\t.\tG\tA\t50\tPASS\t.\tGT\t0/1' ;;
+              father) variants=$'chr1\t200\t.\tC\tG\t50\tPASS\t.\tGT\t0/1' ;;
+              mother) variants=$'chr1\t300\t.\tG\tA\t50\tPASS\t.\tGT\t0/1' ;;
+            esac
+            printf '##fileformat=VCFv4.2\n##contig=<ID=chr1,length=248956422>\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t%s\n%s\n' \
+              "$sample" "$variants" \
+              | bgzip > "$TESTDIR/${sample}.vcf.gz"
+            tabix -p vcf "$TESTDIR/${sample}.vcf.gz"
+          done
+
+          bash /app/examples/HG002_trio/identify_putative_denovos.sh \
+            --child-vcf   "$TESTDIR/child.vcf.gz"  \
+            --father-vcf  "$TESTDIR/father.vcf.gz" \
+            --mother-vcf  "$TESTDIR/mother.vcf.gz" \
+            --output      "$TESTDIR/putative_denovos.vcf.gz"
+
+          N=$(bcftools view -H "$TESTDIR/putative_denovos.vcf.gz" | wc -l)
+          echo "Putative de novos: $N"
+          [ "$N" -eq 1 ] || { echo "FAIL: expected 1 de novo, got $N"; exit 1; }
+
+          POS=$(bcftools view -H "$TESTDIR/putative_denovos.vcf.gz" | awk '{print $2}')
+          [ "$POS" -eq 100 ] || { echo "FAIL: expected pos 100, got $POS"; exit 1; }
+
+          echo "identify_putative_denovos.sh in-container test: PASS"
+          INNERSCRIPT
