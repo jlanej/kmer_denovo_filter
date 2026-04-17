@@ -614,10 +614,16 @@ provenance is self-documenting.
 ## Notes & Limitations
 
 * **Multiallelic variants** – When a VCF record contains multiple ALT
-  alleles, only the **first ALT allele** is evaluated. DKA, DKA_DKT,
-  and the `_ALT` PKC metrics all reflect only the first ALT. A warning
-  is logged for each multiallelic record. To evaluate all alleles,
-  decompose the VCF beforehand (e.g. `bcftools norm -m-`).
+  alleles and `--proband-id` is provided (matching a sample in the VCF
+  header), the proband's genotype is used to select which ALT allele to
+  evaluate.  For example, if the record has ALTs `G,T` and the proband's
+  GT is `0/2`, the second ALT (`T`) will be evaluated.  If the proband
+  carries multiple non-ref alleles (het non-ref, e.g. `1/2`), only the
+  first non-ref allele is evaluated and a warning is logged — this is a
+  current limitation.  When `--proband-id` is not provided, the proband
+  is not in the VCF, or the proband's GT is homozygous reference / missing,
+  the first ALT allele is used as a fallback. To evaluate all alleles
+  independently, decompose the VCF beforehand (e.g. `bcftools norm -m-`).
 
 * **Fragment-based counting** – DKU, DKT, and DKA all count unique
   fragment names (read names). When both mates of a paired-end read span
