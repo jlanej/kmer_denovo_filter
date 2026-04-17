@@ -733,7 +733,8 @@ def _select_alt_from_gt(alts, gt):
     *gt* is a pysam GT tuple, e.g. ``(0, 1)``, ``(1, 2)``, or ``None``.
     Returns ``(selected_alt, alt_indices)`` where *alt_indices* are the
     sorted non-ref allele indices present in *gt*.  If *gt* is missing or
-    contains no non-ref alleles, returns ``(alts[0], [])``.
+    contains no non-ref alleles, returns ``(alts[0], [])``.  When *alts*
+    is empty or ``None``, returns ``(None, [])`` in fallback cases.
     """
     if gt is None:
         return alts[0] if alts else None, []

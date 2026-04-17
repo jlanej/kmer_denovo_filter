@@ -1353,7 +1353,7 @@ class TestSelectAltFromGt:
         assert indices == []
 
     def test_partial_missing_gt(self):
-        """GT with one None allele (./1) should select alts[0]."""
+        """GT with one None allele (./1) should select the non-ref allele."""
         alts = ("G", "T")
         alt, indices = _select_alt_from_gt(alts, (None, 1))
         assert alt == "G"
@@ -1386,7 +1386,7 @@ class TestParseVcfMultiallelic:
         assert variants[0]["alt"] == "T"
 
     def test_proband_het_non_ref(self, tmpdir, caplog):
-        """When proband is 1/2, first non-ref ALT selected and warning logged."""
+        """When proband is 1/2, first non-ref ALT (alts[0]) selected and warning logged."""
         chrom = "chr1"
         vcf_path = os.path.join(tmpdir, "multi.vcf")
         _create_multiallelic_vcf(
