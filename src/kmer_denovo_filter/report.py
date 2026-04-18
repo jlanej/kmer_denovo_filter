@@ -19,10 +19,13 @@ logger = logging.getLogger(__name__)
 # shown first; inherited variants are capped at the remainder up to this limit.
 _VARIANT_TABLE_MAX_ROWS = 100
 
-# Maximum rows in the evidence heatmap.  Heatmaps with many rows create a
-# canvas element that can exceed browser limits (~32 767 px height) and cause
-# the plot to silently fail.  DE_NOVO variants are kept first.
+# Maximum rows in the evidence heatmap.  Above this threshold the heatmap
+# switches to cluster-summary mode: k-means is run on all variants and one row
+# per cluster is shown (centroid values).  This scales to 100k+ variants.
 _HEATMAP_MAX_ROWS = 200
+
+# Number of k-means clusters used in cluster-summary heatmap mode.
+_HEATMAP_N_CLUSTERS = 8
 
 # Maximum data points in continuous scatter plots.  Beyond this the serialised
 # Plotly JSON becomes multi-megabyte and slows or prevents rendering.
@@ -58,6 +61,66 @@ def _downsample_variants(variants, max_points):
     step = max(1, len(inherited) // remaining)
     sampled_inherited = inherited[::step][:remaining]
     return denovo + sampled_inherited, True
+
+
+def _kmeans_cluster(z_matrix, n_clusters, max_iter=100):
+    """Lightweight k-means clustering using numpy (required by plotly).
+
+    Uses k-means++ seeding for reproducible, well-separated initial centres.
+    Returns a list of integer cluster labels with length ``len(z_matrix)``.
+    When numpy is unavailable falls back to evenly-spaced bucket assignment
+    so the heatmap always renders.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        # Fallback: assign rows to buckets by their position (no real clustering)
+        n = len(z_matrix)
+        step = max(1, n // n_clusters)
+        return [min(i // step, n_clusters - 1) for i in range(n)]
+
+    X = np.array(z_matrix, dtype=np.float64)
+    n_samples = len(X)
+
+    if n_samples <= n_clusters:
+        return list(range(n_samples))
+
+    # K-means++ seeding (fixed seed for reproducibility)
+    rng = np.random.RandomState(42)
+    center_indices = [int(rng.randint(n_samples))]
+    for _ in range(n_clusters - 1):
+        # Distance from each point to its nearest existing centre
+        sq_dists = np.min(
+            [np.sum((X - X[ci]) ** 2, axis=1) for ci in center_indices],
+            axis=0,
+        )
+        sq_dists = np.maximum(sq_dists, 0.0)
+        total = sq_dists.sum()
+        if total == 0:
+            center_indices.append(int(rng.randint(n_samples)))
+        else:
+            center_indices.append(int(rng.choice(n_samples, p=sq_dists / total)))
+
+    centers = X[center_indices].copy()
+    labels = np.zeros(n_samples, dtype=np.int32)
+
+    for _ in range(max_iter):
+        # Compute squared distances: shape (n_samples, n_clusters)
+        # Use einsum-free broadcast; for n=100k, k=8, f=8 this is ~50 MB
+        sq_dists = np.sum((X[:, None, :] - centers[None, :, :]) ** 2, axis=2)
+        new_labels = np.argmin(sq_dists, axis=1).astype(np.int32)
+
+        if np.array_equal(new_labels, labels):
+            break
+        labels = new_labels
+
+        # Update cluster centres
+        for k in range(n_clusters):
+            mask = labels == k
+            if mask.any():
+                centers[k] = X[mask].mean(axis=0)
+
+    return labels.tolist()
 
 
 # ---------------------------------------------------------------------------
@@ -248,13 +311,16 @@ def _get_plotly_bundle():
 # Plot generators (return self-contained div HTML strings)
 # ---------------------------------------------------------------------------
 
-def _plotly_div(fig, div_id):
+def _plotly_div(fig, div_id, config=None):
     """Return a self-contained ``<div>+<script>`` HTML snippet for a figure.
 
     Uses Plotly's own ``to_html(full_html=False, include_plotlyjs=False)``
     so that data is embedded directly as JS object literals (no JSON.parse
     step) and the correct Plotly.js API is used regardless of version.
     A fixed ``div_id`` is required for deterministic (idempotent) output.
+
+    Pass ``config={"staticPlot": True}`` to disable all browser-side
+    interactivity (hover, zoom, pan) for static summary plots.
     """
     import plotly.io as pio
     return pio.to_html(
@@ -262,7 +328,7 @@ def _plotly_div(fig, div_id):
         full_html=False,
         include_plotlyjs=False,
         div_id=div_id,
-        config={"responsive": True},
+        config=config if config is not None else {"responsive": True},
     )
 
 
@@ -484,23 +550,21 @@ def _make_dka_vs_dkt_scatter(variants, div_id="scatter-plot"):
 
 
 def _make_evidence_heatmap(variants, div_id="heatmap-plot"):
-    """Create a clustered heatmap of per-variant evidence fields.
+    """Evidence heatmap with automatic cluster-summary mode for large datasets.
 
-    Data is pre-processed before being sent to Plotly to keep the HTML size
-    manageable:
-    * The variant list is capped at ``_HEATMAP_MAX_ROWS`` (DE_NOVO first).
-    * Hover information is encoded as a compact 2-D float ``customdata``
-      matrix (one raw value per cell) rather than a 2-D string matrix.
-      This eliminates the O(rows × cols × label_length) string overhead that
-      caused multi-megabyte HTML for large datasets.
-    * Height is capped so the plot canvas never exceeds browser limits
-      (~32 767 px) which would silently prevent rendering.
+    **Individual mode** (≤ ``_HEATMAP_MAX_ROWS`` variants)
+        Shows one row per variant with compact ``customdata`` hover.
+
+    **Cluster-summary mode** (> ``_HEATMAP_MAX_ROWS`` variants)
+        Runs k-means (k = ``_HEATMAP_N_CLUSTERS``) on all variants using
+        the 8 z-scored evidence features.  One row per cluster is displayed
+        showing the centroid z-scores, sorted by DE_NOVO fraction (descending)
+        so the most de-novo-enriched cluster appears at the top.  Each row is
+        labelled with the cluster size and its DE_NOVO percentage.  The plot
+        is rendered as a static image (no hover/zoom) to minimise HTML size —
+        at 100k variants the entire cluster-summary section is < 50 KB.
     """
     import plotly.graph_objects as go
-
-    # --- 1. Cap the number of rows ------------------------------------------
-    used_variants, was_trimmed = _downsample_variants(variants, _HEATMAP_MAX_ROWS)
-    n_rows = len(used_variants)
 
     fields = [
         "dku", "dkt", "dka", "dku_dkt", "dka_dkt",
@@ -511,58 +575,129 @@ def _make_evidence_heatmap(variants, div_id="heatmap-plot"):
         "MAX_PKC", "AVG_PKC", "MIN_PKC",
     ]
     n_cols = len(fields)
-    labels = [v["label"] for v in used_variants]
+    n_total = len(variants)
 
-    # --- 2. Build raw matrix and Z-score normalise per column ---------------
-    raw = [[v[f] for f in fields] for v in used_variants]
-
-    z_data = [[0.0] * n_cols for _ in range(n_rows)]
+    # --- Z-score normalise per column over the full variant list -------------
+    raw_all = [[v[f] for f in fields] for v in variants]
+    z_all = [[0.0] * n_cols for _ in range(n_total)]
     for c in range(n_cols):
-        col_vals = [raw[r][c] for r in range(n_rows)]
+        col_vals = [raw_all[r][c] for r in range(n_total)]
         mean_val = stats.mean(col_vals) if col_vals else 0.0
         std_val = stats.pstdev(col_vals) if col_vals else 1.0
         if std_val == 0.0:
             std_val = 1.0
-        for r in range(n_rows):
-            z_data[r][c] = (raw[r][c] - mean_val) / std_val
+        for r in range(n_total):
+            z_all[r][c] = (raw_all[r][c] - mean_val) / std_val
 
-    # --- 3. Compact hover: use a float customdata matrix not a string matrix -
-    # Each heatmap cell gets its raw value via customdata[r][c].  The
-    # hovertemplate pulls %{y} (label) and %{x} (field) from the axis arrays —
-    # they are already stored once, not repeated N_cols / N_rows times.
-    title_text = "Per-Variant Evidence Heatmap (Z-score normalized)"
-    if was_trimmed:
-        title_text += (
-            f"<br><sup>Showing {n_rows} of {len(variants)} variants "
-            "(DE_NOVO first; see summary.txt for full data)</sup>"
+    if n_total > _HEATMAP_MAX_ROWS:
+        # ── Cluster-summary mode ─────────────────────────────────────────────
+        k = min(_HEATMAP_N_CLUSTERS, n_total)
+        cluster_ids = _kmeans_cluster(z_all, k)
+
+        # Aggregate per cluster
+        cluster_data = {}
+        for i, cl in enumerate(cluster_ids):
+            if cl not in cluster_data:
+                cluster_data[cl] = {"indices": [], "denovo": 0}
+            cluster_data[cl]["indices"].append(i)
+            if variants[i]["call"] == "DE_NOVO":
+                cluster_data[cl]["denovo"] += 1
+
+        # Sort clusters by DE_NOVO fraction descending
+        sorted_clusters = sorted(
+            cluster_data.items(),
+            key=lambda kv: kv[1]["denovo"] / len(kv[1]["indices"]),
+            reverse=True,
         )
 
-    fig = go.Figure(data=go.Heatmap(
-        z=z_data,
-        x=display_fields,
-        y=labels,
-        colorscale="RdBu_r",
-        zmid=0,
-        customdata=raw,
-        hovertemplate=(
-            "<b>%{y}</b><br>%{x}: %{customdata:.4g}"
-            "<br>Z-score: %{z:.2f}<extra></extra>"
-        ),
-        colorbar=dict(title="Z-score"),
-    ))
+        z_data = []
+        y_labels = []
+        hover_text = []
+        raw_centroids = []
+        for rank, (cl_id, info) in enumerate(sorted_clusters, start=1):
+            idx = info["indices"]
+            centroid_z = [
+                sum(z_all[i][c] for i in idx) / len(idx) for c in range(n_cols)
+            ]
+            centroid_raw = [
+                sum(raw_all[i][c] for i in idx) / len(idx) for c in range(n_cols)
+            ]
+            pct = 100.0 * info["denovo"] / len(idx)
+            z_data.append(centroid_z)
+            raw_centroids.append(centroid_raw)
+            y_labels.append(
+                f"Cluster {rank}  (n={len(idx):,}, {pct:.0f}% DE_NOVO)"
+            )
+            hover_text.append([
+                f"<b>Cluster {rank}</b><br>"
+                f"n={len(idx):,} variants, {pct:.0f}% DE_NOVO<br>"
+                f"{display_fields[c]}: {centroid_raw[c]:.3g} (centroid)<br>"
+                f"Z-score: {centroid_z[c]:.2f}"
+                for c in range(n_cols)
+            ])
 
-    # --- 4. Cap height to prevent browser canvas overflow -------------------
-    row_px = min(30, max(8, 2000 // max(1, n_rows)))
-    height = min(2000, max(400, row_px * n_rows + 100))
+        title_text = (
+            f"Per-Variant Evidence Heatmap — {n_total:,} variants summarised in "
+            f"{len(sorted_clusters)} k-means clusters (k={k})<br>"
+            f"<sup>Each row = cluster centroid; sorted by DE_NOVO fraction ↓</sup>"
+        )
+        is_cluster_mode = True
 
+    else:
+        # ── Individual-row mode ───────────────────────────────────────────────
+        z_data = z_all
+        raw_centroids = raw_all
+        y_labels = [v["label"] for v in variants]
+        hover_text = None
+        title_text = "Per-Variant Evidence Heatmap (Z-score normalized)"
+        is_cluster_mode = False
+
+    # Build heatmap trace
+    if is_cluster_mode:
+        # Cluster rows: compact hover strings (few rows → string cost is tiny)
+        heatmap = go.Heatmap(
+            z=z_data,
+            x=display_fields,
+            y=y_labels,
+            colorscale="RdBu_r",
+            zmid=0,
+            text=hover_text,
+            hoverinfo="text",
+            colorbar=dict(title="Z-score<br>(centroid)"),
+        )
+    else:
+        # Individual rows: float customdata avoids per-cell label duplication
+        heatmap = go.Heatmap(
+            z=z_data,
+            x=display_fields,
+            y=y_labels,
+            colorscale="RdBu_r",
+            zmid=0,
+            customdata=raw_centroids,
+            hovertemplate=(
+                "<b>%{y}</b><br>%{x}: %{customdata:.4g}"
+                "<br>Z-score: %{z:.2f}<extra></extra>"
+            ),
+            colorbar=dict(title="Z-score"),
+        )
+
+    n_rows_shown = len(z_data)
+    row_px = min(40, max(20, 400 // max(1, n_rows_shown)))
+    height = min(2000, max(400, row_px * n_rows_shown + 120))
+
+    fig = go.Figure(data=heatmap)
     fig.update_layout(
-        title=dict(text=title_text, font=dict(size=18)),
+        title=dict(text=title_text, font=dict(size=16 if is_cluster_mode else 18)),
         template="plotly_white",
         height=height,
-        margin=dict(t=80, b=40, l=250),
+        margin=dict(t=100 if is_cluster_mode else 80, b=40, l=300),
         yaxis=dict(autorange="reversed"),
     )
-    return _plotly_div(fig, div_id)
+
+    # Cluster-summary plots are static: disabling interactivity removes all
+    # browser-side event handler JS and keeps the HTML footprint small.
+    cfg = {"staticPlot": True} if is_cluster_mode else {"responsive": True}
+    return _plotly_div(fig, div_id, config=cfg)
 
 
 def _make_pkc_boxplot(variants, div_id="pkc-box-plot"):

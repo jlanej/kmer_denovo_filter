@@ -513,17 +513,17 @@ class TestDownsampleVariants:
 
 
 class TestHeatmapDataCap:
-    """Verify heatmap caps rows and uses compact hover data."""
+    """Verify heatmap cluster-summary mode for large datasets."""
 
-    def _make_variants(self, n):
+    def _make_variants(self, n, denovo_every=3):
         return [
             {
                 "label": f"chr1:{i} A>C",
-                "dku": i, "dkt": i + 1, "dka": i,
-                "dku_dkt": 0.5, "dka_dkt": 0.3,
+                "dku": i % 10, "dkt": i % 10 + 1, "dka": i % 10,
+                "dku_dkt": 0.5, "dka_dkt": 0.3 if i % denovo_every == 0 else 0.05,
                 "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0,
                 "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0,
-                "call": "DE_NOVO" if i % 3 == 0 else "inherited",
+                "call": "DE_NOVO" if i % denovo_every == 0 else "inherited",
                 "vtype": "SNV",
             }
             for i in range(n)
@@ -533,47 +533,81 @@ class TestHeatmapDataCap:
         from kmer_denovo_filter.report import _HEATMAP_MAX_ROWS
         assert _HEATMAP_MAX_ROWS == 200
 
+    def test_heatmap_n_clusters_constant_exported(self):
+        from kmer_denovo_filter.report import _HEATMAP_N_CLUSTERS
+        assert _HEATMAP_N_CLUSTERS == 8
+
     def test_heatmap_height_bounded(self):
         import re
         from kmer_denovo_filter.report import _make_evidence_heatmap
-        # Create more variants than the cap so the height limit is exercised
+        # Cluster-summary mode (>_HEATMAP_MAX_ROWS variants)
         variants = self._make_variants(300)
         div = _make_evidence_heatmap(variants)
-        # Extract the height value from the embedded JSON (Plotly serialises
-        # layout as {"height": <int>, ...})
         heights = [int(m) for m in re.findall(r'"height":\s*(\d+)', div)]
         assert heights, "No height found in Plotly div JSON"
         assert all(h <= 2000 for h in heights), (
             f"Plot height {max(heights)} exceeds 2000 px browser-safe limit"
         )
 
-    def test_heatmap_note_present_when_trimmed(self):
+    def test_cluster_mode_activates_above_threshold(self):
+        """For >_HEATMAP_MAX_ROWS variants the heatmap shows cluster summary."""
         from kmer_denovo_filter.report import (
             _make_evidence_heatmap,
             _HEATMAP_MAX_ROWS,
         )
-        n = _HEATMAP_MAX_ROWS + 50
-        variants = self._make_variants(n)
+        variants = self._make_variants(_HEATMAP_MAX_ROWS + 50)
         div = _make_evidence_heatmap(variants)
-        assert "Showing" in div
+        # Cluster mode shows "k-means" and "Cluster" labels
+        assert "k-means" in div
+        assert "Cluster" in div
+        # And shows the total variant count
+        assert str(len(variants)) in div or f"{len(variants):,}" in div
 
-    def test_heatmap_no_hover_text_string_matrix(self):
-        """The per-cell hover data must not contain repeated label strings."""
+    def test_cluster_mode_shows_denovo_fraction(self):
+        """Cluster rows must be annotated with their DE_NOVO percentage."""
+        from kmer_denovo_filter.report import (
+            _make_evidence_heatmap,
+            _HEATMAP_MAX_ROWS,
+        )
+        variants = self._make_variants(_HEATMAP_MAX_ROWS + 10)
+        div = _make_evidence_heatmap(variants)
+        assert "DE_NOVO" in div
+
+    def test_cluster_mode_is_static_plot(self):
+        """Cluster heatmap must use staticPlot to reduce HTML overhead."""
+        from kmer_denovo_filter.report import (
+            _make_evidence_heatmap,
+            _HEATMAP_MAX_ROWS,
+        )
+        variants = self._make_variants(_HEATMAP_MAX_ROWS + 10)
+        div = _make_evidence_heatmap(variants)
+        assert "staticPlot" in div
+
+    def test_individual_mode_below_threshold(self):
+        """For ≤_HEATMAP_MAX_ROWS variants the individual-row heatmap is used."""
         from kmer_denovo_filter.report import _make_evidence_heatmap
         variants = self._make_variants(20)
         div = _make_evidence_heatmap(variants)
-        # With the old approach the label appeared once per cell (8 fields),
-        # totalling 8+ occurrences per variant.  With the new customdata
-        # approach the label is stored only in the y-axis array (once per
-        # variant).  Plotly may also include it in the axis tick label JSON,
-        # so allow up to 2 occurrences per occurrence in the axis data.
-        # Concretely for "chr1:0 A>C": 1 occurrence in the y array + at most
-        # 1 in Plotly's layout ticktext = 2.  We allow ≤ 2 to be safe.
-        label = "chr1:0 A>C"
-        occurrences = div.count(label)
-        # Pre-fix value would be 8 (one per field column).
+        # Individual mode includes per-variant labels; Plotly encodes ">" as
+        # "\u003e" in its JSON, so check for the chromosome prefix instead
+        # of the full "chr1:0 A>C" string.
+        assert "chr1:0" in div
+        # And does not use staticPlot
+        assert "staticPlot" not in div
+
+    def test_heatmap_no_hover_text_string_matrix(self):
+        """In individual mode, per-cell hover must not repeat full labels."""
+        from kmer_denovo_filter.report import _make_evidence_heatmap
+        variants = self._make_variants(20)
+        div = _make_evidence_heatmap(variants)
+        # With compact customdata the label appears in the y-axis array
+        # (once per variant) but NOT repeated once per field column.
+        # Plotly encodes ">" as "\u003e"; check only the invariant prefix.
+        label_prefix = "chr1:0"
+        occurrences = div.count(label_prefix)
+        # Pre-fix: 8 occurrences (once per field). Post-fix: ≤ 2.
         assert occurrences <= 2, (
-            f"Label appears {occurrences} times (expected ≤ 2) — "
+            f"Label prefix appears {occurrences} times (expected ≤ 2) — "
             "hover text string matrix was not replaced with customdata"
         )
 
