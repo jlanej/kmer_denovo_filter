@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import statistics as stats
 
 logger = logging.getLogger(__name__)
 
@@ -496,7 +497,6 @@ def _make_evidence_heatmap(variants, div_id="heatmap-plot"):
       (~32 767 px) which would silently prevent rendering.
     """
     import plotly.graph_objects as go
-    import statistics as stats
 
     # --- 1. Cap the number of rows ------------------------------------------
     used_variants, was_trimmed = _downsample_variants(variants, _HEATMAP_MAX_ROWS)
@@ -638,10 +638,10 @@ def _make_pkc_vs_dka_dkt_scatter(variants, div_id="pkc-scatter-plot"):
         mode="markers",
         marker=dict(size=10, color=colors, line=dict(width=1, color="#333")),
         text=[v["label"] for v in used],
-        customdata=[[v["call"]] for v in used],
+        customdata=[v["call"] for v in used],
         hovertemplate=(
             "<b>%{text}</b><br>"
-            "Call: %{customdata[0]}<br>"
+            "Call: %{customdata}<br>"
             "DKA_DKT: %{x:.4f}<br>AVG_PKC_ALT: %{y:.1f}"
             "<extra></extra>"
         ),
