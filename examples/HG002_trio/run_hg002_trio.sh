@@ -88,6 +88,7 @@ REPORT_ONLY="${REPORT_ONLY:-0}"
 REF_FASTA="${REF_FASTA:-}"         # optional; required only for CRAM input
 VARIANT_TYPES="${VARIANT_TYPES:-}" # e.g. "snps" or "snps,indels"; empty = all
 PROBAND_ID="${PROBAND_ID:-HG002}"
+KRAKEN2_DB="${KRAKEN2_DB:-}"       # optional Kraken2 database path
 EXTRA_ARGS="${EXTRA_ARGS:-}"       # additional kmer-denovo arguments
 MINI_CRAM_PADDING="${MINI_CRAM_PADDING:-1000}"  # ±bp for mini CRAM extraction
 
@@ -153,6 +154,8 @@ Analysis:
   --variant-types TYPES   Comma-separated variant types to include in de novo
                           scan (e.g. "snps", "snps,indels"; default: all)
   --proband-id ID         Proband sample ID in VCF (default: HG002)
+  --kraken2-db PATH       Optional Kraken2 database path for non-human
+                          content annotations
   --extra-args "ARGS"     Additional arguments passed to kmer-denovo
   --mini-cram-padding N   Padding in bp for mini CRAM extraction (default: 1000)
 
@@ -198,6 +201,59 @@ find_aspera_key() {
         [[ -n "$p" && -f "$p" ]] && { echo "$p"; return 0; }
     done
     return 1
+}
+
+# has_required_kraken2_files – validate core Kraken2 DB artifacts
+has_required_kraken2_files() {
+    local db_dir="$1"
+    local req
+    for req in hash.k2d opts.k2d taxo.k2d; do
+        [[ -f "$db_dir/$req" ]] || return 1
+    done
+    return 0
+}
+
+# resolve_kraken2_db_dir – handle DB root or nested extracted subdirectory
+resolve_kraken2_db_dir() {
+    local db_path="$1"
+    local resolved=""
+    local candidate=""
+    local -a _db_candidates=()
+    local -a _matching_candidates=()
+
+    [[ -d "$db_path" ]] || die "Kraken2 database path is not a directory: $db_path"
+
+    if has_required_kraken2_files "$db_path"; then
+        (cd "$db_path" && pwd)
+        return 0
+    fi
+
+    mapfile -t _db_candidates < <(
+        find "$db_path" -mindepth 1 -maxdepth 2 -type f -name "hash.k2d" \
+            -printf '%h\n' | sort -u
+    )
+
+    for candidate in "${_db_candidates[@]}"; do
+        if has_required_kraken2_files "$candidate"; then
+            _matching_candidates+=("$candidate")
+        fi
+    done
+
+    if [[ ${#_matching_candidates[@]} -eq 1 ]]; then
+        resolved="${_matching_candidates[0]}"
+        (cd "$resolved" && pwd)
+        return 0
+    fi
+
+    if [[ ${#_matching_candidates[@]} -gt 1 ]]; then
+        log "Multiple Kraken2 database directories detected under: $db_path"
+        for candidate in "${_matching_candidates[@]}"; do
+            log "  - $candidate"
+        done
+        die "Please set --kraken2-db to the specific directory containing hash.k2d/opts.k2d/taxo.k2d"
+    fi
+
+    die "Could not find Kraken2 DB files (hash.k2d, opts.k2d, taxo.k2d) under: $db_path"
 }
 
 # download_file – idempotent download via Aspera with HTTPS/wget fallback
@@ -257,6 +313,7 @@ while [[ $# -gt 0 ]]; do
         --ref-fasta)        REF_FASTA="${2:-}";         shift 2 ;;
         --variant-types)    VARIANT_TYPES="${2:-}";     shift 2 ;;
         --proband-id)       PROBAND_ID="${2:-}";        shift 2 ;;
+        --kraken2-db)       KRAKEN2_DB="${2:-}";        shift 2 ;;
         --extra-args)       EXTRA_ARGS="${2:-}";        shift 2 ;;
         --mini-cram-padding) MINI_CRAM_PADDING="${2:-}"; shift 2 ;;
         -h|--help)          usage ;;
@@ -281,6 +338,7 @@ log "  Memory       : ${MEMORY_GB} GB"
 log "  K-mer size   : $KMER_SIZE"
 log "  Container    : $CONTAINER_URI"
 log "  Proband ID   : $PROBAND_ID"
+log "  Kraken2 DB   : ${KRAKEN2_DB:-"(disabled)"}"
 if [[ -n "${SLURM_JOB_ID:-}" ]]; then
     log "  SLURM job    : $SLURM_JOB_ID"
     log "  SLURM node   : ${SLURM_NODELIST:-unknown}"
@@ -312,6 +370,12 @@ if check_tool ascp 0; then
 else
     log "  Aspera            : not found; using HTTPS/wget fallback"
     check_tool wget
+fi
+
+RESOLVED_KRAKEN2_DB=""
+if [[ -n "$KRAKEN2_DB" ]]; then
+    RESOLVED_KRAKEN2_DB="$(resolve_kraken2_db_dir "$KRAKEN2_DB")"
+    log "  Kraken2 DB        : $RESOLVED_KRAKEN2_DB"
 fi
 
 # ── Create directories ─────────────────────────────────────────────────────
@@ -469,6 +533,9 @@ done
 if [[ -n "$REF_FASTA" && -f "$REF_FASTA" ]]; then
     BIND_DIRS["$(cd "$(dirname "$REF_FASTA")" && pwd)"]=1
 fi
+if [[ -n "$RESOLVED_KRAKEN2_DB" ]]; then
+    BIND_DIRS["$RESOLVED_KRAKEN2_DB"]=1
+fi
 
 BIND_ARGS=""
 for d in "${!BIND_DIRS[@]}"; do
@@ -539,6 +606,9 @@ KMER_CMD=(
 
 if [[ -n "$REF_FASTA" ]]; then
     KMER_CMD+=(--ref-fasta "$REF_FASTA")
+fi
+if [[ -n "$RESOLVED_KRAKEN2_DB" ]]; then
+    KMER_CMD+=(--kraken2-db "$RESOLVED_KRAKEN2_DB")
 fi
 
 # Append any extra user-supplied arguments
