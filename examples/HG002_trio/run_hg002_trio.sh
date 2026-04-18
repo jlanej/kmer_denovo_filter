@@ -362,9 +362,9 @@ if [[ "$REPORT_ONLY" -eq 1 ]]; then
         --vcf-summary   "$SUMMARY_TXT"
     )
     if [[ -f "$OUTPUT_VCF" || -f "${OUTPUT_VCF}.gz" ]]; then
-        local_vcf="$OUTPUT_VCF"
-        [[ -f "${OUTPUT_VCF}.gz" ]] && local_vcf="${OUTPUT_VCF}.gz"
-        REPORT_CMD+=(--vcf "$local_vcf")
+        report_vcf="$OUTPUT_VCF"
+        [[ -f "${OUTPUT_VCF}.gz" ]] && report_vcf="${OUTPUT_VCF}.gz"
+        REPORT_CMD+=(--vcf "$report_vcf")
     fi
 
     log "  Command: ${REPORT_CMD[*]}"

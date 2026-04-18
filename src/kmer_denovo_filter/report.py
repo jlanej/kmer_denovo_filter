@@ -817,6 +817,11 @@ def _make_threshold_sensitivity(variants, div_id="threshold-plot"):
     return _plotly_div(fig, div_id)
 
 
+# Pre-compiled regex for parsing alleles from variant labels.
+# Format: "<chrom>:<pos> <ref>><alt>"
+_VARIANT_LABEL_PATTERN = re.compile(r"\s+(\S+)>(\S+)$")
+
+
 # ---------------------------------------------------------------------------
 # New genomics-specific plot generators
 # ---------------------------------------------------------------------------
@@ -828,7 +833,7 @@ def _classify_variant_type(label):
     Label format: ``<chrom>:<pos> <ref>><alt>``
     Returns one of "SNV", "INS", "DEL", "MNV", or "Other".
     """
-    m = re.search(r"\s+(\S+)>(\S+)$", label)
+    m = _VARIANT_LABEL_PATTERN.search(label)
     if not m:
         return "Other"
     ref, alt = m.group(1), m.group(2)
@@ -920,8 +925,8 @@ def _make_chromosomal_distribution(variants, div_id="chrom-dist-plot"):
         except ValueError:
             return order.get(c, 99)
 
-    chrom_denovo: dict = {}
-    chrom_inherited: dict = {}
+    chrom_denovo = {}
+    chrom_inherited = {}
     for v in variants:
         # Label: "chr8:40003391 A>C"
         chrom_part = v["label"].split(":")[0]
