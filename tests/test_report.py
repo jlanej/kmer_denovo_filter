@@ -463,6 +463,110 @@ class TestGenerateReport:
             os.unlink(out)
 
 
+class TestDownsampleVariants:
+    """Unit tests for the _downsample_variants helper."""
+
+    def _make_variants(self, n_denovo, n_inherited):
+        variants = []
+        for i in range(n_denovo):
+            variants.append({"call": "DE_NOVO", "label": f"chr1:{i} A>C"})
+        for i in range(n_inherited):
+            variants.append({"call": "inherited", "label": f"chr2:{i} G>T"})
+        return variants
+
+    def test_no_downsampling_when_within_limit(self):
+        from kmer_denovo_filter.report import _downsample_variants
+        variants = self._make_variants(10, 10)
+        result, was_trimmed = _downsample_variants(variants, 100)
+        assert result is variants
+        assert not was_trimmed
+
+    def test_preserves_all_denovo_first(self):
+        from kmer_denovo_filter.report import _downsample_variants
+        variants = self._make_variants(50, 200)
+        result, was_trimmed = _downsample_variants(variants, 100)
+        assert was_trimmed
+        assert len(result) <= 100
+        denovo_in_result = [v for v in result if v["call"] == "DE_NOVO"]
+        assert len(denovo_in_result) == 50  # all DE_NOVO kept
+
+    def test_caps_total_when_denovo_exceeds_limit(self):
+        from kmer_denovo_filter.report import _downsample_variants
+        variants = self._make_variants(300, 100)
+        result, was_trimmed = _downsample_variants(variants, 200)
+        assert was_trimmed
+        assert len(result) <= 200
+        # Only DE_NOVO in result
+        assert all(v["call"] == "DE_NOVO" for v in result)
+
+    def test_exact_limit_not_downsampled(self):
+        from kmer_denovo_filter.report import _downsample_variants
+        variants = self._make_variants(5, 5)
+        result, was_trimmed = _downsample_variants(variants, 10)
+        assert not was_trimmed
+
+    def test_returns_same_object_when_no_trim(self):
+        from kmer_denovo_filter.report import _downsample_variants
+        variants = self._make_variants(3, 3)
+        result, was_trimmed = _downsample_variants(variants, 100)
+        assert result is variants
+
+
+class TestHeatmapDataCap:
+    """Verify heatmap caps rows and uses compact hover data."""
+
+    def _make_variants(self, n):
+        return [
+            {
+                "label": f"chr1:{i} A>C",
+                "dku": i, "dkt": i + 1, "dka": i,
+                "dku_dkt": 0.5, "dka_dkt": 0.3,
+                "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0,
+                "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0,
+                "call": "DE_NOVO" if i % 3 == 0 else "inherited",
+                "vtype": "SNV",
+            }
+            for i in range(n)
+        ]
+
+    def test_heatmap_row_cap_constant_exported(self):
+        from kmer_denovo_filter.report import _HEATMAP_MAX_ROWS
+        assert _HEATMAP_MAX_ROWS <= 500
+
+    def test_heatmap_height_bounded(self):
+        from kmer_denovo_filter.report import _make_evidence_heatmap
+        # Create more variants than the cap
+        variants = self._make_variants(300)
+        div = _make_evidence_heatmap(variants)
+        # The height embedded in the div JSON should be ≤ 2000
+        assert '"height": 2000' in div or '"height":2000' in div or \
+               any(f'"height": {h}' in div for h in range(400, 2001))
+
+    def test_heatmap_note_present_when_trimmed(self):
+        from kmer_denovo_filter.report import (
+            _make_evidence_heatmap,
+            _HEATMAP_MAX_ROWS,
+        )
+        n = _HEATMAP_MAX_ROWS + 50
+        variants = self._make_variants(n)
+        div = _make_evidence_heatmap(variants)
+        assert "Showing" in div
+
+    def test_heatmap_no_hover_text_string_matrix(self):
+        """The per-cell hover data must not contain repeated label strings."""
+        from kmer_denovo_filter.report import _make_evidence_heatmap
+        variants = self._make_variants(20)
+        div = _make_evidence_heatmap(variants)
+        # The label "chr1:0 A>C" should appear far fewer times than n_cells
+        # (it appears in y-axis labels once per variant, not n_cols times)
+        label = "chr1:0 A>C"
+        occurrences = div.count(label)
+        # Should appear in y-axis labels (once) not in per-cell text (8 times)
+        assert occurrences <= 3, (
+            f"Label repeated {occurrences} times — hover text matrix not removed"
+        )
+
+
 class TestClassifyVariantType:
     """Unit tests for variant type classifier."""
 

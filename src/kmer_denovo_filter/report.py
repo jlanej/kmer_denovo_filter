@@ -18,6 +18,46 @@ logger = logging.getLogger(__name__)
 # shown first; inherited variants are capped at the remainder up to this limit.
 _VARIANT_TABLE_MAX_ROWS = 100
 
+# Maximum rows in the evidence heatmap.  Heatmaps with many rows create a
+# canvas element that can exceed browser limits (~32 767 px height) and cause
+# the plot to silently fail.  DE_NOVO variants are kept first.
+_HEATMAP_MAX_ROWS = 200
+
+# Maximum data points in continuous scatter plots.  Beyond this the serialised
+# Plotly JSON becomes multi-megabyte and slows or prevents rendering.
+# DE_NOVO variants are always kept; inherited variants are uniformly sampled.
+_SCATTER_MAX_POINTS = 2000
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _downsample_variants(variants, max_points):
+    """Return at most *max_points* variants, keeping all DE_NOVO calls.
+
+    When the full list fits within *max_points* the original list is returned
+    unchanged (no copy).  Otherwise all DE_NOVO variants are kept and the
+    inherited variants are uniformly sub-sampled to fill the remaining quota.
+
+    Returns ``(sampled_variants, was_downsampled)`` so callers can annotate
+    plots when the dataset has been reduced.
+    """
+    if len(variants) <= max_points:
+        return variants, False
+
+    denovo = [v for v in variants if v["call"] == "DE_NOVO"]
+    inherited = [v for v in variants if v["call"] != "DE_NOVO"]
+
+    if len(denovo) >= max_points:
+        return denovo[:max_points], True
+
+    remaining = max_points - len(denovo)
+    step = max(1, len(inherited) // remaining)
+    sampled_inherited = inherited[::step][:remaining]
+    return denovo + sampled_inherited, True
+
 
 # ---------------------------------------------------------------------------
 # Data loaders
@@ -381,23 +421,29 @@ def _make_dka_dkt_histogram(variants, div_id="histogram-plot"):
 
 
 def _make_dka_vs_dkt_scatter(variants, div_id="scatter-plot"):
-    """Create a scatter plot of DKA vs DKT colored by DKA_DKT ratio."""
+    """Create a scatter plot of DKA vs DKT colored by DKA_DKT ratio.
+
+    The variant list is capped at ``_SCATTER_MAX_POINTS`` (DE_NOVO first) to
+    keep the serialised Plotly JSON compact and ensure reliable rendering.
+    """
     import plotly.graph_objects as go
+
+    used, was_trimmed = _downsample_variants(variants, _SCATTER_MAX_POINTS)
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=[v["dkt"] for v in variants],
-        y=[v["dka"] for v in variants],
+        x=[v["dkt"] for v in used],
+        y=[v["dka"] for v in used],
         mode="markers",
         marker=dict(
-            size=[max(6, min(30, v["dku"] * 3)) for v in variants],
-            color=[v["dka_dkt"] for v in variants],
+            size=[max(6, min(30, v["dku"] * 3)) for v in used],
+            color=[v["dka_dkt"] for v in used],
             colorscale="Viridis",
             colorbar=dict(title="DKA_DKT"),
             showscale=True,
             line=dict(width=1, color="#333"),
         ),
-        text=[v["label"] for v in variants],
+        text=[v["label"] for v in used],
         hovertemplate=(
             "<b>%{text}</b><br>"
             "DKT: %{x}<br>DKA: %{y}<br>"
@@ -406,7 +452,7 @@ def _make_dka_vs_dkt_scatter(variants, div_id="scatter-plot"):
             "Call: %{customdata[2]}"
             "<extra></extra>"
         ),
-        customdata=[[v["dku"], v["dka_dkt"], v["call"]] for v in variants],
+        customdata=[[v["dku"], v["dka_dkt"], v["call"]] for v in used],
     ))
 
     # Add DKA=10 threshold line (minimum high-quality evidence requirement)
@@ -415,9 +461,16 @@ def _make_dka_vs_dkt_scatter(variants, div_id="scatter-plot"):
                   annotation_position="right",
                   annotation_font=dict(size=10, color="#E45756"))
 
+    title_text = "DKA vs. DKT (size = DKU, color = DKA_DKT ratio)"
+    if was_trimmed:
+        title_text += (
+            f"<br><sup>Showing {len(used)} of {len(variants)} variants "
+            "(DE_NOVO first)</sup>"
+        )
+
     fig.update_layout(
         title=dict(
-            text="DKA vs. DKT (size = DKU, color = DKA_DKT ratio)",
+            text=title_text,
             font=dict(size=18),
         ),
         xaxis_title="DKT (Total Spanning Fragments)",
@@ -430,8 +483,24 @@ def _make_dka_vs_dkt_scatter(variants, div_id="scatter-plot"):
 
 
 def _make_evidence_heatmap(variants, div_id="heatmap-plot"):
-    """Create a clustered heatmap of per-variant evidence fields."""
+    """Create a clustered heatmap of per-variant evidence fields.
+
+    Data is pre-processed before being sent to Plotly to keep the HTML size
+    manageable:
+    * The variant list is capped at ``_HEATMAP_MAX_ROWS`` (DE_NOVO first).
+    * Hover information is encoded as a compact 2-D float ``customdata``
+      matrix (one raw value per cell) rather than a 2-D string matrix.
+      This eliminates the O(rows × cols × label_length) string overhead that
+      caused multi-megabyte HTML for large datasets.
+    * Height is capped so the plot canvas never exceeds browser limits
+      (~32 767 px) which would silently prevent rendering.
+    """
     import plotly.graph_objects as go
+    import statistics as stats
+
+    # --- 1. Cap the number of rows ------------------------------------------
+    used_variants, was_trimmed = _downsample_variants(variants, _HEATMAP_MAX_ROWS)
+    n_rows = len(used_variants)
 
     fields = [
         "dku", "dkt", "dka", "dku_dkt", "dka_dkt",
@@ -441,40 +510,32 @@ def _make_evidence_heatmap(variants, div_id="heatmap-plot"):
         "DKU", "DKT", "DKA", "DKU_DKT", "DKA_DKT",
         "MAX_PKC", "AVG_PKC", "MIN_PKC",
     ]
-    labels = [v["label"] for v in variants]
-
-    # Build raw data matrix
-    raw = []
-    for v in variants:
-        raw.append([v[f] for f in fields])
-
-    # Z-score normalization per column for visual comparability
-    import statistics as stats
     n_cols = len(fields)
-    n_rows = len(variants)
-    z_data = []
-    for r in range(n_rows):
-        z_data.append([0.0] * n_cols)
+    labels = [v["label"] for v in used_variants]
 
+    # --- 2. Build raw matrix and Z-score normalise per column ---------------
+    raw = [[v[f] for f in fields] for v in used_variants]
+
+    z_data = [[0.0] * n_cols for _ in range(n_rows)]
     for c in range(n_cols):
         col_vals = [raw[r][c] for r in range(n_rows)]
-        mean_val = stats.mean(col_vals) if col_vals else 0
-        std_val = stats.pstdev(col_vals) if col_vals else 1
-        if std_val == 0:
-            std_val = 1
+        mean_val = stats.mean(col_vals) if col_vals else 0.0
+        std_val = stats.pstdev(col_vals) if col_vals else 1.0
+        if std_val == 0.0:
+            std_val = 1.0
         for r in range(n_rows):
             z_data[r][c] = (raw[r][c] - mean_val) / std_val
 
-    # Build hover text with raw values
-    hover_text = []
-    for r in range(n_rows):
-        row_hover = []
-        for c in range(n_cols):
-            row_hover.append(
-                f"{labels[r]}<br>{display_fields[c]}: {raw[r][c]}"
-                f"<br>Z-score: {z_data[r][c]:.2f}"
-            )
-        hover_text.append(row_hover)
+    # --- 3. Compact hover: use a float customdata matrix not a string matrix -
+    # Each heatmap cell gets its raw value via customdata[r][c].  The
+    # hovertemplate pulls %{y} (label) and %{x} (field) from the axis arrays —
+    # they are already stored once, not repeated N_cols / N_rows times.
+    title_text = "Per-Variant Evidence Heatmap (Z-score normalized)"
+    if was_trimmed:
+        title_text += (
+            f"<br><sup>Showing {n_rows} of {len(variants)} variants "
+            "(DE_NOVO first; see summary.txt for full data)</sup>"
+        )
 
     fig = go.Figure(data=go.Heatmap(
         z=z_data,
@@ -482,18 +543,23 @@ def _make_evidence_heatmap(variants, div_id="heatmap-plot"):
         y=labels,
         colorscale="RdBu_r",
         zmid=0,
-        text=hover_text,
-        hoverinfo="text",
+        customdata=raw,
+        hovertemplate=(
+            "<b>%{y}</b><br>%{x}: %{customdata:.4g}"
+            "<br>Z-score: %{z:.2f}<extra></extra>"
+        ),
         colorbar=dict(title="Z-score"),
     ))
+
+    # --- 4. Cap height to prevent browser canvas overflow -------------------
+    row_px = min(30, max(8, 2000 // max(1, n_rows)))
+    height = min(2000, max(400, row_px * n_rows + 100))
+
     fig.update_layout(
-        title=dict(
-            text="Per-Variant Evidence Heatmap (Z-score normalized)",
-            font=dict(size=18),
-        ),
+        title=dict(text=title_text, font=dict(size=18)),
         template="plotly_white",
-        height=max(400, 30 * len(variants) + 100),
-        margin=dict(t=60, b=40, l=250),
+        height=height,
+        margin=dict(t=80, b=40, l=250),
         yaxis=dict(autorange="reversed"),
     )
     return _plotly_div(fig, div_id)
@@ -554,21 +620,28 @@ def _make_pkc_vs_dka_dkt_scatter(variants, div_id="pkc-scatter-plot"):
     avg_pkc_alt is non-zero because the ALT allele is present in at least
     one parent.  This demonstrates the null hypothesis (parental coverage
     gap) can be rejected when inherited variants show high avg_pkc_alt.
+
+    The variant list is capped at ``_SCATTER_MAX_POINTS`` to bound the
+    serialised data size.
     """
     import plotly.graph_objects as go
 
+    used, was_trimmed = _downsample_variants(variants, _SCATTER_MAX_POINTS)
+
     colors = ["#54A24B" if v["call"] == "DE_NOVO" else "#E45756"
-              for v in variants]
+              for v in used]
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=[v["dka_dkt"] for v in variants],
-        y=[v["avg_pkc_alt"] for v in variants],
+        x=[v["dka_dkt"] for v in used],
+        y=[v["avg_pkc_alt"] for v in used],
         mode="markers",
         marker=dict(size=10, color=colors, line=dict(width=1, color="#333")),
-        text=[f"{v['label']}<br>Call: {v['call']}" for v in variants],
+        text=[v["label"] for v in used],
+        customdata=[[v["call"]] for v in used],
         hovertemplate=(
             "<b>%{text}</b><br>"
+            "Call: %{customdata[0]}<br>"
             "DKA_DKT: %{x:.4f}<br>AVG_PKC_ALT: %{y:.1f}"
             "<extra></extra>"
         ),
@@ -580,11 +653,19 @@ def _make_pkc_vs_dka_dkt_scatter(variants, div_id="pkc-scatter-plot"):
         annotation_position="top right",
         annotation_font=dict(size=10, color="#666"),
     )
+
+    subtitle = (
+        "De novo (green) should cluster at low AVG_PKC_ALT; "
+        "inherited (red) at high AVG_PKC_ALT"
+    )
+    if was_trimmed:
+        subtitle += (
+            f" — showing {len(used)} of {len(variants)} variants (DE_NOVO first)"
+        )
+
     fig.update_layout(
         title=dict(
-            text="AVG_PKC_ALT vs. DKA_DKT Ratio<br>"
-                 "<sup>De novo (green) should cluster at low AVG_PKC_ALT; "
-                 "inherited (red) at high AVG_PKC_ALT</sup>",
+            text=f"AVG_PKC_ALT vs. DKA_DKT Ratio<br><sup>{subtitle}</sup>",
             font=dict(size=16),
         ),
         xaxis_title="DKA_DKT Ratio",
@@ -660,14 +741,33 @@ def _make_contamination_bar(variants, kraken2_data, div_id="contamination-plot")
 
 
 def _make_discovery_region_scatter(regions, div_id="disc-scatter-plot"):
-    """Create scatter plot of discovery regions: reads vs k-mers."""
+    """Create scatter plot of discovery regions: reads vs k-mers.
+
+    Capped at ``_SCATTER_MAX_POINTS`` total regions to bound serialised size.
+    """
     import plotly.graph_objects as go
 
     class_colors = {"SMALL": "#4C78A8", "AMBIGUOUS": "#F58518", "SV": "#E45756"}
 
+    # Cap total regions; SV regions are highest priority, then AMBIGUOUS, SMALL
+    used_regions = regions
+    was_trimmed = False
+    if len(regions) > _SCATTER_MAX_POINTS:
+        sv = [r for r in regions if r.get("class") == "SV"]
+        amb = [r for r in regions if r.get("class") == "AMBIGUOUS"]
+        small = [r for r in regions if r.get("class") == "SMALL"]
+        remaining = _SCATTER_MAX_POINTS
+        keep_sv = sv[:remaining]
+        remaining -= len(keep_sv)
+        keep_amb = amb[:remaining]
+        remaining -= len(keep_amb)
+        keep_small = small[:remaining]
+        used_regions = keep_sv + keep_amb + keep_small
+        was_trimmed = True
+
     fig = go.Figure()
     for cls in ["SMALL", "AMBIGUOUS", "SV"]:
-        cls_regions = [r for r in regions if r.get("class") == cls]
+        cls_regions = [r for r in used_regions if r.get("class") == cls]
         if not cls_regions:
             continue
         fig.add_trace(go.Scatter(
@@ -691,11 +791,14 @@ def _make_discovery_region_scatter(regions, div_id="disc-scatter-plot"):
             hovertemplate="%{text}<extra></extra>",
         ))
 
+    title_text = "Discovery Regions: Reads vs. Distinct K-mers"
+    if was_trimmed:
+        title_text += (
+            f"<br><sup>Showing {len(used_regions)} of {len(regions)} regions</sup>"
+        )
+
     fig.update_layout(
-        title=dict(
-            text="Discovery Regions: Reads vs. Distinct K-mers",
-            font=dict(size=18),
-        ),
+        title=dict(text=title_text, font=dict(size=18)),
         xaxis_title="Supporting Reads",
         yaxis_title="Distinct Proband-Unique K-mers",
         template="plotly_white",
