@@ -403,6 +403,61 @@ def discovery_main(argv=None):
     run_discovery_pipeline(args)
 
 
+def parse_report_args(argv=None):
+    """Parse arguments for the standalone report generator (``kmer-report``)."""
+    parser = argparse.ArgumentParser(
+        prog="kmer-report",
+        description=(
+            "Generate an interactive HTML report from kmer-denovo / "
+            "kmer-discovery output files.  Useful for regenerating a "
+            "report from existing pipeline outputs without re-running "
+            "the full pipeline."
+        ),
+    )
+    parser.add_argument(
+        "--output", "-o", required=True,
+        help="Output path for the HTML report.",
+    )
+    parser.add_argument(
+        "--vcf-metrics", default=None,
+        help="Path to VCF-mode metrics.json produced by kmer-denovo.",
+    )
+    parser.add_argument(
+        "--vcf-summary", default=None,
+        help="Path to VCF-mode summary.txt produced by kmer-denovo.",
+    )
+    parser.add_argument(
+        "--vcf", default=None,
+        help="Path to annotated VCF produced by kmer-denovo "
+             "(used for Kraken2 annotations if present).",
+    )
+    parser.add_argument(
+        "--discovery-metrics", default=None,
+        help="Path to discovery-mode metrics.json produced by kmer-discovery.",
+    )
+    parser.add_argument(
+        "--discovery-summary", default=None,
+        help="Path to discovery-mode summary.txt produced by kmer-discovery.",
+    )
+    return parser.parse_args(argv)
+
+
+def report_main(argv=None):
+    """Entry point for the standalone report generator (``kmer-report``)."""
+    from kmer_denovo_filter.report import generate_report
+
+    args = parse_report_args(argv)
+    result = generate_report(
+        output_path=args.output,
+        vcf_metrics_path=args.vcf_metrics,
+        vcf_summary_path=args.vcf_summary,
+        vcf_path=args.vcf,
+        discovery_metrics_path=args.discovery_metrics,
+        discovery_summary_path=args.discovery_summary,
+    )
+    print(f"Report written to: {result}")
+
+
 def main(argv=None):
     """Backward-compatible entry point that dispatches by mode."""
     from kmer_denovo_filter.vcf.pipeline import run_pipeline
