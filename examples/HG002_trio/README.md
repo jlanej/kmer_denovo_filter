@@ -120,6 +120,19 @@ bash examples/HG002_trio/run_hg002_trio.sh \
     --results-dir /scratch/$USER/hg002_results
 ```
 
+### Enable Kraken2 contamination annotations
+
+```bash
+# Download a Kraken2 DB once (outside the trio run)
+bash scripts/download_kraken2_db.sh --db /scratch/$USER/kraken2_db
+
+# Run the trio pipeline with Kraken2 classification enabled
+bash examples/HG002_trio/run_hg002_trio.sh \
+    --data-dir /scratch/$USER/hg002_data \
+    --results-dir /scratch/$USER/hg002_results \
+    --kraken2-db /scratch/$USER/kraken2_db
+```
+
 ## Prerequisites
 
 | Tool       | Version | Notes                                         |
@@ -185,6 +198,7 @@ If Aspera is not available, the script falls back to `wget` over HTTPS.
 | `--ref-fasta`     | –       | Reference FASTA (required for CRAM input)        |
 | `--variant-types` | all     | Variant types for de novo scan (e.g. `snps`)     |
 | `--proband-id`    | `HG002` | Proband sample ID in the VCF                     |
+| `--kraken2-db`    | –       | Optional Kraken2 DB directory for non-human fraction annotations; supports DB root or a parent directory containing one extracted DB subdirectory |
 | `--extra-args`    | –       | Additional arguments passed to `kmer-denovo`     |
 | `--mini-cram-padding` | 1000 | Padding in bp for mini CRAM extraction (±bp)  |
 
