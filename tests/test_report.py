@@ -7,6 +7,7 @@ import tempfile
 import pytest
 
 from kmer_denovo_filter.report import (
+    _classify_variant_type,
     _load_metrics,
     _load_summary_counts,
     _load_summary_variants,
@@ -192,6 +193,7 @@ class TestGenerateReport:
             # Check all major sections are present
             assert "Executive Summary" in html
             assert "K-mer Filtering Funnel" in html
+            assert "Variant Breakdown" in html
             assert "DKA/DKT Ratio Distribution" in html
             assert "Per-Variant Evidence Heatmap" in html
             assert "Parental K-mer Count" in html
@@ -204,7 +206,7 @@ class TestGenerateReport:
             os.unlink(out)
 
     def test_report_is_self_contained_html(self):
-        """Report should be valid HTML with embedded Plotly JSON."""
+        """Report should be valid self-contained HTML with inline Plotly."""
         with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as fh:
             out = fh.name
         try:
@@ -222,6 +224,9 @@ class TestGenerateReport:
             assert html.startswith("<!DOCTYPE html>")
             assert "</html>" in html
             assert "plotly" in html.lower()
+            # Plotly should be inline (no CDN script tag) for offline rendering
+            assert '<script src="https://cdn.plot.ly' not in html
+            assert "Plotly.newPlot" in html
         finally:
             os.unlink(out)
 
@@ -372,3 +377,140 @@ class TestGenerateReport:
             assert "Found in Parents" in html
         finally:
             os.unlink(out)
+
+    def test_variant_type_breakdown_present(self):
+        """Variant type breakdown plot must appear when variants are present."""
+        with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as fh:
+            out = fh.name
+        try:
+            generate_report(
+                output_path=out,
+                vcf_metrics_path=os.path.join(
+                    EXAMPLE_OUTPUT_DIR, "metrics.json",
+                ),
+                vcf_summary_path=os.path.join(
+                    EXAMPLE_OUTPUT_DIR, "summary.txt",
+                ),
+            )
+            with open(out) as fh:
+                html = fh.read()
+            assert "Variant Breakdown" in html
+            assert "Variant Type Breakdown" in html
+        finally:
+            os.unlink(out)
+
+    def test_chromosomal_distribution_present(self):
+        """Chromosomal distribution plot must appear when variants are present."""
+        with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as fh:
+            out = fh.name
+        try:
+            generate_report(
+                output_path=out,
+                vcf_metrics_path=os.path.join(
+                    EXAMPLE_OUTPUT_DIR, "metrics.json",
+                ),
+                vcf_summary_path=os.path.join(
+                    EXAMPLE_OUTPUT_DIR, "summary.txt",
+                ),
+            )
+            with open(out) as fh:
+                html = fh.read()
+            assert "Chromosomal Distribution" in html
+        finally:
+            os.unlink(out)
+
+    def test_variant_table_limited_to_max_rows(self):
+        """Variant table must not embed all variants when count exceeds limit."""
+        from kmer_denovo_filter.report import _VARIANT_TABLE_MAX_ROWS
+        with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as fh:
+            out = fh.name
+        try:
+            generate_report(
+                output_path=out,
+                vcf_metrics_path=os.path.join(
+                    EXAMPLE_OUTPUT_DIR, "metrics.json",
+                ),
+                vcf_summary_path=os.path.join(
+                    EXAMPLE_OUTPUT_DIR, "summary.txt",
+                ),
+            )
+            with open(out) as fh:
+                html = fh.read()
+            # The constant should be exported and used in the template
+            assert _VARIANT_TABLE_MAX_ROWS == 100
+        finally:
+            os.unlink(out)
+
+    def test_variant_table_has_type_column(self):
+        """Per-variant table must include a variant type column."""
+        with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as fh:
+            out = fh.name
+        try:
+            generate_report(
+                output_path=out,
+                vcf_metrics_path=os.path.join(
+                    EXAMPLE_OUTPUT_DIR, "metrics.json",
+                ),
+                vcf_summary_path=os.path.join(
+                    EXAMPLE_OUTPUT_DIR, "summary.txt",
+                ),
+            )
+            with open(out) as fh:
+                html = fh.read()
+            # "Type" column header should be present
+            assert "<th>Type</th>" in html
+        finally:
+            os.unlink(out)
+
+
+class TestClassifyVariantType:
+    """Unit tests for variant type classifier."""
+
+    def test_snv(self):
+        assert _classify_variant_type("chr1:1000 A>C") == "SNV"
+
+    def test_insertion(self):
+        assert _classify_variant_type("chr1:1000 A>ACGT") == "INS"
+
+    def test_deletion(self):
+        assert _classify_variant_type("chr1:1000 ACGT>A") == "DEL"
+
+    def test_mnv(self):
+        assert _classify_variant_type("chr1:1000 AC>GT") == "MNV"
+
+    def test_no_allele_returns_other(self):
+        assert _classify_variant_type("chr1:1000") == "Other"
+
+
+class TestReportCLI:
+    """Test the standalone kmer-report CLI entry point."""
+
+    def test_report_main_generates_html(self):
+        from kmer_denovo_filter.cli import report_main
+        with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as fh:
+            out = fh.name
+        try:
+            report_main([
+                "--output", out,
+                "--vcf-metrics", os.path.join(EXAMPLE_OUTPUT_DIR, "metrics.json"),
+                "--vcf-summary", os.path.join(EXAMPLE_OUTPUT_DIR, "summary.txt"),
+            ])
+            assert os.path.isfile(out)
+            with open(out) as fh:
+                html = fh.read()
+            assert "kmer-denovo" in html
+        finally:
+            os.unlink(out)
+
+    def test_parse_report_args(self):
+        from kmer_denovo_filter.cli import parse_report_args
+        args = parse_report_args([
+            "--output", "/tmp/report.html",
+            "--vcf-metrics", "/tmp/metrics.json",
+            "--vcf-summary", "/tmp/summary.txt",
+        ])
+        assert args.output == "/tmp/report.html"
+        assert args.vcf_metrics == "/tmp/metrics.json"
+        assert args.vcf_summary == "/tmp/summary.txt"
+        assert args.vcf is None
+        assert args.discovery_metrics is None

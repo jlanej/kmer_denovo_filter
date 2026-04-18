@@ -84,6 +84,7 @@ ASPERA_KEY="${ASPERA_KEY:-}"        # auto-discovered if empty
 ASPERA_MAX_RATE="${ASPERA_MAX_RATE:-500m}"
 SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-0}"
 FORCE_DOWNLOAD="${FORCE_DOWNLOAD:-0}"
+REPORT_ONLY="${REPORT_ONLY:-0}"
 REF_FASTA="${REF_FASTA:-}"         # optional; required only for CRAM input
 VARIANT_TYPES="${VARIANT_TYPES:-}" # e.g. "snps" or "snps,indels"; empty = all
 PROBAND_ID="${PROBAND_ID:-HG002}"
@@ -140,6 +141,12 @@ Download:
   --aspera-max-rate RATE  Aspera max transfer rate (default: 500m)
   --skip-download         Skip all downloads (use pre-existing files)
   --force-download        Force re-download even if files exist
+
+Report:
+  --report-only           Skip all pipeline steps and only regenerate the HTML
+                          report from existing output files in --results-dir.
+                          Requires a prior successful pipeline run.
+                          Equivalent to running kmer-report directly.
 
 Analysis:
   --ref-fasta PATH        Reference FASTA (required for CRAM; optional for BAM)
@@ -246,6 +253,7 @@ while [[ $# -gt 0 ]]; do
         --aspera-max-rate)  ASPERA_MAX_RATE="${2:-}";   shift 2 ;;
         --skip-download)    SKIP_DOWNLOAD=1;           shift ;;
         --force-download)   FORCE_DOWNLOAD=1;          shift ;;
+        --report-only)      REPORT_ONLY=1;             shift ;;
         --ref-fasta)        REF_FASTA="${2:-}";         shift 2 ;;
         --variant-types)    VARIANT_TYPES="${2:-}";     shift 2 ;;
         --proband-id)       PROBAND_ID="${2:-}";        shift 2 ;;
@@ -308,6 +316,68 @@ fi
 
 # ── Create directories ─────────────────────────────────────────────────────
 mkdir -p "$DATA_DIR/bams" "$DATA_DIR/vcfs" "$RESULTS_DIR" "$TMP_DIR" "$SIF_CACHE"
+
+# ============================================================================
+# REPORT-ONLY MODE – regenerate the HTML report from existing output files
+# ============================================================================
+if [[ "$REPORT_ONLY" -eq 1 ]]; then
+    log ""
+    log "Report-only mode: regenerating HTML report from existing outputs ..."
+    METRICS_JSON="$RESULTS_DIR/HG002_metrics.json"
+    SUMMARY_TXT="$RESULTS_DIR/HG002_summary.txt"
+    OUTPUT_VCF="$RESULTS_DIR/HG002_denovo_annotated.vcf"
+    REPORT_HTML="$RESULTS_DIR/HG002_report.html"
+
+    # Verify required files exist
+    [[ -f "$METRICS_JSON" ]] || die "Metrics file not found: $METRICS_JSON (run the full pipeline first)"
+    [[ -f "$SUMMARY_TXT"  ]] || die "Summary file not found: $SUMMARY_TXT (run the full pipeline first)"
+
+    # Prepare Apptainer container (pull if needed) so kmer-report is available
+    if [[ "$CONTAINER_URI" == *.sif ]]; then
+        SIF_FILE="$CONTAINER_URI"
+        [[ -f "$SIF_FILE" ]] || die "Container .sif not found: $SIF_FILE"
+    else
+        APPTAINER_CMD="$(find_apptainer)"
+        SIF_NAME="kmer_denovo_filter_${CONTAINER_URI//[:\/@]/_}.sif"
+        SIF_FILE="${SIF_CACHE}/${SIF_NAME}"
+        if [[ ! -f "$SIF_FILE" ]]; then
+            log "  Pulling container: $CONTAINER_URI"
+            "$APPTAINER_CMD" pull "$SIF_FILE" "$CONTAINER_URI" \
+                || die "Failed to pull container: $CONTAINER_URI"
+        fi
+    fi
+
+    APPTAINER_CMD="${APPTAINER_CMD:-$(find_apptainer)}"
+    declare -A BIND_DIRS_RO
+    BIND_DIRS_RO["$(cd "$RESULTS_DIR" && pwd)"]=1
+    BIND_ARGS_RO=""
+    for d in "${!BIND_DIRS_RO[@]}"; do
+        BIND_ARGS_RO="${BIND_ARGS_RO:+${BIND_ARGS_RO},}${d}"
+    done
+
+    REPORT_CMD=(
+        kmer-report
+        --output        "$REPORT_HTML"
+        --vcf-metrics   "$METRICS_JSON"
+        --vcf-summary   "$SUMMARY_TXT"
+    )
+    if [[ -f "$OUTPUT_VCF" || -f "${OUTPUT_VCF}.gz" ]]; then
+        local_vcf="$OUTPUT_VCF"
+        [[ -f "${OUTPUT_VCF}.gz" ]] && local_vcf="${OUTPUT_VCF}.gz"
+        REPORT_CMD+=(--vcf "$local_vcf")
+    fi
+
+    log "  Command: ${REPORT_CMD[*]}"
+    "$APPTAINER_CMD" exec \
+        --bind "$BIND_ARGS_RO" \
+        "$SIF_FILE" \
+        "${REPORT_CMD[@]}"
+
+    log ""
+    log "Report regenerated: $REPORT_HTML"
+    log "Done."
+    exit 0
+fi
 
 # ============================================================================
 # STEP 1 – Download GIAB trio data

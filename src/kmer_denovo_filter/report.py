@@ -10,8 +10,13 @@ k-mer de novo filtering strategy.
 import json
 import logging
 import os
+import re
 
 logger = logging.getLogger(__name__)
+
+# Maximum rows shown in the per-variant detail table.  All DE_NOVO calls are
+# shown first; inherited variants are capped at the remainder up to this limit.
+_VARIANT_TABLE_MAX_ROWS = 100
 
 
 # ---------------------------------------------------------------------------
@@ -184,15 +189,43 @@ def _load_discovery_dnm_evaluation(metrics_path):
 
 
 # ---------------------------------------------------------------------------
-# Plot generators (return Plotly JSON strings)
+# Helper: self-contained inline Plotly bundle
 # ---------------------------------------------------------------------------
 
-def _plotly_json(fig):
-    """Serialize a Plotly figure to a JSON string for embedding."""
-    return fig.to_json()
+def _get_plotly_bundle():
+    """Return the minified Plotly.js bundle for inline embedding.
+
+    Embedding Plotly inline makes the HTML report self-contained so it
+    renders correctly in offline/HPC environments and always uses the JS
+    version that matches the installed Python plotly package.
+    """
+    import plotly.offline as pyo
+    return pyo.get_plotlyjs()
 
 
-def _make_kmer_funnel_chart(metrics, mode="vcf"):
+# ---------------------------------------------------------------------------
+# Plot generators (return self-contained div HTML strings)
+# ---------------------------------------------------------------------------
+
+def _plotly_div(fig, div_id):
+    """Return a self-contained ``<div>+<script>`` HTML snippet for a figure.
+
+    Uses Plotly's own ``to_html(full_html=False, include_plotlyjs=False)``
+    so that data is embedded directly as JS object literals (no JSON.parse
+    step) and the correct Plotly.js API is used regardless of version.
+    A fixed ``div_id`` is required for deterministic (idempotent) output.
+    """
+    import plotly.io as pio
+    return pio.to_html(
+        fig,
+        full_html=False,
+        include_plotlyjs=False,
+        div_id=div_id,
+        config={"responsive": True},
+    )
+
+
+def _make_kmer_funnel_chart(metrics, mode="vcf", div_id="funnel-plot"):
     """Create a waterfall/bar chart showing the k-mer filtering cascade."""
     import plotly.graph_objects as go
 
@@ -249,10 +282,10 @@ def _make_kmer_funnel_chart(metrics, mode="vcf"):
                 font=dict(size=11, color="#666"),
             )
 
-    return _plotly_json(fig)
+    return _plotly_div(fig, div_id)
 
 
-def _make_sankey_diagram(metrics, mode="vcf"):
+def _make_sankey_diagram(metrics, mode="vcf", div_id="sankey-plot"):
     """Create a Sankey diagram showing the filtering flow."""
     import plotly.graph_objects as go
 
@@ -309,10 +342,10 @@ def _make_sankey_diagram(metrics, mode="vcf"):
         height=350,
         margin=dict(t=60, b=20),
     )
-    return _plotly_json(fig)
+    return _plotly_div(fig, div_id)
 
 
-def _make_dka_dkt_histogram(variants):
+def _make_dka_dkt_histogram(variants, div_id="histogram-plot"):
     """Create a histogram of DKA_DKT ratios with threshold marker."""
     import plotly.graph_objects as go
 
@@ -344,10 +377,10 @@ def _make_dka_dkt_histogram(variants):
         height=400,
         margin=dict(t=60, b=40),
     )
-    return _plotly_json(fig)
+    return _plotly_div(fig, div_id)
 
 
-def _make_dka_vs_dkt_scatter(variants):
+def _make_dka_vs_dkt_scatter(variants, div_id="scatter-plot"):
     """Create a scatter plot of DKA vs DKT colored by DKA_DKT ratio."""
     import plotly.graph_objects as go
 
@@ -393,10 +426,10 @@ def _make_dka_vs_dkt_scatter(variants):
         height=500,
         margin=dict(t=60, b=40),
     )
-    return _plotly_json(fig)
+    return _plotly_div(fig, div_id)
 
 
-def _make_evidence_heatmap(variants):
+def _make_evidence_heatmap(variants, div_id="heatmap-plot"):
     """Create a clustered heatmap of per-variant evidence fields."""
     import plotly.graph_objects as go
 
@@ -463,10 +496,10 @@ def _make_evidence_heatmap(variants):
         margin=dict(t=60, b=40, l=250),
         yaxis=dict(autorange="reversed"),
     )
-    return _plotly_json(fig)
+    return _plotly_div(fig, div_id)
 
 
-def _make_pkc_boxplot(variants):
+def _make_pkc_boxplot(variants, div_id="pkc-box-plot"):
     """Create box plots of ALT-specific PKC metrics by call type.
 
     Uses ALT-allele parental k-mer counts (PKC_ALT), not total PKC, because
@@ -509,10 +542,10 @@ def _make_pkc_boxplot(variants):
         margin=dict(t=60, b=40),
         showlegend=False,
     )
-    return _plotly_json(fig)
+    return _plotly_div(fig, div_id)
 
 
-def _make_pkc_vs_dka_dkt_scatter(variants):
+def _make_pkc_vs_dka_dkt_scatter(variants, div_id="pkc-scatter-plot"):
     """Create AVG_PKC_ALT vs DKA_DKT scatter plot.
 
     Uses ALT-allele parental k-mer count (avg_pkc_alt) on the y-axis.
@@ -560,10 +593,10 @@ def _make_pkc_vs_dka_dkt_scatter(variants):
         height=450,
         margin=dict(t=80, b=40),
     )
-    return _plotly_json(fig)
+    return _plotly_div(fig, div_id)
 
 
-def _make_contamination_bar(variants, kraken2_data):
+def _make_contamination_bar(variants, kraken2_data, div_id="contamination-plot"):
     """Create stacked bar chart of Kraken2 read classification fractions."""
     import plotly.graph_objects as go
 
@@ -623,10 +656,10 @@ def _make_contamination_bar(variants, kraken2_data):
         xaxis_tickangle=-45,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    return _plotly_json(fig)
+    return _plotly_div(fig, div_id)
 
 
-def _make_discovery_region_scatter(regions):
+def _make_discovery_region_scatter(regions, div_id="disc-scatter-plot"):
     """Create scatter plot of discovery regions: reads vs k-mers."""
     import plotly.graph_objects as go
 
@@ -669,10 +702,10 @@ def _make_discovery_region_scatter(regions):
         height=450,
         margin=dict(t=60, b=40),
     )
-    return _plotly_json(fig)
+    return _plotly_div(fig, div_id)
 
 
-def _make_discovery_size_histogram(regions):
+def _make_discovery_size_histogram(regions, div_id="disc-size-plot"):
     """Create histogram of discovery region sizes by class."""
     import plotly.graph_objects as go
 
@@ -702,10 +735,10 @@ def _make_discovery_size_histogram(regions):
         height=400,
         margin=dict(t=60, b=40),
     )
-    return _plotly_json(fig)
+    return _plotly_div(fig, div_id)
 
 
-def _make_sv_evidence_chart(regions):
+def _make_sv_evidence_chart(regions, div_id="sv-evidence-plot"):
     """Create grouped bar chart of SV evidence per region."""
     import plotly.graph_objects as go
 
@@ -743,10 +776,10 @@ def _make_sv_evidence_chart(regions):
         margin=dict(t=60, b=120),
         xaxis_tickangle=-45,
     )
-    return _plotly_json(fig)
+    return _plotly_div(fig, div_id)
 
 
-def _make_threshold_sensitivity(variants):
+def _make_threshold_sensitivity(variants, div_id="threshold-plot"):
     """Create threshold sensitivity plot: variants passing at each DKA_DKT."""
     import plotly.graph_objects as go
 
@@ -781,7 +814,157 @@ def _make_threshold_sensitivity(variants):
         height=400,
         margin=dict(t=60, b=40),
     )
-    return _plotly_json(fig)
+    return _plotly_div(fig, div_id)
+
+
+# ---------------------------------------------------------------------------
+# New genomics-specific plot generators
+# ---------------------------------------------------------------------------
+
+
+def _classify_variant_type(label):
+    """Classify a variant as SNV, INS, DEL, or MNV from its label string.
+
+    Label format: ``<chrom>:<pos> <ref>><alt>``
+    Returns one of "SNV", "INS", "DEL", "MNV", or "Other".
+    """
+    m = re.search(r"\s+(\S+)>(\S+)$", label)
+    if not m:
+        return "Other"
+    ref, alt = m.group(1), m.group(2)
+    if len(ref) == 1 and len(alt) == 1:
+        return "SNV"
+    if len(ref) < len(alt):
+        return "INS"
+    if len(ref) > len(alt):
+        return "DEL"
+    return "MNV"
+
+
+def _make_variant_type_breakdown(variants, div_id="variant-type-plot"):
+    """Create a grouped bar chart of variant types by call status.
+
+    Shows the count of SNVs, insertions, deletions, and MNVs for
+    DE_NOVO vs. inherited variants.  A genomics reviewer expects the
+    de novo SNV rate (~38/genome for Illumina WGS) to be consistent
+    with published trio studies.
+    """
+    import plotly.graph_objects as go
+
+    type_order = ["SNV", "INS", "DEL", "MNV", "Other"]
+    denovo_counts = {t: 0 for t in type_order}
+    inherited_counts = {t: 0 for t in type_order}
+
+    for v in variants:
+        vtype = _classify_variant_type(v["label"])
+        if v["call"] == "DE_NOVO":
+            denovo_counts[vtype] += 1
+        else:
+            inherited_counts[vtype] += 1
+
+    # Only include types that appear in the data
+    present_types = [t for t in type_order
+                     if denovo_counts[t] > 0 or inherited_counts[t] > 0]
+    if not present_types:
+        return None
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=present_types,
+        y=[denovo_counts[t] for t in present_types],
+        name="De Novo",
+        marker_color="#54A24B",
+        text=[denovo_counts[t] for t in present_types],
+        textposition="outside",
+    ))
+    fig.add_trace(go.Bar(
+        x=present_types,
+        y=[inherited_counts[t] for t in present_types],
+        name="Inherited / Unclear",
+        marker_color="#E45756",
+        text=[inherited_counts[t] for t in present_types],
+        textposition="outside",
+    ))
+    fig.update_layout(
+        barmode="group",
+        title=dict(
+            text="Variant Type Breakdown by Call Status",
+            font=dict(size=18),
+        ),
+        xaxis_title="Variant Type",
+        yaxis_title="Count",
+        template="plotly_white",
+        height=400,
+        margin=dict(t=60, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1),
+    )
+    return _plotly_div(fig, div_id)
+
+
+def _make_chromosomal_distribution(variants, div_id="chrom-dist-plot"):
+    """Create a stacked bar chart of variant counts per chromosome.
+
+    A genomics reviewer will check that de novo candidates are
+    distributed across chromosomes as expected rather than clustered
+    on a single chromosome (which may indicate a systematic error).
+    """
+    import plotly.graph_objects as go
+
+    # Build chromosome order: numeric 1-22, then X, Y, M, then rest
+    def _chrom_sort_key(chrom):
+        c = chrom.replace("chr", "").upper()
+        order = {"X": 23, "Y": 24, "M": 25, "MT": 25}
+        try:
+            return int(c)
+        except ValueError:
+            return order.get(c, 99)
+
+    chrom_denovo: dict = {}
+    chrom_inherited: dict = {}
+    for v in variants:
+        # Label: "chr8:40003391 A>C"
+        chrom_part = v["label"].split(":")[0]
+        if v["call"] == "DE_NOVO":
+            chrom_denovo[chrom_part] = chrom_denovo.get(chrom_part, 0) + 1
+        else:
+            chrom_inherited[chrom_part] = chrom_inherited.get(chrom_part, 0) + 1
+
+    all_chroms = sorted(
+        set(chrom_denovo) | set(chrom_inherited),
+        key=_chrom_sort_key,
+    )
+    if not all_chroms:
+        return None
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=all_chroms,
+        y=[chrom_denovo.get(c, 0) for c in all_chroms],
+        name="De Novo",
+        marker_color="#54A24B",
+    ))
+    fig.add_trace(go.Bar(
+        x=all_chroms,
+        y=[chrom_inherited.get(c, 0) for c in all_chroms],
+        name="Inherited / Unclear",
+        marker_color="#E45756",
+    ))
+    fig.update_layout(
+        barmode="stack",
+        title=dict(
+            text="Chromosomal Distribution of Candidate Variants",
+            font=dict(size=18),
+        ),
+        xaxis_title="Chromosome",
+        yaxis_title="Variant Count",
+        template="plotly_white",
+        height=400,
+        margin=dict(t=60, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1),
+    )
+    return _plotly_div(fig, div_id)
 
 
 # ---------------------------------------------------------------------------
@@ -795,7 +978,7 @@ _HTML_TEMPLATE = """\
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>kmer-denovo — Interactive Report</title>
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+<script>{{ plotly_bundle | safe }}</script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -936,16 +1119,16 @@ _HTML_TEMPLATE = """\
   {% endif %}
 </div>
 
-{% if sankey_json %}
+{% if sankey_div %}
 <div class="plot-container">
-  <div id="sankey-plot" class="plot-div"></div>
+  {{ sankey_div | safe }}
 </div>
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
      Section 2: K-mer Filtering Funnel
      ═══════════════════════════════════════════════════════════════════ -->
-{% if funnel_json %}
+{% if funnel_div %}
 <h2>2. K-mer Filtering Funnel</h2>
 <div class="section-rationale">
   <strong>Scientific rationale:</strong> A skeptic's first question is
@@ -955,15 +1138,41 @@ _HTML_TEMPLATE = """\
   violation rates).
 </div>
 <div class="plot-container">
-  <div id="funnel-plot" class="plot-div"></div>
+  {{ funnel_div | safe }}
 </div>
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 3: DKA/DKT Ratio Distribution
+     Section 3: Variant Type &amp; Chromosomal Breakdown
+     ═══════════════════════════════════════════════════════════════════ -->
+{% if variant_type_div or chrom_dist_div %}
+<h2>3. Variant Breakdown</h2>
+<div class="section-rationale">
+  <strong>Scientific rationale:</strong> A genomics reviewer will
+  immediately check whether the de novo call set has the expected
+  composition: ~38 SNVs and ~3–5 indels per WGS trio, distributed
+  across all autosomes.  Excess calls on one chromosome or an
+  unexpected type ratio are red flags for a systematic artefact.
+</div>
+
+{% if variant_type_div %}
+<div class="plot-container">
+  {{ variant_type_div | safe }}
+</div>
+{% endif %}
+
+{% if chrom_dist_div %}
+<div class="plot-container">
+  {{ chrom_dist_div | safe }}
+</div>
+{% endif %}
+{% endif %}
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     Section 4: DKA/DKT Ratio Distribution
      ═══════════════════════════════════════════════════════════════════ -->
 {% if variants %}
-<h2>3. DKA/DKT Ratio Distribution &amp; Threshold Sensitivity</h2>
+<h2>4. DKA/DKT Ratio Distribution &amp; Threshold Sensitivity</h2>
 <div class="section-rationale">
   <strong>Scientific rationale:</strong> The DKA_DKT ratio captures what
   fraction of spanning fragments carry child-unique allele-supporting
@@ -973,30 +1182,30 @@ _HTML_TEMPLATE = """\
   candidates.
 </div>
 
-{% if histogram_json %}
+{% if histogram_div %}
 <div class="plot-container">
-  <div id="histogram-plot" class="plot-div"></div>
+  {{ histogram_div | safe }}
 </div>
 {% endif %}
 
-{% if threshold_json %}
+{% if threshold_div %}
 <div class="plot-container">
-  <div id="threshold-plot" class="plot-div"></div>
+  {{ threshold_div | safe }}
 </div>
 {% endif %}
 
-{% if scatter_json %}
+{% if scatter_div %}
 <div class="plot-container">
-  <div id="scatter-plot" class="plot-div"></div>
+  {{ scatter_div | safe }}
 </div>
 {% endif %}
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 4: Per-Variant Evidence Heatmap
+     Section 5: Per-Variant Evidence Heatmap
      ═══════════════════════════════════════════════════════════════════ -->
-{% if heatmap_json %}
-<h2>4. Per-Variant Evidence Heatmap</h2>
+{% if heatmap_div %}
+<h2>5. Per-Variant Evidence Heatmap</h2>
 <div class="section-rationale">
   <strong>Scientific rationale:</strong> This is the genomics equivalent
   of a gene expression heatmap — it reveals variant groupings and outlier
@@ -1005,15 +1214,15 @@ _HTML_TEMPLATE = """\
   scales.
 </div>
 <div class="plot-container">
-  <div id="heatmap-plot" class="plot-div"></div>
+  {{ heatmap_div | safe }}
 </div>
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 5: Parental K-mer Count (PKC) Analysis
+     Section 6: Parental K-mer Count (PKC) Analysis
      ═══════════════════════════════════════════════════════════════════ -->
-{% if pkc_box_json %}
-<h2>5. Parental K-mer Count (PKC) Analysis</h2>
+{% if pkc_box_div %}
+<h2>6. Parental K-mer Count (PKC) Analysis</h2>
 <div class="section-rationale">
   <strong>Scientific rationale:</strong> If k-mers are absent from parents,
   is that a coverage gap or true absence?  We use <strong>ALT-allele</strong>
@@ -1028,21 +1237,21 @@ _HTML_TEMPLATE = """\
   variants regardless of de novo status.
 </div>
 <div class="plot-container">
-  <div id="pkc-box-plot" class="plot-div"></div>
+  {{ pkc_box_div | safe }}
 </div>
 
-{% if pkc_scatter_json %}
+{% if pkc_scatter_div %}
 <div class="plot-container">
-  <div id="pkc-scatter-plot" class="plot-div"></div>
+  {{ pkc_scatter_div | safe }}
 </div>
 {% endif %}
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 6: Non-Human Contamination Profile
+     Section 7: Non-Human Contamination Profile
      ═══════════════════════════════════════════════════════════════════ -->
-{% if contamination_json %}
-<h2>6. Non-Human Contamination Profile (Kraken2)</h2>
+{% if contamination_div %}
+<h2>7. Non-Human Contamination Profile (Kraken2)</h2>
 <div class="section-rationale">
   <strong>Scientific rationale:</strong> Microbial contamination is a
   known source of false-positive de novo calls.  The Kraken2
@@ -1051,15 +1260,15 @@ _HTML_TEMPLATE = """\
   contamination rather than true mutation.
 </div>
 <div class="plot-container">
-  <div id="contamination-plot" class="plot-div"></div>
+  {{ contamination_div | safe }}
 </div>
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 7: Discovery Mode Results
+     Section 8: Discovery Mode Results
      ═══════════════════════════════════════════════════════════════════ -->
 {% if disc_regions %}
-<h2>7. Discovery Mode: Region Landscape</h2>
+<h2>8. Discovery Mode: Region Landscape</h2>
 <div class="section-rationale">
   <strong>Scientific rationale:</strong> The VCF-free discovery mode
   identifies genomic regions enriched for proband-unique k-mers without
@@ -1067,30 +1276,30 @@ _HTML_TEMPLATE = """\
   discovered regions provide independent confirmation of de novo signal.
 </div>
 
-{% if disc_scatter_json %}
+{% if disc_scatter_div %}
 <div class="plot-container">
-  <div id="disc-scatter-plot" class="plot-div"></div>
+  {{ disc_scatter_div | safe }}
 </div>
 {% endif %}
 
-{% if disc_size_json %}
+{% if disc_size_div %}
 <div class="plot-container">
-  <div id="disc-size-plot" class="plot-div"></div>
+  {{ disc_size_div | safe }}
 </div>
 {% endif %}
 
-{% if sv_evidence_json %}
+{% if sv_evidence_div %}
 <div class="plot-container">
-  <div id="sv-evidence-plot" class="plot-div"></div>
+  {{ sv_evidence_div | safe }}
 </div>
 {% endif %}
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 8: Discovery vs VCF Concordance
+     Section 9: Discovery vs VCF Concordance
      ═══════════════════════════════════════════════════════════════════ -->
 {% if candidate_comparison and candidate_comparison.get("candidates") %}
-<h2>8. Discovery vs. VCF Mode Concordance</h2>
+<h2>9. Discovery vs. VCF Mode Concordance</h2>
 <div class="section-rationale">
   <strong>Scientific rationale:</strong> Cross-validation between two
   independent analytical modes is one of the strongest arguments for
@@ -1134,10 +1343,10 @@ _HTML_TEMPLATE = """\
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 9: Curated DNM Evaluation
+     Section 10: Curated DNM Evaluation
      ═══════════════════════════════════════════════════════════════════ -->
 {% if dnm_evaluation and dnm_evaluation.get("loci") %}
-<h2>9. Curated DNM Region Evaluation (Sulovari et al. 2023)</h2>
+<h2>10. Curated DNM Region Evaluation (Sulovari et al. 2023)</h2>
 <p class="description">
   Evaluation of discovery regions against curated de novo mutation loci
   from Sulovari et al. 2023.  This gold-standard validation demonstrates
@@ -1185,28 +1394,37 @@ _HTML_TEMPLATE = """\
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 10: Per-Variant Detail Table
+     Section 11: Per-Variant Detail Table
      ═══════════════════════════════════════════════════════════════════ -->
 {% if variants %}
-<h2>10. Per-Variant Detail Table</h2>
+<h2>11. Per-Variant Detail Table</h2>
+{% set total_variants = variants | length %}
+{% set shown_variants = variant_table_rows %}
+{% if total_variants > shown_variants | length %}
+<p class="description">
+  Showing {{ shown_variants | length }} of {{ total_variants }} variants
+  (DE_NOVO calls first, then inherited up to {{ variant_table_max_rows }} rows total).
+  See the annotated VCF or summary.txt for the complete list.
+</p>
+{% endif %}
 <table>
   <thead>
     <tr>
-      <th>Variant</th><th>DKU</th><th>DKT</th><th>DKA</th>
-      <th>DKU_DKT</th><th>DKA_DKT</th><th>MAX_PKC</th>
-      <th>AVG_PKC</th><th>MIN_PKC</th><th>Call</th>
+      <th>Variant</th><th>Type</th><th>DKU</th><th>DKT</th><th>DKA</th>
+      <th>DKU_DKT</th><th>DKA_DKT</th><th>MAX_PKC_ALT</th>
+      <th>AVG_PKC_ALT</th><th>Call</th>
     </tr>
   </thead>
   <tbody>
-    {% for v in variants %}
+    {% for v in shown_variants %}
     <tr>
       <td>{{ v.label }}</td>
+      <td>{{ v.vtype }}</td>
       <td>{{ v.dku }}</td><td>{{ v.dkt }}</td><td>{{ v.dka }}</td>
       <td>{{ "%.4f"|format(v.dku_dkt) }}</td>
       <td>{{ "%.4f"|format(v.dka_dkt) }}</td>
-      <td>{{ v.max_pkc }}</td>
-      <td>{{ "%.2f"|format(v.avg_pkc) }}</td>
-      <td>{{ v.min_pkc }}</td>
+      <td>{{ v.max_pkc_alt }}</td>
+      <td>{{ "%.2f"|format(v.avg_pkc_alt) }}</td>
       <td><span class="badge {% if v.call == 'DE_NOVO' %}badge-green{% else %}badge-orange{% endif %}">
         {{ v.call }}</span></td>
     </tr>
@@ -1216,9 +1434,9 @@ _HTML_TEMPLATE = """\
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 11: Method Overview
+     Section 12: Method Overview
      ═══════════════════════════════════════════════════════════════════ -->
-<h2>11. Method Overview &amp; Interpretation Guide</h2>
+<h2>12. Method Overview &amp; Interpretation Guide</h2>
 
 <div class="method-box">
   <h3>Why K-mers?</h3>
@@ -1280,95 +1498,6 @@ _HTML_TEMPLATE = """\
 
 </div><!-- container -->
 
-<!-- ═══════════════════════════════════════════════════════════════════
-     Plotly rendering
-     ═══════════════════════════════════════════════════════════════════ -->
-<script>
-{% if sankey_json %}
-(function() {
-  var fig = JSON.parse({{ sankey_json | tojson }});
-  Plotly.newPlot("sankey-plot", fig.data, fig.layout, {responsive: true});
-})();
-{% endif %}
-
-{% if funnel_json %}
-(function() {
-  var fig = JSON.parse({{ funnel_json | tojson }});
-  Plotly.newPlot("funnel-plot", fig.data, fig.layout, {responsive: true});
-})();
-{% endif %}
-
-{% if histogram_json %}
-(function() {
-  var fig = JSON.parse({{ histogram_json | tojson }});
-  Plotly.newPlot("histogram-plot", fig.data, fig.layout, {responsive: true});
-})();
-{% endif %}
-
-{% if threshold_json %}
-(function() {
-  var fig = JSON.parse({{ threshold_json | tojson }});
-  Plotly.newPlot("threshold-plot", fig.data, fig.layout, {responsive: true});
-})();
-{% endif %}
-
-{% if scatter_json %}
-(function() {
-  var fig = JSON.parse({{ scatter_json | tojson }});
-  Plotly.newPlot("scatter-plot", fig.data, fig.layout, {responsive: true});
-})();
-{% endif %}
-
-{% if heatmap_json %}
-(function() {
-  var fig = JSON.parse({{ heatmap_json | tojson }});
-  Plotly.newPlot("heatmap-plot", fig.data, fig.layout, {responsive: true});
-})();
-{% endif %}
-
-{% if pkc_box_json %}
-(function() {
-  var fig = JSON.parse({{ pkc_box_json | tojson }});
-  Plotly.newPlot("pkc-box-plot", fig.data, fig.layout, {responsive: true});
-})();
-{% endif %}
-
-{% if pkc_scatter_json %}
-(function() {
-  var fig = JSON.parse({{ pkc_scatter_json | tojson }});
-  Plotly.newPlot("pkc-scatter-plot", fig.data, fig.layout, {responsive: true});
-})();
-{% endif %}
-
-{% if contamination_json %}
-(function() {
-  var fig = JSON.parse({{ contamination_json | tojson }});
-  Plotly.newPlot("contamination-plot", fig.data, fig.layout, {responsive: true});
-})();
-{% endif %}
-
-{% if disc_scatter_json %}
-(function() {
-  var fig = JSON.parse({{ disc_scatter_json | tojson }});
-  Plotly.newPlot("disc-scatter-plot", fig.data, fig.layout, {responsive: true});
-})();
-{% endif %}
-
-{% if disc_size_json %}
-(function() {
-  var fig = JSON.parse({{ disc_size_json | tojson }});
-  Plotly.newPlot("disc-size-plot", fig.data, fig.layout, {responsive: true});
-})();
-{% endif %}
-
-{% if sv_evidence_json %}
-(function() {
-  var fig = JSON.parse({{ sv_evidence_json | tojson }});
-  Plotly.newPlot("sv-evidence-plot", fig.data, fig.layout, {responsive: true});
-})();
-{% endif %}
-</script>
-
 </body>
 </html>
 """
@@ -1388,6 +1517,11 @@ def generate_report(
     discovery_summary_path=None,
 ):
     """Generate an interactive HTML report from pipeline output files.
+
+    The report is fully self-contained: Plotly.js is embedded inline so it
+    renders correctly in offline/HPC environments and always uses the version
+    that matches the installed Python plotly package (fixes CDN version
+    mismatch with plotly ≥ 6.x which requires Plotly.js 3.x).
 
     Parameters
     ----------
@@ -1416,21 +1550,26 @@ def generate_report(
         "vcf_metrics": None,
         "disc_metrics": None,
         "variants": [],
+        "variant_table_rows": [],
+        "variant_table_max_rows": _VARIANT_TABLE_MAX_ROWS,
         "disc_regions": [],
         "candidate_comparison": {},
         "dnm_evaluation": {},
-        "sankey_json": None,
-        "funnel_json": None,
-        "histogram_json": None,
-        "threshold_json": None,
-        "scatter_json": None,
-        "heatmap_json": None,
-        "pkc_box_json": None,
-        "pkc_scatter_json": None,
-        "contamination_json": None,
-        "disc_scatter_json": None,
-        "disc_size_json": None,
-        "sv_evidence_json": None,
+        "plotly_bundle": _get_plotly_bundle(),
+        "sankey_div": None,
+        "funnel_div": None,
+        "histogram_div": None,
+        "threshold_div": None,
+        "scatter_div": None,
+        "heatmap_div": None,
+        "pkc_box_div": None,
+        "pkc_scatter_div": None,
+        "contamination_div": None,
+        "disc_scatter_div": None,
+        "disc_size_div": None,
+        "sv_evidence_div": None,
+        "variant_type_div": None,
+        "chrom_dist_div": None,
     }
 
     # ── VCF mode data ─────────────────────────────────────────────
@@ -1439,29 +1578,42 @@ def generate_report(
         context["vcf_metrics"] = vcf_metrics
         context["mode"] = "vcf"
 
-        context["funnel_json"] = _make_kmer_funnel_chart(vcf_metrics, mode="vcf")
-        context["sankey_json"] = _make_sankey_diagram(vcf_metrics, mode="vcf")
+        context["funnel_div"] = _make_kmer_funnel_chart(vcf_metrics, mode="vcf")
+        context["sankey_div"] = _make_sankey_diagram(vcf_metrics, mode="vcf")
 
     if vcf_summary_path and os.path.isfile(vcf_summary_path):
         variants = _load_summary_variants(vcf_summary_path)
+        # Annotate each variant with its type for the table
+        for v in variants:
+            v["vtype"] = _classify_variant_type(v["label"])
         context["variants"] = variants
 
         if variants:
-            context["histogram_json"] = _make_dka_dkt_histogram(variants)
-            context["threshold_json"] = _make_threshold_sensitivity(variants)
-            context["scatter_json"] = _make_dka_vs_dkt_scatter(variants)
-            context["heatmap_json"] = _make_evidence_heatmap(variants)
-            context["pkc_box_json"] = _make_pkc_boxplot(variants)
-            context["pkc_scatter_json"] = _make_pkc_vs_dka_dkt_scatter(variants)
+            context["histogram_div"] = _make_dka_dkt_histogram(variants)
+            context["threshold_div"] = _make_threshold_sensitivity(variants)
+            context["scatter_div"] = _make_dka_vs_dkt_scatter(variants)
+            context["heatmap_div"] = _make_evidence_heatmap(variants)
+            context["pkc_box_div"] = _make_pkc_boxplot(variants)
+            context["pkc_scatter_div"] = _make_pkc_vs_dka_dkt_scatter(variants)
+            context["variant_type_div"] = _make_variant_type_breakdown(variants)
+            context["chrom_dist_div"] = _make_chromosomal_distribution(variants)
+
+            # Build table rows: all DE_NOVO first, then inherited up to limit
+            denovo_rows = [v for v in variants if v["call"] == "DE_NOVO"]
+            inherited_rows = [v for v in variants if v["call"] != "DE_NOVO"]
+            remaining = max(0, _VARIANT_TABLE_MAX_ROWS - len(denovo_rows))
+            context["variant_table_rows"] = (
+                denovo_rows + inherited_rows[:remaining]
+            )
 
     # Kraken2 annotations from VCF
     if vcf_path and os.path.isfile(vcf_path):
         kraken2_data = _load_vcf_kraken2_annotations(vcf_path)
         if kraken2_data and context["variants"]:
-            contamination_fig = _make_contamination_bar(
+            contamination_div = _make_contamination_bar(
                 context["variants"], kraken2_data,
             )
-            context["contamination_json"] = contamination_fig
+            context["contamination_div"] = contamination_div
 
     # ── Discovery mode data ───────────────────────────────────────
     if discovery_metrics_path and os.path.isfile(discovery_metrics_path):
@@ -1479,21 +1631,21 @@ def generate_report(
         )
         context["dnm_evaluation"] = disc_metrics.get("dnm_evaluation", {})
 
-        if not context.get("funnel_json"):
-            context["funnel_json"] = _make_kmer_funnel_chart(
+        if not context.get("funnel_div"):
+            context["funnel_div"] = _make_kmer_funnel_chart(
                 disc_metrics, mode="discovery",
             )
-        if not context.get("sankey_json"):
-            context["sankey_json"] = _make_sankey_diagram(
+        if not context.get("sankey_div"):
+            context["sankey_div"] = _make_sankey_diagram(
                 disc_metrics, mode="discovery",
             )
 
         if regions:
-            context["disc_scatter_json"] = _make_discovery_region_scatter(
+            context["disc_scatter_div"] = _make_discovery_region_scatter(
                 regions,
             )
-            context["disc_size_json"] = _make_discovery_size_histogram(regions)
-            context["sv_evidence_json"] = _make_sv_evidence_chart(regions)
+            context["disc_size_div"] = _make_discovery_size_histogram(regions)
+            context["sv_evidence_div"] = _make_sv_evidence_chart(regions)
 
     # ── Render ────────────────────────────────────────────────────
     template = Template(_HTML_TEMPLATE)
