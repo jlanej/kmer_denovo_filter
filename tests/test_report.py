@@ -113,12 +113,13 @@ class TestGenerateReport:
             with open(out) as fh:
                 html = fh.read()
             assert "kmer-denovo" in html
-            assert "Executive Summary" in html
+            assert "Pipeline Summary" in html
             assert "K-mer Filtering Funnel" in html
             assert "DKA/DKT Ratio" in html
             assert "Plotly.newPlot" in html
-            # Metric cards should be present
-            assert "Total Candidates" in html
+            # Stratification metric cards should be present
+            assert "Putative denovo (input)" in html
+            assert "Higher-quality" in html
             assert "1,484" in html  # total child kmers
         finally:
             os.unlink(out)
@@ -166,7 +167,7 @@ class TestGenerateReport:
             with open(out) as fh:
                 html = fh.read()
             assert "Combined" in html
-            assert "Total Candidates" in html
+            assert "Putative denovo (input)" in html
             assert "Candidate Regions" in html
         finally:
             os.unlink(out)
@@ -191,7 +192,9 @@ class TestGenerateReport:
             with open(out) as fh:
                 html = fh.read()
             # Check all major sections are present
-            assert "Executive Summary" in html
+            assert "Pipeline Summary" in html
+            assert "Methods" in html
+            assert "Results Highlights" in html
             assert "K-mer Filtering Funnel" in html
             assert "Variant Breakdown" in html
             assert "DKA/DKT Ratio Distribution" in html
@@ -634,6 +637,164 @@ class TestClassifyVariantType:
 
     def test_no_allele_returns_other(self):
         assert _classify_variant_type("chr1:1000") == "Other"
+
+
+class TestStratification:
+    """Tests for the 4-stage stratification cascade."""
+
+    def _v(self, dka=0, dka_dkt=0.0, dka_nhf=None, label="chr1:1 A>C"):
+        v = {
+            "label": label, "dku": 0, "dkt": 10, "dka": dka,
+            "dku_dkt": 0.0, "dka_dkt": dka_dkt,
+            "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0,
+            "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0,
+            "call": "DE_NOVO" if dka > 0 else "inherited",
+        }
+        if dka_nhf is not None:
+            v["dka_nhf"] = dka_nhf
+        return v
+
+    def test_stage_0_putative_only(self):
+        from kmer_denovo_filter.report import _stratify_variant
+        # No k-mer evidence → stage 0 only
+        assert _stratify_variant(self._v(dka=0, dka_dkt=0.0)) == 0
+
+    def test_stage_1_kmer_dnm(self):
+        from kmer_denovo_filter.report import _stratify_variant
+        assert _stratify_variant(self._v(dka=1, dka_dkt=0.05)) == 1
+
+    def test_stage_2_higher_quality(self):
+        from kmer_denovo_filter.report import _stratify_variant
+        # No NHF data → stage 4 collapses to stage 3 (has_nhf_data=False)
+        assert _stratify_variant(
+            self._v(dka=10, dka_dkt=0.5),
+            has_nhf_data=False,
+        ) == 3
+
+    def test_stage_4_requires_low_nhf(self):
+        from kmer_denovo_filter.report import _stratify_variant
+        # NHF data is present cohort-wide; this variant fails NHF
+        assert _stratify_variant(
+            self._v(dka=10, dka_dkt=0.5, dka_nhf=0.10),
+            has_nhf_data=True,
+        ) == 2
+        # Below threshold → stage 3
+        assert _stratify_variant(
+            self._v(dka=10, dka_dkt=0.5, dka_nhf=0.01),
+            has_nhf_data=True,
+        ) == 3
+
+    def test_stage_4_missing_nhf_when_cohort_has_data(self):
+        """Conservative: when other variants have NHF but this one doesn't,
+        we cannot confirm non-contamination → stays at stage 2."""
+        from kmer_denovo_filter.report import _stratify_variant
+        assert _stratify_variant(
+            self._v(dka=10, dka_dkt=0.5),  # no dka_nhf
+            has_nhf_data=True,
+        ) == 2
+
+    def test_compute_stratification_counts(self):
+        from kmer_denovo_filter.report import _compute_stratification
+        variants = [
+            self._v(dka=0, dka_dkt=0.0),                       # stage 0
+            self._v(dka=2, dka_dkt=0.1),                       # stage 1
+            self._v(dka=15, dka_dkt=0.30, dka_nhf=0.01),       # stage 3
+            self._v(dka=15, dka_dkt=0.30, dka_nhf=0.20),       # stage 2 (contam)
+        ]
+        strat = _compute_stratification(variants)
+        assert strat["has_nhf_data"] is True
+        assert strat["counts"] == [4, 3, 2, 1]
+        # Lost at each step: 0, 1, 1, 1
+        assert strat["lost"] == [0, 1, 1, 1]
+
+    def test_compute_stratification_no_nhf(self):
+        from kmer_denovo_filter.report import _compute_stratification
+        variants = [
+            self._v(dka=0, dka_dkt=0.0),
+            self._v(dka=2, dka_dkt=0.1),
+            self._v(dka=15, dka_dkt=0.30),
+            self._v(dka=20, dka_dkt=0.50),
+        ]
+        strat = _compute_stratification(variants)
+        assert strat["has_nhf_data"] is False
+        # Stage 4 collapses to stage 3
+        assert strat["counts"][3] == strat["counts"][2]
+
+
+class TestReportStratificationContent:
+    """End-to-end checks for stratified report content."""
+
+    def _generate(self):
+        with tempfile.NamedTemporaryFile(suffix=".html", delete=False) as fh:
+            out = fh.name
+        generate_report(
+            output_path=out,
+            vcf_metrics_path=os.path.join(EXAMPLE_OUTPUT_DIR, "metrics.json"),
+            vcf_summary_path=os.path.join(EXAMPLE_OUTPUT_DIR, "summary.txt"),
+        )
+        with open(out) as fh:
+            html = fh.read()
+        os.unlink(out)
+        return html
+
+    def test_pipeline_summary_present(self):
+        html = self._generate()
+        assert "Pipeline Summary" in html
+        # Brief intro mentions VCF input and miscalled variants
+        assert "putative" in html.lower()
+        assert "miscalled" in html.lower()
+
+    def test_stratification_funnel_has_four_stages(self):
+        html = self._generate()
+        assert "Putative denovo" in html
+        assert "Putative kmer denovo" in html
+        assert "Higher-quality denovo" in html
+        # Stage 4 label appears (escaped &lt;)
+        assert "NHF" in html
+
+    def test_stratification_sankey_present(self):
+        html = self._generate()
+        assert "Variant Flow Through Stratification Stages" in html
+
+    def test_methods_section_present(self):
+        html = self._generate()
+        # Methods section content
+        assert "<h2>2. Methods</h2>" in html
+        assert "Stratification cascade" in html
+        assert "Non-human contamination screening" in html
+        assert "Jellyfish" in html
+
+    def test_results_highlights_present(self):
+        html = self._generate()
+        assert "Results Highlights" in html
+
+    def test_per_variant_table_only_higher_quality(self):
+        """Per-variant table must only contain higher-quality variants
+        (DKA_DKT > 0.25)."""
+        html = self._generate()
+        assert "Higher-Quality DNMs" in html
+        # In the example data, chr11:55003995 has DKA_DKT=0.4565 → should appear
+        assert "chr11:55003995" in html
+        # chr8:40003391 has DKA_DKT=0.0588 → must NOT appear in the per-variant
+        # table (it should still appear in scatter/heatmap data, but the
+        # table filtering means its row HTML <td>chr8:40003391...</td> is gone)
+        # Use a heuristic: count occurrences; in scatter/heatmap-encoded JSON
+        # the label is escaped (chr8:40003391 A\u003eT) so the plain
+        # "<td>chr8:40003391 A>T</td>" pattern is reliable.
+        assert "<td>chr8:40003391 A&gt;T</td>" not in html
+        assert "<td>chr8:40003391 A>T</td>" not in html
+
+
+class TestStratificationConstants:
+    def test_thresholds_exported(self):
+        from kmer_denovo_filter.report import (
+            _HIGH_QUALITY_DKA_DKT_THRESHOLD,
+            _NHF_CONTAMINATION_THRESHOLD,
+            _KMER_DENOVO_DKA_THRESHOLD,
+        )
+        assert _KMER_DENOVO_DKA_THRESHOLD == 0
+        assert _HIGH_QUALITY_DKA_DKT_THRESHOLD == 0.25
+        assert _NHF_CONTAMINATION_THRESHOLD == 0.05
 
 
 class TestReportCLI:

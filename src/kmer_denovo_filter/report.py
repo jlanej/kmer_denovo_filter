@@ -15,9 +15,46 @@ import statistics as stats
 
 logger = logging.getLogger(__name__)
 
-# Maximum rows shown in the per-variant detail table.  All DE_NOVO calls are
-# shown first; inherited variants are capped at the remainder up to this limit.
+# Maximum rows shown in the per-variant detail table.  Only "higher quality"
+# de novo variants (stage 3+: DKA_DKT > _HIGH_QUALITY_DKA_DKT_THRESHOLD) are
+# included in the table; inherited and low-evidence calls are excluded because
+# the unfiltered list (often 30 000+ rows) is not informative for a reviewer.
 _VARIANT_TABLE_MAX_ROWS = 100
+
+# ---------------------------------------------------------------------------
+# Stratification thresholds
+# ---------------------------------------------------------------------------
+# Four progressively stricter filtering stages are applied to every input
+# variant.  These thresholds are referenced by the funnel chart, the Sankey
+# diagram, the per-variant table, and the contamination plots so the report
+# tells a single, coherent story.
+#
+#   Stage 1 — Putative denovo (input)            : every variant in the VCF
+#   Stage 2 — Putative kmer denovo               : DKA > 0
+#   Stage 3 — Higher-quality denovo              : DKA_DKT > 0.25
+#   Stage 4 — Higher-quality, non-contamination  : Stage 3 + DKA_NHF < 0.05
+#
+_KMER_DENOVO_DKA_THRESHOLD = 0          # Stage 2: DKA > 0
+_HIGH_QUALITY_DKA_DKT_THRESHOLD = 0.25  # Stage 3: DKA_DKT > 0.25
+_NHF_CONTAMINATION_THRESHOLD = 0.05     # Stage 4: DKA_NHF < 0.05
+
+# Human-readable labels for the four stages — used by funnel, Sankey, and
+# legends so all visualisations are consistent.
+_STAGE_LABELS = [
+    "Putative denovo<br>(input VCF)",
+    "Putative kmer denovo<br>(DKA &gt; 0)",
+    "Higher-quality denovo<br>(DKA_DKT &gt; 0.25)",
+    "Higher-quality, not contamination<br>(NHF &lt; 0.05)",
+]
+_STAGE_SHORT_LABELS = [
+    "Putative",
+    "Kmer DNM",
+    "Higher quality",
+    "HQ + non-contam",
+]
+# Visually distinct colour palette: each stage moves toward green to convey
+# increasing confidence, while still being colour-blind safe.
+_STAGE_COLORS = ["#4C78A8", "#F58518", "#72B7B2", "#54A24B"]
 
 # Maximum rows in the evidence heatmap.  Above this threshold the heatmap
 # switches to cluster-summary mode: k-means is run on all variants and one row
@@ -277,6 +314,118 @@ def _load_vcf_kraken2_annotations(vcf_path):
     return results
 
 
+# ---------------------------------------------------------------------------
+# Stratification: 4-stage filtering cascade
+# ---------------------------------------------------------------------------
+
+
+def _merge_kraken2_into_variants(variants, kraken2_data):
+    """Attach Kraken2 fraction fields to each variant in place.
+
+    Looks up each variant's label in *kraken2_data* and copies the per-variant
+    fraction fields (``DKA_NHF``, ``DKA_HLF``, etc.) onto the variant dict
+    using lowercase keys (``dka_nhf``, ``dka_hlf``, …) for downstream Python
+    code.  Variants with no matching Kraken2 record are left unchanged so
+    callers can detect "no contamination data" via ``"dka_nhf" not in v``.
+    """
+    if not kraken2_data:
+        return variants
+    kraken_map = {r["label"]: r for r in kraken2_data}
+    fields = [
+        "DKA_BF", "DKA_AF", "DKA_FF", "DKA_PF", "DKA_VF",
+        "DKA_UCF", "DKA_NHF", "DKA_UF", "DKA_HLF",
+    ]
+    for v in variants:
+        k = kraken_map.get(v["label"])
+        if not k:
+            continue
+        for f in fields:
+            if f in k:
+                v[f.lower()] = float(k[f])
+    return variants
+
+
+def _stratify_variant(v, has_nhf_data=None):
+    """Return the highest stratification stage (0–3) reached by *v*.
+
+    Stages (cumulative; see module docstring for definitions):
+
+    * 0 — Putative denovo (always reached for any variant in the input)
+    * 1 — Putative kmer denovo (``dka > 0``)
+    * 2 — Higher-quality denovo (``dka_dkt > 0.25``)
+    * 3 — Higher-quality, non-contamination (stage 2 + ``dka_nhf < 0.05``)
+
+    If *has_nhf_data* is False (no Kraken2 annotations available anywhere in
+    the cohort) stage 4 collapses into stage 3 — i.e. any stage-3 variant
+    is also counted as stage 4 — because we cannot meaningfully separate
+    contamination without NHF data.  When *has_nhf_data* is True but the
+    individual variant lacks a ``dka_nhf`` value the variant is treated as
+    NOT passing stage 4 (conservative).
+    """
+    stage = 0
+    if v.get("dka", 0) > _KMER_DENOVO_DKA_THRESHOLD:
+        stage = 1
+    if stage >= 1 and v.get("dka_dkt", 0.0) > _HIGH_QUALITY_DKA_DKT_THRESHOLD:
+        stage = 2
+    if stage >= 2:
+        if not has_nhf_data:
+            # No Kraken2 anywhere → cannot apply contamination filter, so
+            # collapse stage 4 into stage 3 for reporting.
+            stage = 3
+        else:
+            nhf = v.get("dka_nhf")
+            if nhf is not None and nhf < _NHF_CONTAMINATION_THRESHOLD:
+                stage = 3
+    return stage
+
+
+def _compute_stratification(variants, has_nhf_data=None):
+    """Annotate variants with their stage and return summary counts.
+
+    Adds an integer ``stage`` field (0–3) to every variant and returns a
+    dict with both the cumulative counts at each stage and convenience
+    sub-lists, e.g.::
+
+        {
+            "has_nhf_data": True,
+            "counts": [22, 6, 4, 3],          # cumulative pass counts
+            "labels": [...],                   # human-readable labels
+            "lost":   [0,  16, 2, 1],          # variants dropped at each step
+            "stage_groups": {
+                0: [...all variants...],
+                1: [...stage>=1...],
+                2: [...stage>=2...],
+                3: [...stage>=3...],
+            }
+        }
+    """
+    if has_nhf_data is None:
+        has_nhf_data = any("dka_nhf" in v for v in variants)
+
+    for v in variants:
+        v["stage"] = _stratify_variant(v, has_nhf_data=has_nhf_data)
+
+    counts = [
+        len(variants),
+        sum(1 for v in variants if v["stage"] >= 1),
+        sum(1 for v in variants if v["stage"] >= 2),
+        sum(1 for v in variants if v["stage"] >= 3),
+    ]
+    lost = [0] + [counts[i - 1] - counts[i] for i in range(1, 4)]
+    stage_groups = {
+        i: [v for v in variants if v["stage"] >= i] for i in range(4)
+    }
+    return {
+        "has_nhf_data": has_nhf_data,
+        "counts": counts,
+        "labels": list(_STAGE_LABELS),
+        "short_labels": list(_STAGE_SHORT_LABELS),
+        "colors": list(_STAGE_COLORS),
+        "lost": lost,
+        "stage_groups": stage_groups,
+    }
+
+
 def _load_discovery_regions(metrics_path):
     """Load discovery region details from discovery metrics.json."""
     metrics = _load_metrics(metrics_path)
@@ -333,6 +482,182 @@ def _plotly_div(fig, div_id, config=None):
         div_id=div_id,
         config=config if config is not None else {"responsive": True},
     )
+
+
+    return _plotly_div(fig, div_id)
+
+
+def _make_stratification_funnel(stratification, div_id="strat-funnel-plot"):
+    """Bar chart showing the variant-level 4-stage filtering cascade.
+
+    The four stages (defined in the module header) describe how many input
+    variants survive at each progressively stricter filter.  This is the
+    primary "results at a glance" plot for the report — a reviewer should be
+    able to read off how many putative DNMs were called from the input VCF
+    and how many remained after k-mer evidence and contamination filtering.
+    """
+    import plotly.graph_objects as go
+
+    counts = stratification["counts"]
+    labels = stratification["labels"]
+    colors = stratification["colors"]
+    has_nhf = stratification["has_nhf_data"]
+
+    # If we have no contamination data, fade stage 4 so the reviewer sees
+    # explicitly that the contamination filter could not be applied.
+    bar_colors = list(colors)
+    if not has_nhf:
+        bar_colors[3] = "#cccccc"
+
+    text = [f"{c:,}" for c in counts]
+    if not has_nhf:
+        # Stage 4 collapses to stage 3 when no NHF; annotate clearly.
+        text[3] = f"{counts[3]:,}*"
+
+    fig = go.Figure(data=[go.Bar(
+        x=labels,
+        y=counts,
+        marker_color=bar_colors,
+        text=text,
+        textposition="outside",
+        hovertemplate="<b>%{x}</b><br>Variants: %{y:,}<extra></extra>",
+    )])
+
+    # Annotate retained-percentage relative to stage 1
+    if counts[0] > 0:
+        for i in range(1, len(counts)):
+            pct = 100.0 * counts[i] / counts[0]
+            fig.add_annotation(
+                x=labels[i], y=counts[i],
+                text=f"{pct:.1f}% of input",
+                showarrow=False, yshift=-18,
+                font=dict(size=10, color="#666"),
+            )
+
+    title = "Variant Stratification Funnel"
+    if not has_nhf:
+        title += (
+            "<br><sup>* No Kraken2 contamination data available — "
+            "stage 4 collapses to stage 3 (NHF filter not applied)</sup>"
+        )
+
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=18)),
+        yaxis_title="Variant Count",
+        template="plotly_white",
+        height=420,
+        margin=dict(t=80, b=60),
+        showlegend=False,
+    )
+    return _plotly_div(fig, div_id)
+
+
+def _make_stratification_sankey(stratification, div_id="strat-sankey-plot"):
+    """Sankey diagram showing how variants flow through the 4-stage cascade.
+
+    Each stage emits two flows: variants that PASS to the next stage, and
+    variants that are FILTERED OUT for failing the stage's criterion.  The
+    diagram makes the attrition at each step explicit so the reviewer can see
+    at a glance which filter is most/least selective for this dataset.
+    """
+    import plotly.graph_objects as go
+
+    counts = stratification["counts"]
+    short_labels = stratification["short_labels"]
+    colors = stratification["colors"]
+    has_nhf = stratification["has_nhf_data"]
+
+    drop_reasons = [
+        "Filtered: DKA = 0",
+        "Filtered: DKA_DKT &le; 0.25",
+        "Filtered: NHF &ge; 0.05 (contamination)",
+    ]
+
+    node_labels = [
+        f"{short_labels[0]} ({counts[0]:,})",
+        f"{short_labels[1]} ({counts[1]:,})",
+        f"{short_labels[2]} ({counts[2]:,})",
+        f"{short_labels[3]} ({counts[3]:,})"
+        + ("" if has_nhf else " *no NHF data*"),
+        f"{drop_reasons[0]} ({counts[0] - counts[1]:,})",
+        f"{drop_reasons[1]} ({counts[1] - counts[2]:,})",
+        f"{drop_reasons[2]} ({counts[2] - counts[3]:,})"
+        + ("" if has_nhf else " — N/A"),
+    ]
+    node_colors = list(colors) + ["#bbbbbb", "#bbbbbb", "#bbbbbb"]
+
+    # Edges: pass flows + drop flows (use max(1, x) so zero-flow links still
+    # render as a thin strand)
+    sources = [0, 0,  1, 1,  2, 2]
+    targets = [1, 4,  2, 5,  3, 6]
+    values = [
+        max(1, counts[1]),                   counts[0] - counts[1],
+        max(1, counts[2]),                   counts[1] - counts[2],
+        max(1, counts[3]),                   counts[2] - counts[3],
+    ]
+    # Replace any 0 with 1 so a missing flow is still drawn but tiny.
+    values = [max(1, v) for v in values]
+
+    fig = go.Figure(data=[go.Sankey(
+        node=dict(
+            pad=18, thickness=18,
+            label=node_labels,
+            color=node_colors,
+        ),
+        link=dict(source=sources, target=targets, value=values),
+    )])
+    fig.update_layout(
+        title=dict(
+            text="Variant Flow Through Stratification Stages",
+            font=dict(size=18),
+        ),
+        template="plotly_white",
+        height=380,
+        margin=dict(t=60, b=20),
+    )
+    return _plotly_div(fig, div_id)
+
+
+def _make_nhf_distribution_plot(variants, div_id="nhf-dist-plot"):
+    """Histogram of per-variant non-human (NHF) fraction across stages.
+
+    Returns ``None`` when no Kraken2 NHF data is available for any variant.
+    Otherwise produces a histogram of NHF for variants that have already
+    reached stage 2 (kmer denovo) so the reviewer sees how many would be
+    classified as contamination by the stage-4 filter.
+    """
+    import plotly.graph_objects as go
+
+    nhf_values = [v["dka_nhf"] for v in variants
+                  if v.get("stage", 0) >= 1 and "dka_nhf" in v]
+    if not nhf_values:
+        return None
+
+    fig = go.Figure()
+    fig.add_trace(go.Histogram(
+        x=nhf_values, nbinsx=30,
+        marker_color="#4C78A8", opacity=0.85,
+        hovertemplate="NHF: %{x:.3f}<br>Count: %{y}<extra></extra>",
+    ))
+    fig.add_vline(
+        x=_NHF_CONTAMINATION_THRESHOLD,
+        line_dash="dash", line_color="#E45756", line_width=2,
+        annotation_text=f"Contamination threshold ({_NHF_CONTAMINATION_THRESHOLD})",
+        annotation_position="top right",
+        annotation_font=dict(size=11, color="#E45756"),
+    )
+    fig.update_layout(
+        title=dict(
+            text=("Non-Human Fraction (NHF) Distribution — kmer DNM candidates"),
+            font=dict(size=18),
+        ),
+        xaxis_title="DKA_NHF (fraction of DKA reads classified as non-human)",
+        yaxis_title="Variant Count",
+        template="plotly_white",
+        height=380,
+        margin=dict(t=60, b=40),
+    )
+    return _plotly_div(fig, div_id)
 
 
 def _make_kmer_funnel_chart(metrics, mode="vcf", div_id="funnel-plot"):
@@ -456,27 +781,42 @@ def _make_sankey_diagram(metrics, mode="vcf", div_id="sankey-plot"):
 
 
 def _make_dka_dkt_histogram(variants, div_id="histogram-plot"):
-    """Create a histogram of DKA_DKT ratios with threshold marker."""
+    """Create a histogram of DKA_DKT ratios with threshold marker.
+
+    Variants are split into stratification groups for visual context:
+    inherited / DKA = 0 (greyed) vs. kmer-DNM candidates (DKA > 0, blue).
+    The dashed line marks the higher-quality threshold (DKA_DKT > 0.25).
+    """
     import plotly.graph_objects as go
 
-    dka_dkt_values = [v["dka_dkt"] for v in variants]
+    low = [v["dka_dkt"] for v in variants if v.get("dka", 0) == 0]
+    kmer_dnm = [v["dka_dkt"] for v in variants if v.get("dka", 0) > 0]
 
     fig = go.Figure()
-    fig.add_trace(go.Histogram(
-        x=dka_dkt_values,
-        nbinsx=30,
-        marker_color="#4C78A8",
-        opacity=0.85,
-        hovertemplate="DKA_DKT: %{x:.3f}<br>Count: %{y}<extra></extra>",
-    ))
+    if low:
+        fig.add_trace(go.Histogram(
+            x=low, nbinsx=30,
+            marker_color="#BAB0AC", opacity=0.75,
+            name="DKA = 0 (no kmer evidence)",
+            hovertemplate="DKA_DKT: %{x:.3f}<br>Count: %{y}<extra></extra>",
+        ))
+    if kmer_dnm:
+        fig.add_trace(go.Histogram(
+            x=kmer_dnm, nbinsx=30,
+            marker_color="#4C78A8", opacity=0.85,
+            name="Kmer DNM (DKA &gt; 0)",
+            hovertemplate="DKA_DKT: %{x:.3f}<br>Count: %{y}<extra></extra>",
+        ))
     # Threshold line at 0.25
     fig.add_vline(
-        x=0.25, line_dash="dash", line_color="#E45756", line_width=2,
-        annotation_text="High-quality threshold (0.25)",
+        x=_HIGH_QUALITY_DKA_DKT_THRESHOLD,
+        line_dash="dash", line_color="#E45756", line_width=2,
+        annotation_text=f"Higher-quality threshold ({_HIGH_QUALITY_DKA_DKT_THRESHOLD})",
         annotation_position="top right",
         annotation_font=dict(size=11, color="#E45756"),
     )
     fig.update_layout(
+        barmode="overlay",
         title=dict(
             text="DKA/DKT Ratio Distribution",
             font=dict(size=18),
@@ -486,6 +826,8 @@ def _make_dka_dkt_histogram(variants, div_id="histogram-plot"):
         template="plotly_white",
         height=400,
         margin=dict(t=60, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1),
     )
     return _plotly_div(fig, div_id)
 
@@ -821,7 +1163,14 @@ def _make_pkc_vs_dka_dkt_scatter(variants, div_id="pkc-scatter-plot"):
 
 
 def _make_contamination_bar(variants, kraken2_data, div_id="contamination-plot"):
-    """Create stacked bar chart of Kraken2 read classification fractions."""
+    """Create stacked bar chart of Kraken2 read classification fractions.
+
+    Filtered to **kmer-DNM candidates** (stage ≥ 1) so the plot focuses on
+    the variants where contamination matters most: a putative DNM that is
+    actually microbial sequence is the false-positive class we want to
+    eliminate.  Inherited / DKA=0 variants are excluded — they are not
+    candidates the contamination filter would ever consider.
+    """
     import plotly.graph_objects as go
 
     if not kraken2_data:
@@ -837,6 +1186,10 @@ def _make_contamination_bar(variants, kraken2_data, div_id="contamination-plot")
     uf_vals = []
 
     for v in variants:
+        # Only include kmer-DNM candidates (stage ≥ 1) — others are not at
+        # risk of being false positives from contamination.
+        if v.get("stage", 0) < 1:
+            continue
         k = kraken_map.get(v["label"])
         if k and any(k.get(f, 0) > 0 for f in
                       ["DKA_HLF", "DKA_NHF", "DKA_UCF", "DKA_UF"]):
@@ -1297,6 +1650,34 @@ _HTML_TEMPLATE = """\
     border-radius: 6px; font-size: 0.9em; color: #555;
     border-left: 3px solid #72B7B2;
   }
+  .plot-caption {
+    font-size: 0.85em; color: #666; margin-top: -8px;
+    margin-bottom: 12px; padding: 0 8px; font-style: italic;
+  }
+  .summary-card {
+    background: linear-gradient(135deg, #f0f4f8 0%, #e8efff 100%);
+    border-radius: 10px; padding: 24px 28px; margin: 20px 0;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+    border-left: 5px solid #4C78A8;
+  }
+  .summary-card h3 { margin-top: 0; color: #1a1a2e; }
+  .summary-card p { color: #333; margin-bottom: 8px; }
+  .summary-card ol, .summary-card ul {
+    margin: 8px 0 8px 24px; color: #333; font-size: 0.95em;
+  }
+  .summary-card li { margin: 4px 0; }
+  .stage-list { list-style: none; padding-left: 0; }
+  .stage-list li {
+    margin: 6px 0; padding-left: 28px; position: relative;
+  }
+  .stage-list li::before {
+    content: ""; position: absolute; left: 0; top: 8px;
+    width: 14px; height: 14px; border-radius: 3px;
+  }
+  .stage-list li.s0::before { background: #4C78A8; }
+  .stage-list li.s1::before { background: #F58518; }
+  .stage-list li.s2::before { background: #72B7B2; }
+  .stage-list li.s3::before { background: #54A24B; }
   footer {
     margin-top: 40px; padding: 20px 0; border-top: 1px solid #ddd;
     text-align: center; color: #999; font-size: 0.85em;
@@ -1316,26 +1697,74 @@ _HTML_TEMPLATE = """\
 </p>
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 1: Executive Summary
+     Section 1: Pipeline Summary & Executive Snapshot
      ═══════════════════════════════════════════════════════════════════ -->
-<h2>1. Executive Summary</h2>
-<p class="description">
-  This dashboard summarizes the k-mer-based de novo variant filtering
-  results. K-mers (short DNA subsequences of length <em>k</em>) from
-  the child are compared against both parents.  K-mers present in the
-  child but absent from both parents represent candidate de novo mutations.
-</p>
+<h2>1. Pipeline Summary</h2>
 
+{% if vcf_metrics %}
+<div class="summary-card">
+  <h3>What this pipeline does</h3>
+  <p>
+    This report summarises the results of <strong>kmer-denovo-filter</strong>
+    applied to <strong>{{ "{:,}".format(vcf_metrics.get("total_variants", 0)) }}
+    putative <em>de novo</em> variants</strong> supplied as input in a VCF
+    (e.g. from a trio variant caller such as DeepVariant&nbsp;+&nbsp;GLnexus
+    or DeNovoGear).  Without orthogonal evidence, the majority of these
+    putative DNMs are <strong>simple miscalled variants</strong> — typically
+    inherited alleles whose parental support was missed by the original
+    caller, alignment artefacts, or sequence drawn from non-human
+    contamination.  k-mer analysis offers an alignment-independent way to
+    re-examine each candidate using the raw read sequence.
+  </p>
+  <p style="margin-top:14px;"><strong>Stratification used throughout this report:</strong></p>
+  <ul class="stage-list">
+    <li class="s0"><strong>Putative denovo</strong> &mdash; every variant from the input VCF.</li>
+    <li class="s1"><strong>Putative kmer denovo</strong> &mdash; ≥ 1 child fragment carries an
+      ALT-supporting child-unique k-mer (DKA &gt; 0).</li>
+    <li class="s2"><strong>Higher-quality denovo</strong> &mdash; DKA_DKT &gt; 0.25 (more than
+      a quarter of spanning fragments carry the unique-k-mer ALT signal).</li>
+    <li class="s3"><strong>Higher-quality, not contamination</strong> &mdash; stage&nbsp;3
+      <em>and</em> the non-human read fraction NHF&nbsp;&lt;&nbsp;0.05.</li>
+  </ul>
+</div>
+{% elif disc_metrics %}
+<div class="summary-card">
+  <h3>What this pipeline does</h3>
+  <p>
+    This report summarises a <strong>VCF-free discovery</strong> run of
+    kmer-denovo-filter.  Instead of starting from putative DNMs in a VCF,
+    the pipeline scans the proband BAM for genomic regions enriched for
+    proband-unique k-mers (k-mers absent from both parents) and reports
+    these as candidate <em>de novo</em> events.  The intent is to
+    re-discover known DNMs and surface novel ones, including structural
+    variants that VCF-based callers may miss.
+  </p>
+</div>
+{% endif %}
+
+<h3>At a glance</h3>
 <div class="metric-cards">
-  {% if vcf_metrics %}
+  {% if stratification %}
   <div class="metric-card">
-    <span class="value">{{ "{:,}".format(vcf_metrics.get("total_variants", 0)) }}</span>
-    <span class="label">Total Candidates</span>
+    <span class="value">{{ "{:,}".format(stratification.counts[0]) }}</span>
+    <span class="label">Putative denovo (input)</span>
+  </div>
+  <div class="metric-card orange">
+    <span class="value">{{ "{:,}".format(stratification.counts[1]) }}</span>
+    <span class="label">Putative kmer denovo (DKA &gt; 0)</span>
   </div>
   <div class="metric-card green">
-    <span class="value">{{ vcf_metrics.get("variants_with_unique_reads", 0) }}</span>
-    <span class="label">Likely De Novo (DKU &gt; 0)</span>
+    <span class="value">{{ "{:,}".format(stratification.counts[2]) }}</span>
+    <span class="label">Higher-quality (DKA_DKT &gt; 0.25)</span>
   </div>
+  <div class="metric-card green">
+    <span class="value">{{ "{:,}".format(stratification.counts[3]) }}{% if not stratification.has_nhf_data %}*{% endif %}</span>
+    <span class="label">HQ + non-contamination
+      {% if not stratification.has_nhf_data %}<br><em>(no NHF data — ≡ stage 3)</em>{% endif %}
+    </span>
+  </div>
+  {% endif %}
+  {% if vcf_metrics %}
   <div class="metric-card">
     <span class="value">{{ "{:,}".format(vcf_metrics.get("total_child_kmers", 0)) }}</span>
     <span class="label">Total Child K-mers</span>
@@ -1343,14 +1772,6 @@ _HTML_TEMPLATE = """\
   <div class="metric-card green">
     <span class="value">{{ "{:,}".format(vcf_metrics.get("child_unique_kmers", 0)) }}</span>
     <span class="label">Child-Unique K-mers</span>
-  </div>
-  <div class="metric-card">
-    <span class="value">
-      {% if vcf_metrics.get("total_child_kmers", 0) > 0 %}
-        {{ "%.1f"|format(100 * vcf_metrics.get("child_unique_kmers", 0) / vcf_metrics.get("total_child_kmers", 1)) }}%
-      {% else %}0%{% endif %}
-    </span>
-    <span class="label">Unique Rate</span>
   </div>
   {% endif %}
 
@@ -1370,37 +1791,170 @@ _HTML_TEMPLATE = """\
   {% endif %}
 </div>
 
+{% if strat_funnel_div %}
+<div class="plot-container">
+  {{ strat_funnel_div | safe }}
+  <p class="plot-caption">
+    Variant attrition through the four stratification stages.  Reading
+    left-to-right shows how many of the input putative DNMs survive each
+    progressively stricter filter.
+  </p>
+</div>
+{% endif %}
+
+{% if strat_sankey_div %}
+<div class="plot-container">
+  {{ strat_sankey_div | safe }}
+  <p class="plot-caption">
+    Variant flow diagram: each grey "Filtered" node shows how many variants
+    were removed by the corresponding criterion.  This makes the
+    selectivity of each filter explicit.
+  </p>
+</div>
+{% endif %}
+
 {% if sankey_div %}
 <div class="plot-container">
   {{ sankey_div | safe }}
+  <p class="plot-caption">
+    K-mer-level flow: how the child's raw k-mer pool is reduced after
+    parental subtraction.  This is k-mer-level (not variant-level) and is
+    complementary to the variant funnel above.
+  </p>
 </div>
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 2: K-mer Filtering Funnel
+     Section 2: Methods
      ═══════════════════════════════════════════════════════════════════ -->
-{% if funnel_div %}
-<h2>2. K-mer Filtering Funnel</h2>
-<div class="section-rationale">
-  <strong>Scientific rationale:</strong> A skeptic's first question is
-  "how aggressive is this filter?"  The step-wise attrition plot shows
-  the method is not over- or under-filtering.  This mirrors the filtering
-  cascade standard in variant calling benchmarks (e.g., GIAB Mendelian
-  violation rates).
+<h2>2. Methods</h2>
+<div class="method-box">
+  <h3>Input &amp; rationale</h3>
+  <p>
+    {% if vcf_metrics %}
+    The pipeline ingests a trio VCF of putative de novo variants (proband
+    plus parental BAM/CRAM files).  Standard variant callers report many
+    putative DNMs that are in fact inherited or artefactual; the goal of
+    kmer-denovo-filter is to re-evaluate every candidate with
+    alignment-independent k-mer evidence and to flag candidates whose
+    supporting reads contain non-human sequence.
+    {% else %}
+    The pipeline scans the proband BAM directly (no input VCF), identifying
+    contiguous genomic regions enriched for proband-unique k-mers as
+    candidate de novo events.
+    {% endif %}
+  </p>
 </div>
-<div class="plot-container">
-  {{ funnel_div | safe }}
+
+<div class="method-box">
+  <h3>K-mer extraction &amp; parental subtraction</h3>
+  <p>
+    For each candidate variant we extract the set of k-mers present on
+    reads spanning the locus in the proband, then query <a
+    href="https://github.com/gmarcais/Jellyfish">Jellyfish</a> indexes
+    built from each parent's sequencing reads.  K-mers absent from both
+    parents are termed <strong>child-unique</strong>.  Per variant we
+    record:
+  </p>
+  <ul style="margin-left:24px; color:#444; font-size:0.95em;">
+    <li><strong>DKU</strong> &mdash; distinct child-unique k-mers at the locus.</li>
+    <li><strong>DKT</strong> &mdash; total fragments spanning the locus.</li>
+    <li><strong>DKA</strong> &mdash; fragments carrying ≥ 1 child-unique k-mer that supports the ALT allele.</li>
+    <li><strong>DKA_DKT</strong> &mdash; DKA / DKT, analogous to a k-mer-based VAF.</li>
+    <li><strong>PKC_ALT</strong> &mdash; ALT-allele k-mer count in each parent (MAX/AVG/MIN).</li>
+  </ul>
+</div>
+
+<div class="method-box">
+  <h3>Stratification cascade</h3>
+  <p>
+    Every putative DNM is placed into one of four cumulative stages.  These
+    same stages are referenced by the funnel, the Sankey, the per-variant
+    table, and the contamination plots so the report tells a single
+    consistent story.
+  </p>
+  <ol style="margin-left:24px; color:#444; font-size:0.95em;">
+    <li><strong>Putative denovo</strong> &mdash; every input variant (no filter).</li>
+    <li><strong>Putative kmer denovo</strong> &mdash; <code>DKA &gt; 0</code>.  Removes the
+      large majority of inherited / miscalled variants for which no proband
+      fragment carries a child-unique ALT-supporting k-mer.</li>
+    <li><strong>Higher-quality denovo</strong> &mdash; <code>DKA_DKT &gt; 0.25</code>.  Requires
+      that more than a quarter of spanning fragments carry the unique-k-mer
+      ALT signal &mdash; analogous to a minimum VAF requirement and chosen to
+      track expected heterozygous DNM allele fractions on Illumina WGS.</li>
+    <li><strong>Higher-quality, not contamination</strong> &mdash; stage 3 plus
+      <code>DKA_NHF &lt; 0.05</code>.  Removes variants whose supporting
+      reads are dominated (≥ 5 %) by Kraken2-classified non-human sequence.</li>
+  </ol>
+</div>
+
+<div class="method-box">
+  <h3>Non-human contamination screening</h3>
+  <p>
+    Microbial reads that misalign to the human reference are a documented
+    source of false-positive DNMs.  We classify the DKA-supporting reads at
+    each candidate site with <a
+    href="https://ccb.jhu.edu/software/kraken2/">Kraken2</a> against a
+    standard database (human + bacterial + viral + UniVec_Core) and
+    annotate every variant with per-class read fractions:
+  </p>
+  <ul style="margin-left:24px; color:#444; font-size:0.95em;">
+    <li><strong>DKA_HLF</strong> &mdash; human-lineage fraction.</li>
+    <li><strong>DKA_NHF</strong> &mdash; non-human fraction (driver of stage-4 filter).</li>
+    <li><strong>DKA_UCF</strong> &mdash; UniVec Core (vector / adapter) fraction.</li>
+    <li><strong>DKA_UF</strong> &mdash; unclassified fraction.</li>
+  </ul>
+  <p style="margin-top:8px;">
+    Variants with <code>DKA_NHF ≥ 0.05</code> are conservatively flagged
+    as likely contamination and excluded from the final stage-4 set.
+  </p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     Section 3: Results highlights (auto-generated narrative)
+     ═══════════════════════════════════════════════════════════════════ -->
+{% if stratification and stratification.counts[0] > 0 %}
+<h2>3. Results Highlights</h2>
+<div class="summary-card">
+  <p>
+    Of the
+    <strong>{{ "{:,}".format(stratification.counts[0]) }}</strong>
+    putative DNMs supplied in the input VCF,
+    <strong>{{ "{:,}".format(stratification.counts[1]) }}</strong>
+    ({{ "%.1f"|format(100 * stratification.counts[1] / stratification.counts[0]) }}%)
+    have any k-mer evidence (DKA &gt; 0).  Applying the higher-quality
+    cut-off (DKA_DKT &gt; 0.25) further reduces the set to
+    <strong>{{ "{:,}".format(stratification.counts[2]) }}</strong>
+    ({{ "%.1f"|format(100 * stratification.counts[2] / stratification.counts[0]) }}%
+     of input).
+    {% if stratification.has_nhf_data %}
+    After excluding likely contamination (NHF ≥ 0.05),
+    <strong>{{ "{:,}".format(stratification.counts[3]) }}</strong>
+    ({{ "%.1f"|format(100 * stratification.counts[3] / stratification.counts[0]) }}%
+     of input) candidates remain — these constitute the final
+    higher-confidence DNM set reported in the table below.
+    {% else %}
+    <em>No Kraken2 contamination annotations were detected on the input
+    VCF, so the stage-4 contamination filter could not be applied; the
+    stage-3 set is reported as the final higher-confidence set.</em>
+    {% endif %}
+    The vast majority of putative DNMs that fail at stage 2 are
+    <em>simple miscalled variants</em> — i.e. positions for which no
+    proband read carries a child-unique ALT-supporting k-mer, indicating
+    the variant is either inherited (parental support exists) or
+    artefactual.
+  </p>
 </div>
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 3: Variant Type &amp; Chromosomal Breakdown
+     Section 4: Variant Type &amp; Chromosomal Breakdown
      ═══════════════════════════════════════════════════════════════════ -->
 {% if variant_type_div or chrom_dist_div %}
-<h2>3. Variant Breakdown</h2>
+<h2>4. Variant Breakdown</h2>
 <div class="section-rationale">
-  <strong>Scientific rationale:</strong> A genomics reviewer will
-  immediately check whether the de novo call set has the expected
+  <strong>What this shows:</strong> A genomics reviewer will
+  immediately check whether the call set has the expected
   composition: ~38 SNVs and ~3–5 indels per WGS trio, distributed
   across all autosomes.  Excess calls on one chromosome or an
   unexpected type ratio are red flags for a systematic artefact.
@@ -1409,60 +1963,97 @@ _HTML_TEMPLATE = """\
 {% if variant_type_div %}
 <div class="plot-container">
   {{ variant_type_div | safe }}
+  <p class="plot-caption">
+    SNV / insertion / deletion / MNV counts split by call status.
+  </p>
 </div>
 {% endif %}
 
 {% if chrom_dist_div %}
 <div class="plot-container">
   {{ chrom_dist_div | safe }}
+  <p class="plot-caption">
+    Per-chromosome variant counts.  Clustering on a single chromosome
+    can indicate a systematic artefact.
+  </p>
 </div>
 {% endif %}
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 4: DKA/DKT Ratio Distribution
+     Section 5: K-mer Filtering Funnel (k-mer level)
+     ═══════════════════════════════════════════════════════════════════ -->
+{% if funnel_div %}
+<h2>5. K-mer Filtering Funnel</h2>
+<div class="section-rationale">
+  <strong>What this shows:</strong> Step-wise attrition of the
+  <em>k-mer</em> pool (not the variant pool).  Together with the
+  variant funnel above, this answers the reviewer's question
+  "how aggressive is the parental subtraction?".
+</div>
+<div class="plot-container">
+  {{ funnel_div | safe }}
+</div>
+{% endif %}
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     Section 6: DKA/DKT Ratio Distribution
      ═══════════════════════════════════════════════════════════════════ -->
 {% if variants %}
-<h2>4. DKA/DKT Ratio Distribution &amp; Threshold Sensitivity</h2>
+<h2>6. DKA/DKT Ratio Distribution &amp; Threshold Sensitivity</h2>
 <div class="section-rationale">
-  <strong>Scientific rationale:</strong> The DKA_DKT ratio captures what
+  <strong>What this shows:</strong> The DKA_DKT ratio captures what
   fraction of spanning fragments carry child-unique allele-supporting
   k-mers &mdash; a direct measure of de novo evidence strength, analogous
   to variant allele fraction (VAF) in somatic callers.  Variants with
-  DKA_DKT &ge; 0.25 and DKA &ge; 10 are considered high-quality
-  candidates.
+  DKA_DKT &gt; 0.25 are stage-3 (higher-quality) candidates.
 </div>
 
 {% if histogram_div %}
 <div class="plot-container">
   {{ histogram_div | safe }}
+  <p class="plot-caption">
+    Histogram of DKA_DKT ratio.  Variants with no k-mer evidence
+    (DKA = 0) are shown in grey; kmer-DNM candidates (DKA &gt; 0)
+    in blue.  The dashed red line marks the higher-quality threshold.
+  </p>
 </div>
 {% endif %}
 
 {% if threshold_div %}
 <div class="plot-container">
   {{ threshold_div | safe }}
+  <p class="plot-caption">
+    Sensitivity analysis: number of variants passing for any choice of
+    DKA_DKT threshold.  Use this to gauge the impact of moving the cut-off.
+  </p>
 </div>
 {% endif %}
 
 {% if scatter_div %}
 <div class="plot-container">
   {{ scatter_div | safe }}
+  <p class="plot-caption">
+    DKA versus DKT for each variant; marker colour encodes DKA_DKT and
+    size encodes DKU.  Genuine DNMs cluster along the diagonal;
+    artefacts and inherited variants cluster near the x-axis.
+  </p>
 </div>
 {% endif %}
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 5: Per-Variant Evidence Heatmap
+     Section 7: Per-Variant Evidence Heatmap
      ═══════════════════════════════════════════════════════════════════ -->
 {% if heatmap_div %}
-<h2>5. Per-Variant Evidence Heatmap</h2>
+<h2>7. Per-Variant Evidence Heatmap</h2>
 <div class="section-rationale">
-  <strong>Scientific rationale:</strong> This is the genomics equivalent
-  of a gene expression heatmap — it reveals variant groupings and outlier
-  patterns that are invisible in tabular format.  Z-score normalization
+  <strong>What this shows:</strong> Genomics equivalent of a gene
+  expression heatmap &mdash; reveals variant groupings and outlier
+  patterns that are invisible in tabular format.  Z-score normalisation
   per column ensures visual comparability across fields with different
-  scales.
+  scales.  For very large variant lists this is rendered as a clustered
+  summary (one row per k-means cluster) rather than per-variant rows.
 </div>
 <div class="plot-container">
   {{ heatmap_div | safe }}
@@ -1470,22 +2061,19 @@ _HTML_TEMPLATE = """\
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 6: Parental K-mer Count (PKC) Analysis
+     Section 8: Parental K-mer Count (PKC) Analysis
      ═══════════════════════════════════════════════════════════════════ -->
 {% if pkc_box_div %}
-<h2>6. Parental K-mer Count (PKC) Analysis</h2>
+<h2>8. Parental K-mer Count (PKC) Analysis</h2>
 <div class="section-rationale">
-  <strong>Scientific rationale:</strong> If k-mers are absent from parents,
+  <strong>What this shows:</strong> If k-mers are absent from parents,
   is that a coverage gap or true absence?  We use <strong>ALT-allele</strong>
-  parental k-mer counts (PKC_ALT) — the number of times ALT-allele k-mers
-  appear in each parent.  For genuine de novo variants, ALT-allele k-mers
-  should be absent from both parents (PKC_ALT ≈ 0).  For inherited variants,
-  the ALT allele is present in at least one parent, so PKC_ALT is non-zero.
-  High PKC_ALT at inherited sites confirms the parents are well-sequenced;
-  zero PKC_ALT at de novo sites is therefore meaningful and not an artifact
-  of parental under-sequencing.  Note: total PKC (including REF-allele
-  k-mers) is not shown here as REF k-mers are present in parents for all
-  variants regardless of de novo status.
+  parental k-mer counts (PKC_ALT).  For genuine de novo variants ALT-allele
+  k-mers should be absent from both parents (PKC_ALT ≈ 0); for inherited
+  variants PKC_ALT is non-zero because the ALT allele is present in at
+  least one parent.  High PKC_ALT at inherited sites confirms the parents
+  are well-sequenced; zero PKC_ALT at de novo sites is therefore meaningful
+  and not an artifact of parental under-sequencing.
 </div>
 <div class="plot-container">
   {{ pkc_box_div | safe }}
@@ -1499,29 +2087,62 @@ _HTML_TEMPLATE = """\
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 7: Non-Human Contamination Profile
+     Section 9: Non-Human Contamination Profile
      ═══════════════════════════════════════════════════════════════════ -->
-{% if contamination_div %}
-<h2>7. Non-Human Contamination Profile (Kraken2)</h2>
+{% if variants %}
+<h2>9. Non-Human Contamination Profile (Kraken2)</h2>
 <div class="section-rationale">
-  <strong>Scientific rationale:</strong> Microbial contamination is a
-  known source of false-positive de novo calls.  The Kraken2
-  classification provides a taxonomic audit trail for every informative
-  read, addressing the criticism that novel k-mers could come from
-  contamination rather than true mutation.
+  <strong>Why this matters:</strong> Microbial sequence that
+  cross-aligns to the human reference is a well-documented source of
+  false-positive de novo calls.  The kmer-denovo-filter pipeline runs
+  <a href="https://ccb.jhu.edu/software/kraken2/">Kraken2</a> on the
+  DKA-supporting reads at each candidate variant and emits the
+  per-class read-fraction tags listed in the methods (DKA_HLF,
+  DKA_NHF, DKA_UCF, DKA_UF).  The stage-4 filter excludes any variant
+  with <code>DKA_NHF ≥ 0.05</code>.
 </div>
+
+{% if nhf_dist_div %}
 <div class="plot-container">
-  {{ contamination_div | safe }}
+  {{ nhf_dist_div | safe }}
+  <p class="plot-caption">
+    Distribution of the non-human fraction (NHF) among kmer-DNM
+    candidates.  Variants to the right of the dashed red line are
+    excluded by the stage-4 filter.
+  </p>
 </div>
 {% endif %}
 
+{% if contamination_div %}
+<div class="plot-container">
+  {{ contamination_div | safe }}
+  <p class="plot-caption">
+    Per-variant Kraken2 read classification, restricted to kmer-DNM
+    candidates (stage ≥ 1) where contamination would matter for the
+    final call set.
+  </p>
+</div>
+{% endif %}
+
+{% if not stratification or not stratification.has_nhf_data %}
+<div class="section-rationale" style="border-left-color:#F58518;">
+  <strong>No Kraken2 contamination annotations were detected on the input VCF.</strong>
+  The stage-4 contamination filter has therefore not been applied, and
+  any "higher-quality, non-contamination" counts above are equivalent to
+  the stage-3 (higher-quality) counts.  Re-run the pipeline with the
+  Kraken2 annotation step enabled (set <code>--kraken2-db</code> and
+  related options) to populate this section.
+</div>
+{% endif %}
+{% endif %}
+
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 8: Discovery Mode Results
+     Section 10: Discovery Mode Results
      ═══════════════════════════════════════════════════════════════════ -->
 {% if disc_regions %}
-<h2>8. Discovery Mode: Region Landscape</h2>
+<h2>10. Discovery Mode: Region Landscape</h2>
 <div class="section-rationale">
-  <strong>Scientific rationale:</strong> The VCF-free discovery mode
+  <strong>What this shows:</strong> The VCF-free discovery mode
   identifies genomic regions enriched for proband-unique k-mers without
   prior variant knowledge.  The distribution and characteristics of
   discovered regions provide independent confirmation of de novo signal.
@@ -1547,10 +2168,10 @@ _HTML_TEMPLATE = """\
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 9: Discovery vs VCF Concordance
+     Section 11: Discovery vs VCF Concordance
      ═══════════════════════════════════════════════════════════════════ -->
 {% if candidate_comparison and candidate_comparison.get("candidates") %}
-<h2>9. Discovery vs. VCF Mode Concordance</h2>
+<h2>11. Discovery vs. VCF Mode Concordance</h2>
 <div class="section-rationale">
   <strong>Scientific rationale:</strong> Cross-validation between two
   independent analytical modes is one of the strongest arguments for
@@ -1594,10 +2215,10 @@ _HTML_TEMPLATE = """\
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 10: Curated DNM Evaluation
+     Section 12: Curated DNM Evaluation
      ═══════════════════════════════════════════════════════════════════ -->
 {% if dnm_evaluation and dnm_evaluation.get("loci") %}
-<h2>10. Curated DNM Region Evaluation (Sulovari et al. 2023)</h2>
+<h2>12. Curated DNM Region Evaluation (Sulovari et al. 2023)</h2>
 <p class="description">
   Evaluation of discovery regions against curated de novo mutation loci
   from Sulovari et al. 2023.  This gold-standard validation demonstrates
@@ -1645,29 +2266,38 @@ _HTML_TEMPLATE = """\
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 11: Per-Variant Detail Table
+     Section 13: Per-Variant Detail Table  (higher-quality only)
      ═══════════════════════════════════════════════════════════════════ -->
 {% if variants %}
-<h2>11. Per-Variant Detail Table</h2>
-{% set total_variants = variants | length %}
-{% set shown_variants = variant_table_rows %}
-{% if total_variants > shown_variants | length %}
+<h2>13. Per-Variant Detail Table — Higher-Quality DNMs</h2>
 <p class="description">
-  Showing {{ shown_variants | length }} of {{ total_variants }} variants
-  (DE_NOVO calls first, then inherited up to {{ variant_table_max_rows }} rows total).
-  See the annotated VCF or summary.txt for the complete list.
+  This table is restricted to <strong>higher-quality DNMs</strong> only
+  (stage 3: <code>DKA_DKT &gt; {{ high_quality_threshold }}</code>).  The
+  full per-variant list (typically tens of thousands of rows on a real
+  trio) is not shown here — see <code>summary.txt</code> or the annotated
+  VCF for the complete output.
+  {% set total_hq = hq_variants | length %}
+  {% set shown = variant_table_rows | length %}
+  {% if total_hq > shown %}
+  Showing {{ shown }} of {{ total_hq }} higher-quality variants
+  (capped at {{ variant_table_max_rows }} rows).
+  {% else %}
+  {{ shown }} higher-quality variant{{ "" if shown == 1 else "s" }} shown.
+  {% endif %}
 </p>
-{% endif %}
+{% if variant_table_rows %}
 <table>
   <thead>
     <tr>
       <th>Variant</th><th>Type</th><th>DKU</th><th>DKT</th><th>DKA</th>
       <th>DKU_DKT</th><th>DKA_DKT</th><th>MAX_PKC_ALT</th>
-      <th>AVG_PKC_ALT</th><th>Call</th>
+      <th>AVG_PKC_ALT</th>
+      {% if stratification and stratification.has_nhf_data %}<th>NHF</th>{% endif %}
+      <th>Stage</th>
     </tr>
   </thead>
   <tbody>
-    {% for v in shown_variants %}
+    {% for v in variant_table_rows %}
     <tr>
       <td>{{ v.label }}</td>
       <td>{{ v.vtype }}</td>
@@ -1676,18 +2306,27 @@ _HTML_TEMPLATE = """\
       <td>{{ "%.4f"|format(v.dka_dkt) }}</td>
       <td>{{ v.max_pkc_alt }}</td>
       <td>{{ "%.2f"|format(v.avg_pkc_alt) }}</td>
-      <td><span class="badge {% if v.call == 'DE_NOVO' %}badge-green{% else %}badge-orange{% endif %}">
-        {{ v.call }}</span></td>
+      {% if stratification and stratification.has_nhf_data %}
+      <td>
+        {% if "dka_nhf" in v %}{{ "%.3f"|format(v.dka_nhf) }}{% else %}—{% endif %}
+      </td>
+      {% endif %}
+      <td><span class="badge {% if v.stage >= 3 %}badge-green{% else %}badge-orange{% endif %}">
+        {{ "HQ + non-contam" if v.stage >= 3 else "Higher quality" }}</span></td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
+{% else %}
+<p class="description"><em>No variants passed the higher-quality
+  threshold (DKA_DKT &gt; {{ high_quality_threshold }}).</em></p>
+{% endif %}
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════
-     Section 12: Method Overview
+     Section 14: Method Overview &amp; Interpretation Guide
      ═══════════════════════════════════════════════════════════════════ -->
-<h2>12. Method Overview &amp; Interpretation Guide</h2>
+<h2>14. Method Overview &amp; Interpretation Guide</h2>
 
 <div class="method-box">
   <h3>Why K-mers?</h3>
@@ -1712,7 +2351,11 @@ _HTML_TEMPLATE = """\
     and provide evidence of de novo origin.<br>
     <strong>4.</strong> Count spanning fragments (DKT) and fragments with
     unique k-mers supporting the alt allele (DKA) to compute
-    DKA_DKT ratio.
+    DKA_DKT ratio.<br>
+    <strong>5.</strong> Classify the DKA-supporting reads with Kraken2 to
+    measure non-human / contamination fractions (DKA_NHF, DKA_HLF, ...).<br>
+    <strong>6.</strong> Apply the four-stage stratification to produce the
+    final higher-confidence DNM set.
   </p>
 </div>
 
@@ -1726,19 +2369,13 @@ _HTML_TEMPLATE = """\
     <strong>DKA</strong> — Alt-supporting fragments carrying at least
     one child-unique k-mer.<br>
     <strong>DKA_DKT</strong> — Ratio of DKA to DKT; the primary signal
-    metric. Values &ge; 0.25 with DKA &ge; 10 indicate high-quality
-    de novo candidates.<br>
+    metric. Values &gt; 0.25 indicate higher-quality
+    de novo candidates (stage 3).<br>
     <strong>PKC_ALT (MAX/AVG/MIN_PKC_ALT)</strong> — ALT-allele Parental K-mer
     Count: how many times the variant's ALT-allele k-mers appear in the
-    parents.  For genuine de novo variants these values should be near zero
-    (the ALT allele is absent from both parents). For inherited variants
-    PKC_ALT is non-zero because the ALT allele is present in at least one
-    parent. Note that total PKC (ref + alt k-mers) is not shown in the PKC
-    analysis because REF k-mers are present in parents regardless of de novo
-    status.<br>
+    parents.  For genuine de novo variants these values should be near zero.<br>
     <strong>NHF (DKA_NHF)</strong> — Non-human fraction of informative
-    reads. Values &gt; 0.1 warrant caution as the signal may be driven
-    by microbial contamination.
+    reads. Values &ge; 0.05 trigger the stage-4 contamination filter.
   </p>
 </div>
 
@@ -1801,14 +2438,19 @@ def generate_report(
         "vcf_metrics": None,
         "disc_metrics": None,
         "variants": [],
+        "hq_variants": [],
         "variant_table_rows": [],
         "variant_table_max_rows": _VARIANT_TABLE_MAX_ROWS,
+        "high_quality_threshold": _HIGH_QUALITY_DKA_DKT_THRESHOLD,
+        "stratification": None,
         "disc_regions": [],
         "candidate_comparison": {},
         "dnm_evaluation": {},
         "plotly_bundle": _get_plotly_bundle(),
         "sankey_div": None,
         "funnel_div": None,
+        "strat_funnel_div": None,
+        "strat_sankey_div": None,
         "histogram_div": None,
         "threshold_div": None,
         "scatter_div": None,
@@ -1816,6 +2458,7 @@ def generate_report(
         "pkc_box_div": None,
         "pkc_scatter_div": None,
         "contamination_div": None,
+        "nhf_dist_div": None,
         "disc_scatter_div": None,
         "disc_size_div": None,
         "sv_evidence_div": None,
@@ -1839,7 +2482,26 @@ def generate_report(
             v["vtype"] = _classify_variant_type(v["label"])
         context["variants"] = variants
 
+        # ── Kraken2 / contamination annotations (must be merged BEFORE
+        # stratification so the stage-4 NHF filter can be applied) ───────
+        kraken2_data = []
+        if vcf_path and os.path.isfile(vcf_path):
+            kraken2_data = _load_vcf_kraken2_annotations(vcf_path)
+            if kraken2_data:
+                _merge_kraken2_into_variants(variants, kraken2_data)
+
         if variants:
+            # Compute stratification for both summary and downstream plots
+            stratification = _compute_stratification(variants)
+            context["stratification"] = stratification
+
+            context["strat_funnel_div"] = _make_stratification_funnel(
+                stratification,
+            )
+            context["strat_sankey_div"] = _make_stratification_sankey(
+                stratification,
+            )
+
             context["histogram_div"] = _make_dka_dkt_histogram(variants)
             context["threshold_div"] = _make_threshold_sensitivity(variants)
             context["scatter_div"] = _make_dka_vs_dkt_scatter(variants)
@@ -1849,22 +2511,25 @@ def generate_report(
             context["variant_type_div"] = _make_variant_type_breakdown(variants)
             context["chrom_dist_div"] = _make_chromosomal_distribution(variants)
 
-            # Build table rows: all DE_NOVO first, then inherited up to limit
-            denovo_rows = [v for v in variants if v["call"] == "DE_NOVO"]
-            inherited_rows = [v for v in variants if v["call"] != "DE_NOVO"]
-            remaining = max(0, _VARIANT_TABLE_MAX_ROWS - len(denovo_rows))
-            context["variant_table_rows"] = (
-                denovo_rows + inherited_rows[:remaining]
+            # Per-variant detail table: restrict to higher-quality DNMs
+            # only (stage ≥ 2: DKA_DKT > 0.25).  The full per-variant list
+            # is often 30 000+ rows on a real trio and is not informative
+            # for a reviewer.  Stage-3 (HQ + non-contam) variants are
+            # listed before stage-2 ones so the highest-confidence calls
+            # appear first.
+            hq_variants = [v for v in variants if v["stage"] >= 2]
+            hq_variants.sort(
+                key=lambda v: (-(v.get("stage", 0)), -v.get("dka_dkt", 0.0)),
             )
+            context["hq_variants"] = hq_variants
+            context["variant_table_rows"] = hq_variants[:_VARIANT_TABLE_MAX_ROWS]
 
-    # Kraken2 annotations from VCF
-    if vcf_path and os.path.isfile(vcf_path):
-        kraken2_data = _load_vcf_kraken2_annotations(vcf_path)
-        if kraken2_data and context["variants"]:
-            contamination_div = _make_contamination_bar(
-                context["variants"], kraken2_data,
-            )
-            context["contamination_div"] = contamination_div
+            # Contamination plots (require Kraken2 data)
+            if kraken2_data:
+                context["contamination_div"] = _make_contamination_bar(
+                    variants, kraken2_data,
+                )
+                context["nhf_dist_div"] = _make_nhf_distribution_plot(variants)
 
     # ── Discovery mode data ───────────────────────────────────────
     if discovery_metrics_path and os.path.isfile(discovery_metrics_path):
