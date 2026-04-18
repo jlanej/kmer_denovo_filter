@@ -531,16 +531,21 @@ class TestHeatmapDataCap:
 
     def test_heatmap_row_cap_constant_exported(self):
         from kmer_denovo_filter.report import _HEATMAP_MAX_ROWS
-        assert _HEATMAP_MAX_ROWS <= 500
+        assert _HEATMAP_MAX_ROWS == 200
 
     def test_heatmap_height_bounded(self):
+        import re
         from kmer_denovo_filter.report import _make_evidence_heatmap
-        # Create more variants than the cap
+        # Create more variants than the cap so the height limit is exercised
         variants = self._make_variants(300)
         div = _make_evidence_heatmap(variants)
-        # The height embedded in the div JSON should be ≤ 2000
-        assert '"height": 2000' in div or '"height":2000' in div or \
-               any(f'"height": {h}' in div for h in range(400, 2001))
+        # Extract the height value from the embedded JSON (Plotly serialises
+        # layout as {"height": <int>, ...})
+        heights = [int(m) for m in re.findall(r'"height":\s*(\d+)', div)]
+        assert heights, "No height found in Plotly div JSON"
+        assert all(h <= 2000 for h in heights), (
+            f"Plot height {max(heights)} exceeds 2000 px browser-safe limit"
+        )
 
     def test_heatmap_note_present_when_trimmed(self):
         from kmer_denovo_filter.report import (
@@ -557,13 +562,19 @@ class TestHeatmapDataCap:
         from kmer_denovo_filter.report import _make_evidence_heatmap
         variants = self._make_variants(20)
         div = _make_evidence_heatmap(variants)
-        # The label "chr1:0 A>C" should appear far fewer times than n_cells
-        # (it appears in y-axis labels once per variant, not n_cols times)
+        # With the old approach the label appeared once per cell (8 fields),
+        # totalling 8+ occurrences per variant.  With the new customdata
+        # approach the label is stored only in the y-axis array (once per
+        # variant).  Plotly may also include it in the axis tick label JSON,
+        # so allow up to 2 occurrences per occurrence in the axis data.
+        # Concretely for "chr1:0 A>C": 1 occurrence in the y array + at most
+        # 1 in Plotly's layout ticktext = 2.  We allow ≤ 2 to be safe.
         label = "chr1:0 A>C"
         occurrences = div.count(label)
-        # Should appear in y-axis labels (once) not in per-cell text (8 times)
-        assert occurrences <= 3, (
-            f"Label repeated {occurrences} times — hover text matrix not removed"
+        # Pre-fix value would be 8 (one per field column).
+        assert occurrences <= 2, (
+            f"Label appears {occurrences} times (expected ≤ 2) — "
+            "hover text string matrix was not replaced with customdata"
         )
 
 
