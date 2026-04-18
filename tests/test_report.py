@@ -463,6 +463,160 @@ class TestGenerateReport:
             os.unlink(out)
 
 
+class TestDownsampleVariants:
+    """Unit tests for the _downsample_variants helper."""
+
+    def _make_variants(self, n_denovo, n_inherited):
+        variants = []
+        for i in range(n_denovo):
+            variants.append({"call": "DE_NOVO", "label": f"chr1:{i} A>C"})
+        for i in range(n_inherited):
+            variants.append({"call": "inherited", "label": f"chr2:{i} G>T"})
+        return variants
+
+    def test_no_downsampling_when_within_limit(self):
+        from kmer_denovo_filter.report import _downsample_variants
+        variants = self._make_variants(10, 10)
+        result, was_trimmed = _downsample_variants(variants, 100)
+        assert result is variants
+        assert not was_trimmed
+
+    def test_preserves_all_denovo_first(self):
+        from kmer_denovo_filter.report import _downsample_variants
+        variants = self._make_variants(50, 200)
+        result, was_trimmed = _downsample_variants(variants, 100)
+        assert was_trimmed
+        assert len(result) <= 100
+        denovo_in_result = [v for v in result if v["call"] == "DE_NOVO"]
+        assert len(denovo_in_result) == 50  # all DE_NOVO kept
+
+    def test_caps_total_when_denovo_exceeds_limit(self):
+        from kmer_denovo_filter.report import _downsample_variants
+        variants = self._make_variants(300, 100)
+        result, was_trimmed = _downsample_variants(variants, 200)
+        assert was_trimmed
+        assert len(result) <= 200
+        # Only DE_NOVO in result
+        assert all(v["call"] == "DE_NOVO" for v in result)
+
+    def test_exact_limit_not_downsampled(self):
+        from kmer_denovo_filter.report import _downsample_variants
+        variants = self._make_variants(5, 5)
+        result, was_trimmed = _downsample_variants(variants, 10)
+        assert not was_trimmed
+
+    def test_returns_same_object_when_no_trim(self):
+        from kmer_denovo_filter.report import _downsample_variants
+        variants = self._make_variants(3, 3)
+        result, was_trimmed = _downsample_variants(variants, 100)
+        assert result is variants
+
+
+class TestHeatmapDataCap:
+    """Verify heatmap cluster-summary mode for large datasets."""
+
+    def _make_variants(self, n, denovo_every=3):
+        """Create *n* synthetic variants; every *denovo_every*-th is DE_NOVO.
+
+        DE_NOVO variants get a high dka_dkt (0.3) and inherited ones get a
+        low dka_dkt (0.05) to give k-means clustering something to separate.
+        """
+        return [
+            {
+                "label": f"chr1:{i} A>C",
+                "dku": i % 10, "dkt": i % 10 + 1, "dka": i % 10,
+                "dku_dkt": 0.5, "dka_dkt": 0.3 if i % denovo_every == 0 else 0.05,
+                "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0,
+                "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0,
+                "call": "DE_NOVO" if i % denovo_every == 0 else "inherited",
+                "vtype": "SNV",
+            }
+            for i in range(n)
+        ]
+
+    def test_heatmap_row_cap_constant_exported(self):
+        from kmer_denovo_filter.report import _HEATMAP_MAX_ROWS
+        assert _HEATMAP_MAX_ROWS == 200
+
+    def test_heatmap_n_clusters_constant_exported(self):
+        from kmer_denovo_filter.report import _HEATMAP_N_CLUSTERS
+        assert _HEATMAP_N_CLUSTERS == 8
+
+    def test_heatmap_height_bounded(self):
+        import re
+        from kmer_denovo_filter.report import _make_evidence_heatmap
+        # Cluster-summary mode (>_HEATMAP_MAX_ROWS variants)
+        variants = self._make_variants(300)
+        div = _make_evidence_heatmap(variants)
+        heights = [int(m) for m in re.findall(r'"height":\s*(\d+)', div)]
+        assert heights, "No height found in Plotly div JSON"
+        assert all(h <= 2000 for h in heights), (
+            f"Plot height {max(heights)} exceeds 2000 px browser-safe limit"
+        )
+
+    def test_cluster_mode_activates_above_threshold(self):
+        """For >_HEATMAP_MAX_ROWS variants the heatmap shows cluster summary."""
+        from kmer_denovo_filter.report import (
+            _make_evidence_heatmap,
+            _HEATMAP_MAX_ROWS,
+        )
+        variants = self._make_variants(_HEATMAP_MAX_ROWS + 50)
+        div = _make_evidence_heatmap(variants)
+        # Cluster mode shows "k-means" and "Cluster" labels
+        assert "k-means" in div
+        assert "Cluster" in div
+        # And shows the total variant count
+        assert str(len(variants)) in div or f"{len(variants):,}" in div
+
+    def test_cluster_mode_shows_denovo_fraction(self):
+        """Cluster rows must be annotated with their DE_NOVO percentage."""
+        from kmer_denovo_filter.report import (
+            _make_evidence_heatmap,
+            _HEATMAP_MAX_ROWS,
+        )
+        variants = self._make_variants(_HEATMAP_MAX_ROWS + 10)
+        div = _make_evidence_heatmap(variants)
+        assert "DE_NOVO" in div
+
+    def test_cluster_mode_is_static_plot(self):
+        """Cluster heatmap must use staticPlot to reduce HTML overhead."""
+        from kmer_denovo_filter.report import (
+            _make_evidence_heatmap,
+            _HEATMAP_MAX_ROWS,
+        )
+        variants = self._make_variants(_HEATMAP_MAX_ROWS + 10)
+        div = _make_evidence_heatmap(variants)
+        assert "staticPlot" in div
+
+    def test_individual_mode_below_threshold(self):
+        """For ≤_HEATMAP_MAX_ROWS variants the individual-row heatmap is used."""
+        from kmer_denovo_filter.report import _make_evidence_heatmap
+        variants = self._make_variants(20)
+        div = _make_evidence_heatmap(variants)
+        # Individual mode includes per-variant labels; Plotly encodes ">" as
+        # "\u003e" in its JSON, so check for the chromosome prefix instead
+        # of the full "chr1:0 A>C" string.
+        assert "chr1:0" in div
+        # And does not use staticPlot
+        assert "staticPlot" not in div
+
+    def test_heatmap_no_hover_text_string_matrix(self):
+        """In individual mode, per-cell hover must not repeat full labels."""
+        from kmer_denovo_filter.report import _make_evidence_heatmap
+        variants = self._make_variants(20)
+        div = _make_evidence_heatmap(variants)
+        # With compact customdata the label appears in the y-axis array
+        # (once per variant) but NOT repeated once per field column.
+        # Plotly encodes ">" as "\u003e"; check only the invariant prefix.
+        label_prefix = "chr1:0"
+        occurrences = div.count(label_prefix)
+        # Pre-fix: 8 occurrences (once per field). Post-fix: ≤ 2.
+        assert occurrences <= 2, (
+            f"Label prefix appears {occurrences} times (expected ≤ 2) — "
+            "hover text string matrix was not replaced with customdata"
+        )
+
+
 class TestClassifyVariantType:
     """Unit tests for variant type classifier."""
 

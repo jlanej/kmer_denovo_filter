@@ -11,12 +11,119 @@ import json
 import logging
 import os
 import re
+import statistics as stats
 
 logger = logging.getLogger(__name__)
 
 # Maximum rows shown in the per-variant detail table.  All DE_NOVO calls are
 # shown first; inherited variants are capped at the remainder up to this limit.
 _VARIANT_TABLE_MAX_ROWS = 100
+
+# Maximum rows in the evidence heatmap.  Above this threshold the heatmap
+# switches to cluster-summary mode: k-means is run on all variants and one row
+# per cluster is shown (centroid values).  This scales to 100k+ variants.
+_HEATMAP_MAX_ROWS = 200
+
+# Number of k-means clusters used in cluster-summary heatmap mode.
+_HEATMAP_N_CLUSTERS = 8
+
+# Maximum data points in continuous scatter plots.  Beyond this the serialised
+# Plotly JSON becomes multi-megabyte and slows or prevents rendering.
+# DE_NOVO variants are always kept; inherited variants are uniformly sampled.
+_SCATTER_MAX_POINTS = 2000
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _downsample_variants(variants, max_points):
+    """Return at most *max_points* variants, keeping all DE_NOVO calls.
+
+    When the full list fits within *max_points* the original list is returned
+    unchanged (no copy).  Otherwise all DE_NOVO variants are kept and the
+    inherited variants are uniformly sub-sampled to fill the remaining quota.
+
+    Returns ``(sampled_variants, was_downsampled)`` so callers can annotate
+    plots when the dataset has been reduced.
+    """
+    if len(variants) <= max_points:
+        return variants, False
+
+    denovo = [v for v in variants if v["call"] == "DE_NOVO"]
+    inherited = [v for v in variants if v["call"] != "DE_NOVO"]
+
+    if len(denovo) >= max_points:
+        return denovo[:max_points], True
+
+    remaining = max_points - len(denovo)
+    step = max(1, len(inherited) // remaining)
+    sampled_inherited = inherited[::step][:remaining]
+    return denovo + sampled_inherited, True
+
+
+def _kmeans_cluster(z_matrix, n_clusters, max_iter=100):
+    """Lightweight k-means clustering using numpy (required by plotly).
+
+    Uses k-means++ seeding for reproducible, well-separated initial centres.
+    Returns a list of integer cluster labels with length ``len(z_matrix)``.
+    When numpy is unavailable falls back to evenly-spaced bucket assignment
+    so the heatmap always renders.
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        # Fallback: assign rows to buckets by their position (no real clustering)
+        n = len(z_matrix)
+        step = max(1, n // n_clusters)
+        return [min(i // step, n_clusters - 1) for i in range(n)]
+
+    X = np.array(z_matrix, dtype=np.float64)
+    n_samples = len(X)
+
+    if n_samples <= n_clusters:
+        return list(range(n_samples))
+
+    # K-means++ seeding (fixed seed=42 for reproducible report output;
+    # identical input always produces identical cluster assignments so the
+    # report is deterministic across regenerations)
+    rng = np.random.RandomState(42)
+    center_indices = [int(rng.randint(n_samples))]
+    for _ in range(n_clusters - 1):
+        # Distance from each point to its nearest existing centre
+        sq_dists = np.min(
+            [np.sum((X - X[ci]) ** 2, axis=1) for ci in center_indices],
+            axis=0,
+        )
+        sq_dists = np.maximum(sq_dists, 0.0)
+        total = sq_dists.sum()
+        if total == 0:
+            center_indices.append(int(rng.randint(n_samples)))
+        else:
+            center_indices.append(int(rng.choice(n_samples, p=sq_dists / total)))
+
+    centers = X[center_indices].copy()
+    labels = np.zeros(n_samples, dtype=np.int32)
+
+    for _ in range(max_iter):
+        # Vectorised squared-distance matrix: shape (n_samples, n_clusters).
+        # Broadcast rather than np.einsum to keep the peak working memory to
+        # one (n, k, f) tensor (~50 MB for 100k variants, k=8, f=8 float64).
+        sq_dists = np.sum((X[:, None, :] - centers[None, :, :]) ** 2, axis=2)
+        new_labels = np.argmin(sq_dists, axis=1).astype(np.int32)
+
+        if np.array_equal(new_labels, labels):
+            break
+        labels = new_labels
+
+        # Update cluster centres
+        for k in range(n_clusters):
+            mask = labels == k
+            if mask.any():
+                centers[k] = X[mask].mean(axis=0)
+
+    return labels.tolist()
 
 
 # ---------------------------------------------------------------------------
@@ -207,13 +314,16 @@ def _get_plotly_bundle():
 # Plot generators (return self-contained div HTML strings)
 # ---------------------------------------------------------------------------
 
-def _plotly_div(fig, div_id):
+def _plotly_div(fig, div_id, config=None):
     """Return a self-contained ``<div>+<script>`` HTML snippet for a figure.
 
     Uses Plotly's own ``to_html(full_html=False, include_plotlyjs=False)``
     so that data is embedded directly as JS object literals (no JSON.parse
     step) and the correct Plotly.js API is used regardless of version.
     A fixed ``div_id`` is required for deterministic (idempotent) output.
+
+    Pass ``config={"staticPlot": True}`` to disable all browser-side
+    interactivity (hover, zoom, pan) for static summary plots.
     """
     import plotly.io as pio
     return pio.to_html(
@@ -221,7 +331,7 @@ def _plotly_div(fig, div_id):
         full_html=False,
         include_plotlyjs=False,
         div_id=div_id,
-        config={"responsive": True},
+        config=config if config is not None else {"responsive": True},
     )
 
 
@@ -381,23 +491,29 @@ def _make_dka_dkt_histogram(variants, div_id="histogram-plot"):
 
 
 def _make_dka_vs_dkt_scatter(variants, div_id="scatter-plot"):
-    """Create a scatter plot of DKA vs DKT colored by DKA_DKT ratio."""
+    """Create a scatter plot of DKA vs DKT colored by DKA_DKT ratio.
+
+    The variant list is capped at ``_SCATTER_MAX_POINTS`` (DE_NOVO first) to
+    keep the serialised Plotly JSON compact and ensure reliable rendering.
+    """
     import plotly.graph_objects as go
+
+    used, was_trimmed = _downsample_variants(variants, _SCATTER_MAX_POINTS)
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=[v["dkt"] for v in variants],
-        y=[v["dka"] for v in variants],
+        x=[v["dkt"] for v in used],
+        y=[v["dka"] for v in used],
         mode="markers",
         marker=dict(
-            size=[max(6, min(30, v["dku"] * 3)) for v in variants],
-            color=[v["dka_dkt"] for v in variants],
+            size=[max(6, min(30, v["dku"] * 3)) for v in used],
+            color=[v["dka_dkt"] for v in used],
             colorscale="Viridis",
             colorbar=dict(title="DKA_DKT"),
             showscale=True,
             line=dict(width=1, color="#333"),
         ),
-        text=[v["label"] for v in variants],
+        text=[v["label"] for v in used],
         hovertemplate=(
             "<b>%{text}</b><br>"
             "DKT: %{x}<br>DKA: %{y}<br>"
@@ -406,7 +522,7 @@ def _make_dka_vs_dkt_scatter(variants, div_id="scatter-plot"):
             "Call: %{customdata[2]}"
             "<extra></extra>"
         ),
-        customdata=[[v["dku"], v["dka_dkt"], v["call"]] for v in variants],
+        customdata=[[v["dku"], v["dka_dkt"], v["call"]] for v in used],
     ))
 
     # Add DKA=10 threshold line (minimum high-quality evidence requirement)
@@ -415,9 +531,16 @@ def _make_dka_vs_dkt_scatter(variants, div_id="scatter-plot"):
                   annotation_position="right",
                   annotation_font=dict(size=10, color="#E45756"))
 
+    title_text = "DKA vs. DKT (size = DKU, color = DKA_DKT ratio)"
+    if was_trimmed:
+        title_text += (
+            f"<br><sup>Showing {len(used)} of {len(variants)} variants "
+            "(DE_NOVO first)</sup>"
+        )
+
     fig.update_layout(
         title=dict(
-            text="DKA vs. DKT (size = DKU, color = DKA_DKT ratio)",
+            text=title_text,
             font=dict(size=18),
         ),
         xaxis_title="DKT (Total Spanning Fragments)",
@@ -430,7 +553,20 @@ def _make_dka_vs_dkt_scatter(variants, div_id="scatter-plot"):
 
 
 def _make_evidence_heatmap(variants, div_id="heatmap-plot"):
-    """Create a clustered heatmap of per-variant evidence fields."""
+    """Evidence heatmap with automatic cluster-summary mode for large datasets.
+
+    **Individual mode** (≤ ``_HEATMAP_MAX_ROWS`` variants)
+        Shows one row per variant with compact ``customdata`` hover.
+
+    **Cluster-summary mode** (> ``_HEATMAP_MAX_ROWS`` variants)
+        Runs k-means (k = ``_HEATMAP_N_CLUSTERS``) on all variants using
+        the 8 z-scored evidence features.  One row per cluster is displayed
+        showing the centroid z-scores, sorted by DE_NOVO fraction (descending)
+        so the most de-novo-enriched cluster appears at the top.  Each row is
+        labelled with the cluster size and its DE_NOVO percentage.  The plot
+        is rendered as a static image (no hover/zoom) to minimise HTML size —
+        at 100k variants the entire cluster-summary section is < 50 KB.
+    """
     import plotly.graph_objects as go
 
     fields = [
@@ -441,62 +577,135 @@ def _make_evidence_heatmap(variants, div_id="heatmap-plot"):
         "DKU", "DKT", "DKA", "DKU_DKT", "DKA_DKT",
         "MAX_PKC", "AVG_PKC", "MIN_PKC",
     ]
-    labels = [v["label"] for v in variants]
-
-    # Build raw data matrix
-    raw = []
-    for v in variants:
-        raw.append([v[f] for f in fields])
-
-    # Z-score normalization per column for visual comparability
-    import statistics as stats
     n_cols = len(fields)
-    n_rows = len(variants)
-    z_data = []
-    for r in range(n_rows):
-        z_data.append([0.0] * n_cols)
+    n_total = len(variants)
 
+    # --- Z-score normalise per column over the full variant list -------------
+    raw_all = [[v[f] for f in fields] for v in variants]
+    z_all = [[0.0] * n_cols for _ in range(n_total)]
     for c in range(n_cols):
-        col_vals = [raw[r][c] for r in range(n_rows)]
-        mean_val = stats.mean(col_vals) if col_vals else 0
-        std_val = stats.pstdev(col_vals) if col_vals else 1
-        if std_val == 0:
-            std_val = 1
-        for r in range(n_rows):
-            z_data[r][c] = (raw[r][c] - mean_val) / std_val
+        col_vals = [raw_all[r][c] for r in range(n_total)]
+        mean_val = stats.mean(col_vals) if col_vals else 0.0
+        std_val = stats.pstdev(col_vals) if col_vals else 1.0
+        if std_val == 0.0:
+            std_val = 1.0
+        for r in range(n_total):
+            z_all[r][c] = (raw_all[r][c] - mean_val) / std_val
 
-    # Build hover text with raw values
-    hover_text = []
-    for r in range(n_rows):
-        row_hover = []
-        for c in range(n_cols):
-            row_hover.append(
-                f"{labels[r]}<br>{display_fields[c]}: {raw[r][c]}"
-                f"<br>Z-score: {z_data[r][c]:.2f}"
+    if n_total > _HEATMAP_MAX_ROWS:
+        # ── Cluster-summary mode ─────────────────────────────────────────────
+        k = min(_HEATMAP_N_CLUSTERS, n_total)
+        cluster_ids = _kmeans_cluster(z_all, k)
+
+        # Aggregate per cluster
+        cluster_data = {}
+        for i, cl in enumerate(cluster_ids):
+            if cl not in cluster_data:
+                cluster_data[cl] = {"indices": [], "denovo": 0}
+            cluster_data[cl]["indices"].append(i)
+            if variants[i]["call"] == "DE_NOVO":
+                cluster_data[cl]["denovo"] += 1
+
+        # Sort clusters by DE_NOVO fraction descending
+        sorted_clusters = sorted(
+            cluster_data.items(),
+            key=lambda kv: kv[1]["denovo"] / len(kv[1]["indices"]),
+            reverse=True,
+        )
+
+        z_data = []
+        y_labels = []
+        hover_text = []
+        raw_centroids = []
+        for rank, (cl_id, info) in enumerate(sorted_clusters, start=1):
+            idx = info["indices"]
+            # idx is non-empty by construction: _kmeans_cluster assigns every
+            # sample to exactly one cluster and empty clusters are skipped.
+            centroid_z = [
+                sum(z_all[i][c] for i in idx) / len(idx) for c in range(n_cols)
+            ]
+            centroid_raw = [
+                sum(raw_all[i][c] for i in idx) / len(idx) for c in range(n_cols)
+            ]
+            pct = 100.0 * info["denovo"] / len(idx)
+            z_data.append(centroid_z)
+            raw_centroids.append(centroid_raw)
+            y_labels.append(
+                f"Cluster {rank}  (n={len(idx):,}, {pct:.0f}% DE_NOVO)"
             )
-        hover_text.append(row_hover)
+            hover_text.append([
+                f"<b>Cluster {rank}</b><br>"
+                f"n={len(idx):,} variants, {pct:.0f}% DE_NOVO<br>"
+                f"{display_fields[c]}: {centroid_raw[c]:.3g} (centroid)<br>"
+                f"Z-score: {centroid_z[c]:.2f}"
+                for c in range(n_cols)
+            ])
 
-    fig = go.Figure(data=go.Heatmap(
-        z=z_data,
-        x=display_fields,
-        y=labels,
-        colorscale="RdBu_r",
-        zmid=0,
-        text=hover_text,
-        hoverinfo="text",
-        colorbar=dict(title="Z-score"),
-    ))
+        title_text = (
+            f"Per-Variant Evidence Heatmap — {n_total:,} variants summarised in "
+            f"{len(sorted_clusters)} k-means clusters (k={k})<br>"
+            f"<sup>Each row = cluster centroid; sorted by DE_NOVO fraction ↓</sup>"
+        )
+        is_cluster_mode = True
+
+    else:
+        # ── Individual-row mode ───────────────────────────────────────────────
+        z_data = z_all
+        raw_centroids = raw_all
+        y_labels = [v["label"] for v in variants]
+        hover_text = None
+        title_text = "Per-Variant Evidence Heatmap (Z-score normalized)"
+        is_cluster_mode = False
+
+    # Build heatmap trace
+    if is_cluster_mode:
+        # Cluster rows: compact hover strings (few rows → string cost is tiny)
+        heatmap = go.Heatmap(
+            z=z_data,
+            x=display_fields,
+            y=y_labels,
+            colorscale="RdBu_r",
+            zmid=0,
+            text=hover_text,
+            hoverinfo="text",
+            colorbar=dict(title="Z-score<br>(centroid)"),
+        )
+    else:
+        # Individual rows: float customdata avoids per-cell label duplication
+        heatmap = go.Heatmap(
+            z=z_data,
+            x=display_fields,
+            y=y_labels,
+            colorscale="RdBu_r",
+            zmid=0,
+            customdata=raw_centroids,
+            hovertemplate=(
+                "<b>%{y}</b><br>%{x}: %{customdata:.4g}"
+                "<br>Z-score: %{z:.2f}<extra></extra>"
+            ),
+            colorbar=dict(title="Z-score"),
+        )
+
+    n_rows_shown = len(z_data)
+    # Row height: 40 px max (readability), 20 px min (avoid over-compression),
+    # targeting ~400 px for small cluster counts; cap total at 2000 px to stay
+    # within browser canvas limits for the individual-row mode.
+    row_px = min(40, max(20, 400 // max(1, n_rows_shown)))
+    height = min(2000, max(400, row_px * n_rows_shown + 120))
+
+    fig = go.Figure(data=heatmap)
     fig.update_layout(
-        title=dict(
-            text="Per-Variant Evidence Heatmap (Z-score normalized)",
-            font=dict(size=18),
-        ),
+        title=dict(text=title_text, font=dict(size=16 if is_cluster_mode else 18)),
         template="plotly_white",
-        height=max(400, 30 * len(variants) + 100),
-        margin=dict(t=60, b=40, l=250),
+        height=height,
+        margin=dict(t=100 if is_cluster_mode else 80, b=40, l=300),
         yaxis=dict(autorange="reversed"),
     )
-    return _plotly_div(fig, div_id)
+
+    # Cluster-summary plots are static: disabling interactivity removes all
+    # browser-side event handler JS and keeps the HTML footprint small.
+    cfg = {"staticPlot": True} if is_cluster_mode else {"responsive": True}
+    return _plotly_div(fig, div_id, config=cfg)
 
 
 def _make_pkc_boxplot(variants, div_id="pkc-box-plot"):
@@ -554,21 +763,28 @@ def _make_pkc_vs_dka_dkt_scatter(variants, div_id="pkc-scatter-plot"):
     avg_pkc_alt is non-zero because the ALT allele is present in at least
     one parent.  This demonstrates the null hypothesis (parental coverage
     gap) can be rejected when inherited variants show high avg_pkc_alt.
+
+    The variant list is capped at ``_SCATTER_MAX_POINTS`` to bound the
+    serialised data size.
     """
     import plotly.graph_objects as go
 
+    used, was_trimmed = _downsample_variants(variants, _SCATTER_MAX_POINTS)
+
     colors = ["#54A24B" if v["call"] == "DE_NOVO" else "#E45756"
-              for v in variants]
+              for v in used]
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=[v["dka_dkt"] for v in variants],
-        y=[v["avg_pkc_alt"] for v in variants],
+        x=[v["dka_dkt"] for v in used],
+        y=[v["avg_pkc_alt"] for v in used],
         mode="markers",
         marker=dict(size=10, color=colors, line=dict(width=1, color="#333")),
-        text=[f"{v['label']}<br>Call: {v['call']}" for v in variants],
+        text=[v["label"] for v in used],
+        customdata=[v["call"] for v in used],
         hovertemplate=(
             "<b>%{text}</b><br>"
+            "Call: %{customdata}<br>"
             "DKA_DKT: %{x:.4f}<br>AVG_PKC_ALT: %{y:.1f}"
             "<extra></extra>"
         ),
@@ -580,11 +796,19 @@ def _make_pkc_vs_dka_dkt_scatter(variants, div_id="pkc-scatter-plot"):
         annotation_position="top right",
         annotation_font=dict(size=10, color="#666"),
     )
+
+    subtitle = (
+        "De novo (green) should cluster at low AVG_PKC_ALT; "
+        "inherited (red) at high AVG_PKC_ALT"
+    )
+    if was_trimmed:
+        subtitle += (
+            f" — showing {len(used)} of {len(variants)} variants (DE_NOVO first)"
+        )
+
     fig.update_layout(
         title=dict(
-            text="AVG_PKC_ALT vs. DKA_DKT Ratio<br>"
-                 "<sup>De novo (green) should cluster at low AVG_PKC_ALT; "
-                 "inherited (red) at high AVG_PKC_ALT</sup>",
+            text=f"AVG_PKC_ALT vs. DKA_DKT Ratio<br><sup>{subtitle}</sup>",
             font=dict(size=16),
         ),
         xaxis_title="DKA_DKT Ratio",
@@ -660,14 +884,33 @@ def _make_contamination_bar(variants, kraken2_data, div_id="contamination-plot")
 
 
 def _make_discovery_region_scatter(regions, div_id="disc-scatter-plot"):
-    """Create scatter plot of discovery regions: reads vs k-mers."""
+    """Create scatter plot of discovery regions: reads vs k-mers.
+
+    Capped at ``_SCATTER_MAX_POINTS`` total regions to bound serialised size.
+    """
     import plotly.graph_objects as go
 
     class_colors = {"SMALL": "#4C78A8", "AMBIGUOUS": "#F58518", "SV": "#E45756"}
 
+    # Cap total regions; SV regions are highest priority, then AMBIGUOUS, SMALL
+    used_regions = regions
+    was_trimmed = False
+    if len(regions) > _SCATTER_MAX_POINTS:
+        sv = [r for r in regions if r.get("class") == "SV"]
+        amb = [r for r in regions if r.get("class") == "AMBIGUOUS"]
+        small = [r for r in regions if r.get("class") == "SMALL"]
+        remaining = _SCATTER_MAX_POINTS
+        keep_sv = sv[:remaining]
+        remaining -= len(keep_sv)
+        keep_amb = amb[:remaining]
+        remaining -= len(keep_amb)
+        keep_small = small[:remaining]
+        used_regions = keep_sv + keep_amb + keep_small
+        was_trimmed = True
+
     fig = go.Figure()
     for cls in ["SMALL", "AMBIGUOUS", "SV"]:
-        cls_regions = [r for r in regions if r.get("class") == cls]
+        cls_regions = [r for r in used_regions if r.get("class") == cls]
         if not cls_regions:
             continue
         fig.add_trace(go.Scatter(
@@ -691,11 +934,14 @@ def _make_discovery_region_scatter(regions, div_id="disc-scatter-plot"):
             hovertemplate="%{text}<extra></extra>",
         ))
 
+    title_text = "Discovery Regions: Reads vs. Distinct K-mers"
+    if was_trimmed:
+        title_text += (
+            f"<br><sup>Showing {len(used_regions)} of {len(regions)} regions</sup>"
+        )
+
     fig.update_layout(
-        title=dict(
-            text="Discovery Regions: Reads vs. Distinct K-mers",
-            font=dict(size=18),
-        ),
+        title=dict(text=title_text, font=dict(size=18)),
         xaxis_title="Supporting Reads",
         yaxis_title="Distinct Proband-Unique K-mers",
         template="plotly_white",
