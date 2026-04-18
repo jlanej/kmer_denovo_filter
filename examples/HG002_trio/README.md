@@ -336,7 +336,9 @@ bcftools view -H data/vcfs/HG002_GRCh38_1_22_v4.2.1_benchmark.vcf.gz | head
 
 Increase `--memory` and the SLURM `--mem` allocation. For the full HG002
 trio, 64 GB is recommended. You can also set `--extra-args "--jf-hash-size 30G"`
-to control the jellyfish hash size directly.
+to control the jellyfish hash size for the **discovery mode** child k-mer
+counting step. Note that `--jf-hash-size` has no effect in VCF mode; VCF mode
+parent scan hash sizes are automatically sized from the number of child k-mers.
 
 ### Disk space errors
 

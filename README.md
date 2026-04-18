@@ -25,7 +25,11 @@ signal potential *de novo* mutations.
    overlapping the position are fetched and only k-mers whose genomic span
    includes the variant position are kept. K-mers are canonicalized
    (lexicographically smaller of k-mer and its reverse complement).
-   For multiallelic variants, only the first ALT allele is evaluated.
+   For multiallelic variants, when `--proband-id` is provided and matches a
+   sample in the VCF, the proband's genotype is used to select which ALT allele
+   to evaluate (e.g. GT `0/2` evaluates the second ALT). The first ALT is used
+   as a fallback when `--proband-id` is not provided, the proband is absent from
+   the VCF, or the proband's GT is homozygous reference or missing.
 
 2. **Scan parents** – All child k-mers are collected into a single set.
    Each parent's entire BAM/CRAM is streamed through
@@ -203,7 +207,7 @@ k-mer parameters. Each command also has its own mode-specific arguments.
 | `--threads` / `-t` | 4 | Number of threads for Jellyfish and parallel anchoring workers |
 | `--memory` | auto | Available memory in GB. On HPC (e.g. SLURM), set this to the allocated memory so worker counts and hash sizes are tuned correctly. When omitted, auto-detected from the system |
 | `--debug-kmers` | false | Enable per-variant debug output |
-| `--jf-hash-size` | auto | Initial hash size for `jellyfish count` (e.g. `2G`, `500M`). Estimated from the child BAM file size by default. A larger value avoids hash overflow (which creates multi-file indexes requiring more memory to merge/dump) |
+| `--jf-hash-size` | auto | Initial hash size for `jellyfish count` in discovery mode (e.g. `2G`, `500M`). Estimated from the child BAM file size by default. A larger value avoids hash overflow (which creates multi-file indexes requiring more memory to merge/dump). **Note:** This argument only applies to the discovery mode child k-mer counting step; VCF mode parent hash sizes are automatically sized from the number of child k-mers and are not affected by this flag |
 | `--tmp-dir` | auto | Directory for temporary files (jellyfish indexes, intermediate FASTA files). Defaults to a subdirectory next to the output files. Avoid RAM-backed filesystems like tmpfs (`/tmp` on many HPC systems), as intermediate files can exceed 100 GB for WGS data |
 
 #### `kmer-denovo` arguments (VCF mode)
@@ -223,6 +227,7 @@ k-mer parameters. Each command also has its own mode-specific arguments.
 | `--kraken2-read-detail` | auto | Output path for the per-read Kraken2 classification detail BED file (bgzipped + tabix-indexed). Auto-derived from `--output` when `--kraken2-db` is provided (e.g. `my_trio.annotated.kraken2_reads.bed.gz`) |
 | `--kraken2-span-bed` | auto | Output path for the species-annotated genomic span BED file (bgzipped + tabix-indexed). Maps each classified read's aligned reference span to its Kraken2-assigned species, including soft-clip lengths and split-read indicators. Auto-derived from `--output` when `--kraken2-db` is provided (e.g. `my_trio.annotated.kraken2_spans.bed.gz`) |
 | `--no-expanded-bed` | false | Disable generation of the soft-clip-expanded span BED file. By default, when `--kraken2-db` is provided, both the standard span BED and an expanded span BED are written |
+| `--report` | – | Output path for an interactive HTML report summarizing k-mer filtering results with Plotly visualizations. When omitted, no report is generated |
 
 #### `kmer-discovery` arguments (discovery mode)
 
@@ -239,6 +244,7 @@ k-mer parameters. Each command also has its own mode-specific arguments.
 | `--parent-max-count` | 0 | Maximum k-mer count in a parent before the k-mer is considered parental; k-mers with count > this value in either parent are removed |
 | `--candidate-summary` | – | Path to a VCF-mode `summary.txt` for candidate comparison. High-quality *de novos* (DKA\_DKT > 0.25, DKA > 10) are checked against discovered regions |
 | `--sv-bedpe` | – | Output BEDPE file for linked SV breakpoint pairs (default: `[out-prefix].sv.bedpe`) |
+| `--report` | – | Output path for an interactive HTML report summarizing discovery results with Plotly visualizations. When omitted, no report is generated |
 
 ### VCF Mode Output
 
@@ -252,8 +258,10 @@ and annotated with the following fields:
 * **DKT** – Total child fragments (unique read names) with variant-spanning
   k-mers.
 * **DKA** – Number of child fragments with at least one unique k-mer that
-  also exactly supports the first ALT allele. DKA ≤ DKU by construction.
-  For multiallelic variants only the first ALT allele is evaluated.
+  also exactly supports the candidate ALT allele. DKA ≤ DKU by construction.
+  For multiallelic variants, the ALT allele evaluated is determined by the
+  proband's genotype when `--proband-id` is provided; otherwise the first ALT
+  allele is used.
 * **DKU_DKT** – Proportion of child fragments with unique k-mers (DKU / DKT).
   A value of 1.0 means all fragments spanning the variant carry child-unique
   k-mers. When DKT is 0 the value is 0.0.
