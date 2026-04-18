@@ -198,7 +198,7 @@ If Aspera is not available, the script falls back to `wget` over HTTPS.
 | `--ref-fasta`     | –       | Reference FASTA (required for CRAM input)        |
 | `--variant-types` | all     | Variant types for de novo scan (e.g. `snps`)     |
 | `--proband-id`    | `HG002` | Proband sample ID in the VCF                     |
-| `--kraken2-db`    | –       | Optional Kraken2 DB directory for non-human fraction annotations; supports DB root or a parent directory containing one extracted DB subdirectory |
+| `--kraken2-db`    | –       | Optional Kraken2 database path for contamination detection |
 | `--extra-args`    | –       | Additional arguments passed to `kmer-denovo`     |
 | `--mini-cram-padding` | 1000 | Padding in bp for mini CRAM extraction (±bp)  |
 

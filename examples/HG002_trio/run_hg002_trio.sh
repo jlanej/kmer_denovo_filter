@@ -230,7 +230,7 @@ resolve_kraken2_db_dir() {
 
     mapfile -t _db_candidates < <(
         find "$db_path" -mindepth 1 -maxdepth 3 -type f -name "hash.k2d" \
-            -exec dirname {} \; | sort -u
+            -exec dirname {} + | sort -u
     )
 
     for candidate in "${_db_candidates[@]}"; do
