@@ -124,7 +124,7 @@ bash examples/HG002_trio/run_hg002_trio.sh \
 
 ```bash
 # Download a Kraken2 DB once (outside the trio run)
-bash scripts/download_kraken2_db.sh --db /scratch/$USER/kraken2_db
+bash ./scripts/download_kraken2_db.sh --db /scratch/$USER/kraken2_db
 
 # Run the trio pipeline with Kraken2 classification enabled
 bash examples/HG002_trio/run_hg002_trio.sh \
