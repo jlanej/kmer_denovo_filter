@@ -516,6 +516,11 @@ class TestHeatmapDataCap:
     """Verify heatmap cluster-summary mode for large datasets."""
 
     def _make_variants(self, n, denovo_every=3):
+        """Create *n* synthetic variants; every *denovo_every*-th is DE_NOVO.
+
+        DE_NOVO variants get a high dka_dkt (0.3) and inherited ones get a
+        low dka_dkt (0.05) to give k-means clustering something to separate.
+        """
         return [
             {
                 "label": f"chr1:{i} A>C",

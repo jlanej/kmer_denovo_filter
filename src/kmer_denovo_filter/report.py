@@ -85,7 +85,9 @@ def _kmeans_cluster(z_matrix, n_clusters, max_iter=100):
     if n_samples <= n_clusters:
         return list(range(n_samples))
 
-    # K-means++ seeding (fixed seed for reproducibility)
+    # K-means++ seeding (fixed seed=42 for reproducible report output;
+    # identical input always produces identical cluster assignments so the
+    # report is deterministic across regenerations)
     rng = np.random.RandomState(42)
     center_indices = [int(rng.randint(n_samples))]
     for _ in range(n_clusters - 1):
@@ -105,8 +107,9 @@ def _kmeans_cluster(z_matrix, n_clusters, max_iter=100):
     labels = np.zeros(n_samples, dtype=np.int32)
 
     for _ in range(max_iter):
-        # Compute squared distances: shape (n_samples, n_clusters)
-        # Use einsum-free broadcast; for n=100k, k=8, f=8 this is ~50 MB
+        # Vectorised squared-distance matrix: shape (n_samples, n_clusters).
+        # Broadcast rather than np.einsum to keep the peak working memory to
+        # one (n, k, f) tensor (~50 MB for 100k variants, k=8, f=8 float64).
         sq_dists = np.sum((X[:, None, :] - centers[None, :, :]) ** 2, axis=2)
         new_labels = np.argmin(sq_dists, axis=1).astype(np.int32)
 
@@ -616,6 +619,8 @@ def _make_evidence_heatmap(variants, div_id="heatmap-plot"):
         raw_centroids = []
         for rank, (cl_id, info) in enumerate(sorted_clusters, start=1):
             idx = info["indices"]
+            # idx is non-empty by construction: _kmeans_cluster assigns every
+            # sample to exactly one cluster and empty clusters are skipped.
             centroid_z = [
                 sum(z_all[i][c] for i in idx) / len(idx) for c in range(n_cols)
             ]
@@ -682,6 +687,9 @@ def _make_evidence_heatmap(variants, div_id="heatmap-plot"):
         )
 
     n_rows_shown = len(z_data)
+    # Row height: 40 px max (readability), 20 px min (avoid over-compression),
+    # targeting ~400 px for small cluster counts; cap total at 2000 px to stay
+    # within browser canvas limits for the individual-row mode.
     row_px = min(40, max(20, 400 // max(1, n_rows_shown)))
     height = min(2000, max(400, row_px * n_rows_shown + 120))
 
