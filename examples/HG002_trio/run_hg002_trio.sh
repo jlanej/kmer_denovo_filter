@@ -155,7 +155,8 @@ Analysis:
                           scan (e.g. "snps", "snps,indels"; default: all)
   --proband-id ID         Proband sample ID in VCF (default: HG002)
   --kraken2-db PATH       Optional Kraken2 database path for non-human
-                          content annotations
+                          content annotations (enables Kraken2
+                          --memory-mapping by default)
   --extra-args "ARGS"     Additional arguments passed to kmer-denovo
   --mini-cram-padding N   Padding in bp for mini CRAM extraction (default: 1000)
 
@@ -608,7 +609,7 @@ if [[ -n "$REF_FASTA" ]]; then
     KMER_CMD+=(--ref-fasta "$REF_FASTA")
 fi
 if [[ -n "$RESOLVED_KRAKEN2_DB" ]]; then
-    KMER_CMD+=(--kraken2-db "$RESOLVED_KRAKEN2_DB")
+    KMER_CMD+=(--kraken2-db "$RESOLVED_KRAKEN2_DB" --kraken2-memory-mapping)
 fi
 
 # Append any extra user-supplied arguments
