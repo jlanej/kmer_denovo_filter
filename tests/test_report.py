@@ -741,7 +741,7 @@ class TestStratification:
         ]
         strat = _compute_stratification(variants)
         assert strat["has_nhf_data"] is False
-        # Stage 5 collapses to stage 4 (NHF filter not applied)
+        # Final stage collapses to parental-confirmed stage (NHF filter not applied)
         assert strat["counts"][5] == strat["counts"][4]
 
 

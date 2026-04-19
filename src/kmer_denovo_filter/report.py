@@ -1836,8 +1836,8 @@ _HTML_TEMPLATE = """\
       10% of spanning fragments carry the unique-k-mer ALT signal).</li>
     <li class="s4"><strong>Higher-quality, parental confirmed</strong> &mdash;
       MAX_PKC_ALT &lt; 1 (ALT-allele k-mers absent from parents).</li>
-    <li class="s5"><strong>HQ, not contamination</strong> &mdash; stage&nbsp;5
-      <em>and</em> the non-human read fraction NHF&nbsp;&lt;&nbsp;0.05.</li>
+    <li class="s5"><strong>HQ, not contamination</strong> &mdash; all prior filters
+      <em>plus</em> the non-human read fraction NHF&nbsp;&lt;&nbsp;0.05.</li>
   </ul>
 </div>
 {% elif disc_metrics %}
@@ -1881,7 +1881,7 @@ _HTML_TEMPLATE = """\
   <div class="metric-card green">
     <span class="value">{{ "{:,}".format(stratification.counts[5]) }}{% if not stratification.has_nhf_data %}*{% endif %}</span>
     <span class="label">HQ + non-contamination
-      {% if not stratification.has_nhf_data %}<br><em>(no NHF data — &equiv; stage 5)</em>{% endif %}
+      {% if not stratification.has_nhf_data %}<br><em>(no NHF data — same as parental)</em>{% endif %}
     </span>
   </div>
   {% endif %}
@@ -2009,7 +2009,7 @@ _HTML_TEMPLATE = """\
       <code>MAX_PKC_ALT &lt; 1</code>.  Confirms that ALT-allele k-mers are
       absent from parental sequence, ruling out inherited variants missed
       by k-mer-level subtraction.</li>
-    <li><strong>HQ, not contamination</strong> &mdash; stage 5 plus
+    <li><strong>HQ, not contamination</strong> &mdash; all prior filters plus
       <code>DKA_NHF &lt; 0.05</code>.  Removes variants whose supporting
       reads are dominated (&ge; 5%) by Kraken2-classified non-human sequence.</li>
   </ol>
@@ -2033,7 +2033,7 @@ _HTML_TEMPLATE = """\
   </ul>
   <p style="margin-top:8px;">
     Variants with <code>DKA_NHF ≥ 0.05</code> are conservatively flagged
-    as likely contamination and excluded from the final stage-6 set.
+    as likely contamination and excluded from the final DNM set.
   </p>
 </div>
 
@@ -2069,8 +2069,9 @@ _HTML_TEMPLATE = """\
     higher-confidence DNM set reported in the table below.
     {% else %}
     <em>No Kraken2 contamination annotations were detected on the input
-    VCF, so the stage-6 contamination filter could not be applied; the
-    stage-5 set is reported as the final higher-confidence set.</em>
+    VCF, so the contamination filter could not be applied; the
+    parental-confirmed set (MAX_PKC_ALT &lt; 1) is reported as the final
+    higher-confidence set.</em>
     {% endif %}
     The vast majority of putative DNMs that fail at stage 2 are
     <em>simple miscalled variants</em> &mdash; i.e. positions for which no
@@ -2140,7 +2141,7 @@ _HTML_TEMPLATE = """\
   fraction of spanning fragments carry child-unique allele-supporting
   k-mers &mdash; a direct measure of de novo evidence strength, analogous
   to variant allele fraction (VAF) in somatic callers.  Variants with
-  DKA_DKT &gt; 0.1 are stage-4 (higher-quality) candidates.
+  DKA_DKT &gt; 0.1 are higher-quality candidates.
 </div>
 
 {% if histogram_div %}
@@ -2232,10 +2233,10 @@ _HTML_TEMPLATE = """\
   <a href="https://ccb.jhu.edu/software/kraken2/">Kraken2</a> on the
   DKA-supporting reads at each candidate variant and emits the
   per-class read-fraction tags listed in the methods (DKA_HLF,
-  DKA_NHF, DKA_UCF, DKA_UF).  The stage-6 filter excludes any variant
-  with <code>DKA_NHF &ge; 0.05</code>.  The plots below focus on
-  variants that actually exhibit contamination (NHF &ge; 0.05) rather
-  than the full set, which is predominantly clean.
+  DKA_NHF, DKA_UCF, DKA_UF).  The final contamination filter excludes
+  any variant with <code>DKA_NHF &ge; 0.05</code>.  The plots below
+  focus on variants that actually exhibit contamination (NHF &ge; 0.05)
+  rather than the full set, which is predominantly clean.
 </div>
 
 {% if contam_funnel_div %}
@@ -2256,7 +2257,7 @@ _HTML_TEMPLATE = """\
   <p class="plot-caption">
     Distribution of the non-human fraction (NHF) among variants with
     putative contamination (NHF &ge; 0.05).  These are the variants
-    excluded by the stage-6 filter.
+    excluded by the contamination filter.
   </p>
 </div>
 {% endif %}
@@ -2275,11 +2276,11 @@ _HTML_TEMPLATE = """\
 {% if not stratification or not stratification.has_nhf_data %}
 <div class="section-rationale" style="border-left-color:#F58518;">
   <strong>No Kraken2 contamination annotations were detected on the input VCF.</strong>
-  The stage-6 contamination filter has therefore not been applied, and
-  any "HQ + non-contamination" counts above are equivalent to
-  the stage-5 (HQ parental) counts.  Re-run the pipeline with the
-  Kraken2 annotation step enabled (set <code>--kraken2-db</code> and
-  related options) to populate this section.
+  The contamination filter has therefore not been applied, and
+  any &ldquo;HQ + non-contamination&rdquo; counts above are equivalent to
+  the parental-confirmed (MAX_PKC_ALT &lt; 1) counts.  Re-run the pipeline
+  with the Kraken2 annotation step enabled (set <code>--kraken2-db</code>
+  and related options) to populate this section.
 </div>
 {% endif %}
 {% endif %}
@@ -2420,7 +2421,7 @@ _HTML_TEMPLATE = """\
 <h2>13. Per-Variant Detail Table — Final DNM Set</h2>
 <p class="description">
   This table is restricted to the <strong>final DNM set</strong> only
-  (stage 6: all filters passed).  The
+  (all six filters passed).  The
   full per-variant list (typically tens of thousands of rows on a real
   trio) is not shown here — see <code>summary.txt</code> or the annotated
   VCF for the complete output.
@@ -2517,13 +2518,13 @@ _HTML_TEMPLATE = """\
     one child-unique k-mer.<br>
     <strong>DKA_DKT</strong> — Ratio of DKA to DKT; the primary signal
     metric. Values &gt; 0.1 indicate higher-quality
-    de novo candidates (stage 4).<br>
+    de novo candidates.<br>
     <strong>PKC_ALT (MAX/AVG/MIN_PKC_ALT)</strong> — ALT-allele Parental K-mer
     Count: how many times the variant's ALT-allele k-mers appear in the
     parents.  For genuine de novo variants these values should be near zero.
-    MAX_PKC_ALT &lt; 1 is required for stage 5.<br>
+    MAX_PKC_ALT &lt; 1 is required for parental confirmation.<br>
     <strong>NHF (DKA_NHF)</strong> — Non-human fraction of informative
-    reads. Values &ge; 0.05 trigger the stage-6 contamination filter.
+    reads. Values &ge; 0.05 trigger the contamination filter.
   </p>
 </div>
 
@@ -2632,7 +2633,7 @@ def generate_report(
         context["variants"] = variants
 
         # ── Kraken2 / contamination annotations (must be merged BEFORE
-        # stratification so the stage-6 NHF filter can be applied) ───────
+        # stratification so the NHF contamination filter can be applied) ───────
         kraken2_data = []
         if vcf_path and os.path.isfile(vcf_path):
             kraken2_data = _load_vcf_kraken2_annotations(vcf_path)
