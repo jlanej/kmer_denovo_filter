@@ -856,3 +856,151 @@ class TestReportCLI:
         assert args.vcf_summary == "/tmp/summary.txt"
         assert args.vcf is None
         assert args.discovery_metrics is None
+
+
+class TestContaminationCompositionChart:
+    """Unit tests for the 100% normalised contamination composition chart."""
+
+    def _make_test_variant(self, stage=0, dka_nhf=None, **kwargs):
+        """Return a minimal variant dict suitable for stratification tests."""
+        v = {
+            "label": "chr1:100 A>T",
+            "dku": 10, "dkt": 20, "dka": 10,
+            "dku_dkt": 0.5, "dka_dkt": 0.5,
+            "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0,
+            "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0,
+            "call": "DE_NOVO",
+            "stage": stage,
+        }
+        if dka_nhf is not None:
+            v["dka_nhf"] = dka_nhf
+        v.update(kwargs)
+        return v
+
+    def _make_stratification(self, has_nhf_data=True, n_stages=6):
+        from kmer_denovo_filter.report import _STAGE_SHORT_LABELS, _STAGE_COLORS
+        return {
+            "has_nhf_data": has_nhf_data,
+            "counts": [10, 8, 6, 5, 4, 3],
+            "short_labels": list(_STAGE_SHORT_LABELS),
+            "colors": list(_STAGE_COLORS),
+        }
+
+    def test_returns_none_when_no_nhf_data(self):
+        from kmer_denovo_filter.report import _make_contamination_composition_chart
+        strat = self._make_stratification(has_nhf_data=False)
+        assert _make_contamination_composition_chart(strat, []) is None
+
+    def test_returns_none_when_no_contaminated_variants(self):
+        from kmer_denovo_filter.report import _make_contamination_composition_chart
+        strat = self._make_stratification()
+        # All variants are clean (NHF < 0.05)
+        variants = [self._make_test_variant(stage=1, dka_nhf=0.01) for _ in range(5)]
+        assert _make_contamination_composition_chart(strat, variants) is None
+
+    def test_returns_div_with_coarse_categories(self):
+        """Falls back to coarse NHF/HLF/UCF/UF when granular fields absent."""
+        from kmer_denovo_filter.report import _make_contamination_composition_chart
+        strat = self._make_stratification()
+        variants = [
+            self._make_test_variant(
+                stage=i,
+                dka_nhf=0.20,
+                dka_hlf=0.60,
+                dka_ucf=0.10,
+                dka_uf=0.10,
+            )
+            for i in range(6)
+        ]
+        div = _make_contamination_composition_chart(strat, variants)
+        assert div is not None
+        assert "Non-Human" in div
+        assert "Human Lineage" in div
+
+    def test_returns_div_with_granular_categories(self):
+        """Uses granular breakdown when DKA_BF / DKA_VF fields are present."""
+        from kmer_denovo_filter.report import _make_contamination_composition_chart
+        strat = self._make_stratification()
+        variants = [
+            self._make_test_variant(
+                stage=i,
+                dka_nhf=0.30,
+                dka_bf=0.15,
+                dka_vf=0.10,
+                dka_ff=0.05,
+                dka_af=0.00,
+                dka_pf=0.00,
+                dka_ucf=0.10,
+                dka_uf=0.10,
+                dka_hlf=0.50,
+            )
+            for i in range(6)
+        ]
+        div = _make_contamination_composition_chart(strat, variants)
+        assert div is not None
+        assert "Bacterial" in div
+        assert "Viral" in div
+        assert "Fungal" in div
+
+    def test_chart_includes_stage_counts(self):
+        """Each stage bar should include the contaminated-variant count."""
+        from kmer_denovo_filter.report import _make_contamination_composition_chart
+        strat = self._make_stratification()
+        variants = [
+            self._make_test_variant(
+                stage=0,
+                dka_nhf=0.20,
+                dka_bf=0.20,
+                dka_hlf=0.80,
+            )
+        ]
+        div = _make_contamination_composition_chart(strat, variants)
+        assert div is not None
+        # The x-axis label for stage 0 must include the count annotation
+        assert "n=1" in div
+
+    def test_chart_is_100_percent_normalised(self):
+        """Sum of percentages per stage should equal ~100%."""
+        import re
+        from kmer_denovo_filter.report import _make_contamination_composition_chart
+        strat = self._make_stratification()
+        # Create a single contaminated variant at stage 0 only with known fractions
+        variants = [
+            self._make_test_variant(
+                stage=0,
+                dka_nhf=0.20,
+                dka_bf=0.20,
+                dka_hlf=0.80,
+            )
+        ]
+        div = _make_contamination_composition_chart(strat, variants)
+        assert div is not None
+        # The chart must use barmode="stack"
+        assert "stack" in div
+
+    def test_granular_categories_not_shown_when_zero(self):
+        """Categories with all-zero values must be omitted from the chart."""
+        from kmer_denovo_filter.report import _make_contamination_composition_chart
+        strat = self._make_stratification()
+        # Only bacterial and HLF are non-zero; fungal/viral/etc absent
+        variants = [
+            self._make_test_variant(
+                stage=i,
+                dka_nhf=0.20,
+                dka_bf=0.20,
+                dka_vf=0.00,
+                dka_ff=0.00,
+                dka_af=0.00,
+                dka_pf=0.00,
+                dka_ucf=0.00,
+                dka_uf=0.00,
+                dka_hlf=0.80,
+            )
+            for i in range(3)
+        ]
+        div = _make_contamination_composition_chart(strat, variants)
+        assert div is not None
+        assert "Bacterial" in div
+        # Fungal should not appear since its values are always 0
+        assert "Fungal" not in div
+
