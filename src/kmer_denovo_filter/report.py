@@ -1342,6 +1342,146 @@ def _make_contamination_funnel(stratification, variants,
     return _plotly_div(fig, div_id)
 
 
+def _make_contamination_composition_chart(stratification, variants,
+                                          div_id="contam-composition-plot"):
+    """100% normalised stacked bar chart of contamination-type composition by stage.
+
+    For each filtering stage (s0–s5), shows the relative composition of
+    Kraken2 read-classification categories among contaminated variants
+    (DKA_NHF >= 0.05).  This answers the question: *are certain types of
+    contamination harder to filter out?*  For example, environmental bacteria
+    may drop out early while closely-related viral or primate sequences may
+    persist until the NHF filter at s5.
+
+    When the granular taxonomy fields (DKA_BF, DKA_VF, DKA_FF, DKA_AF,
+    DKA_PF) are present they are used; otherwise the function falls back to
+    the coarser NHF / HLF / UCF / UF split.
+
+    Returns ``None`` when no contaminated variants with Kraken2 data exist.
+    """
+    import plotly.graph_objects as go
+
+    if not stratification["has_nhf_data"]:
+        return None
+
+    short_labels = stratification["short_labels"]
+
+    # Granular taxonomy categories (preferred when available in the data).
+    granular_categories = [
+        ("dka_bf",  "Bacterial",      "#E45756"),
+        ("dka_vf",  "Viral",          "#F58518"),
+        ("dka_ff",  "Fungal",         "#72B7B2"),
+        ("dka_af",  "Archaeal",       "#EECA3B"),
+        ("dka_pf",  "Plant",          "#54A24B"),
+        ("dka_ucf", "UniVec Core",    "#B279A2"),
+        ("dka_uf",  "Unclassified",   "#BAB0AC"),
+        ("dka_hlf", "Human Lineage",  "#4C78A8"),
+    ]
+    # Coarse fallback when only aggregate NHF is annotated.
+    coarse_categories = [
+        ("dka_nhf", "Non-Human",      "#E45756"),
+        ("dka_ucf", "UniVec Core",    "#B279A2"),
+        ("dka_uf",  "Unclassified",   "#BAB0AC"),
+        ("dka_hlf", "Human Lineage",  "#4C78A8"),
+    ]
+
+    # Decide granular vs coarse based on whether any contaminated variant
+    # carries a non-zero DKA_BF or DKA_VF value.
+    has_granular = any(
+        v.get("dka_bf") is not None or v.get("dka_vf") is not None
+        for v in variants
+        if v.get("dka_nhf", 0.0) >= _NHF_CONTAMINATION_THRESHOLD
+    )
+    categories = granular_categories if has_granular else coarse_categories
+
+    # For each stage, sum each category's fraction values across contaminated
+    # variants that reach (or pass) that stage.
+    stage_data = []
+    stage_n = []
+    for stage_idx in range(6):
+        contam_variants = [
+            v for v in variants
+            if v.get("stage", 0) >= stage_idx
+            and v.get("dka_nhf") is not None
+            and v["dka_nhf"] >= _NHF_CONTAMINATION_THRESHOLD
+        ]
+        totals = {field: 0.0 for field, _, _ in categories}
+        for v in contam_variants:
+            for field, _, _ in categories:
+                totals[field] += v.get(field, 0.0)
+        stage_data.append(totals)
+        stage_n.append(len(contam_variants))
+
+    if all(n == 0 for n in stage_n):
+        return None
+
+    # Only include categories that have non-zero values anywhere.
+    present_cats = [
+        (field, label, color)
+        for field, label, color in categories
+        if any(stage_data[i][field] > 0 for i in range(6))
+    ]
+    if not present_cats:
+        return None
+
+    # X-axis labels include the contaminated variant count at each stage.
+    x_labels = [
+        f"{sl}<br>(n={n})"
+        for sl, n in zip(short_labels, stage_n)
+    ]
+
+    fig = go.Figure()
+    for field, label, color in present_cats:
+        pcts = []
+        for i in range(6):
+            row_total = sum(stage_data[i][f] for f, _, _ in present_cats)
+            pcts.append(
+                100.0 * stage_data[i][field] / row_total if row_total > 0 else 0.0
+            )
+        fig.add_trace(go.Bar(
+            x=x_labels,
+            y=pcts,
+            name=label,
+            marker_color=color,
+            hovertemplate=(
+                "<b>%{x}</b><br>"
+                f"Category: {label}<br>"
+                "Proportion: %{y:.1f}%"
+                "<extra></extra>"
+            ),
+        ))
+
+    subtitle = (
+        "granular Kraken2 taxonomy (BF/VF/FF/AF/PF + UCF/UF/HLF)"
+        if has_granular
+        else "aggregate fractions (NHF/UCF/UF/HLF)"
+    )
+    fig.update_layout(
+        barmode="stack",
+        title=dict(
+            text=(
+                "Contamination Type Composition by Stage (100% Normalised)<br>"
+                f"<sup>Among variants with DKA_NHF &ge; "
+                f"{_NHF_CONTAMINATION_THRESHOLD}; {subtitle}</sup>"
+            ),
+            font=dict(size=16),
+        ),
+        yaxis=dict(
+            title="Proportion of Total Signal (%)",
+            range=[0, 100],
+        ),
+        xaxis_title="Filtering Stage",
+        template="plotly_white",
+        height=450,
+        margin=dict(t=90, b=80),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02,
+            xanchor="right", x=1,
+        ),
+    )
+    return _plotly_div(fig, div_id)
+
+
 def _make_discovery_region_scatter(regions, div_id="disc-scatter-plot"):
     """Create scatter plot of discovery regions: reads vs k-mers.
 
@@ -2251,6 +2391,20 @@ _HTML_TEMPLATE = """\
 </div>
 {% endif %}
 
+{% if contam_composition_div %}
+<div class="plot-container">
+  {{ contam_composition_div | safe }}
+  <p class="plot-caption">
+    100% normalised stacked bar chart showing the relative composition of
+    contamination types at each filtering stage, restricted to variants with
+    DKA_NHF &ge; 0.05.  Each bar sums to 100%; the chart reveals which
+    categories (bacterial, viral, fungal, etc.) are progressively removed and
+    which persist to later stages.  Stages with no contaminated variants are
+    shown with an empty bar (n=0).
+  </p>
+</div>
+{% endif %}
+
 {% if nhf_dist_div %}
 <div class="plot-container">
   {{ nhf_dist_div | safe }}
@@ -2609,6 +2763,7 @@ def generate_report(
         "contamination_div": None,
         "nhf_dist_div": None,
         "contam_funnel_div": None,
+        "contam_composition_div": None,
         "disc_scatter_div": None,
         "disc_size_div": None,
         "sv_evidence_div": None,
@@ -2680,6 +2835,11 @@ def generate_report(
                 context["nhf_dist_div"] = _make_nhf_distribution_plot(variants)
                 context["contam_funnel_div"] = _make_contamination_funnel(
                     stratification, variants,
+                )
+                context["contam_composition_div"] = (
+                    _make_contamination_composition_chart(
+                        stratification, variants,
+                    )
                 )
 
     # ── Discovery mode data ───────────────────────────────────────
