@@ -1353,9 +1353,24 @@ def _make_contamination_composition_chart(stratification, variants,
     may drop out early while closely-related viral or primate sequences may
     persist until the NHF filter at s5.
 
+    At each stage the chart includes all contaminated variants that *reach or
+    pass* that stage (``variant.stage >= stage_idx``), which is the same
+    cumulative convention used by ``_make_contamination_funnel``.
+
     When the granular taxonomy fields (DKA_BF, DKA_VF, DKA_FF, DKA_AF,
     DKA_PF) are present they are used; otherwise the function falls back to
     the coarser NHF / HLF / UCF / UF split.
+
+    Parameters
+    ----------
+    stratification : dict
+        Output of ``_compute_stratification``; must contain ``has_nhf_data``
+        and ``short_labels`` keys.
+    variants : list[dict]
+        Per-variant dicts annotated with ``stage`` (int 0–5) and lowercase
+        Kraken2 fraction fields (``dka_nhf``, ``dka_bf``, ``dka_hlf``, …).
+    div_id : str
+        HTML element id assigned to the generated ``<div>``.
 
     Returns ``None`` when no contaminated variants with Kraken2 data exist.
     """
@@ -2398,9 +2413,10 @@ _HTML_TEMPLATE = """\
     100% normalised stacked bar chart showing the relative composition of
     contamination types at each filtering stage, restricted to variants with
     DKA_NHF &ge; 0.05.  Each bar sums to 100%; the chart reveals which
-    categories (bacterial, viral, fungal, etc.) are progressively removed and
-    which persist to later stages.  Stages with no contaminated variants are
-    shown with an empty bar (n=0).
+    categories (bacterial, viral, fungal, archaeal, plant, UniVec Core,
+    unclassified, human-lineage) are progressively removed and which persist
+    to later stages.  Stages with no contaminated variants are shown with an
+    empty bar (n=0).
   </p>
 </div>
 {% endif %}

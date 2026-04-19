@@ -861,7 +861,7 @@ class TestReportCLI:
 class TestContaminationCompositionChart:
     """Unit tests for the 100% normalised contamination composition chart."""
 
-    def _base_variant(self, stage=0, dka_nhf=None, **kwargs):
+    def _make_test_variant(self, stage=0, dka_nhf=None, **kwargs):
         """Return a minimal variant dict suitable for stratification tests."""
         v = {
             "label": "chr1:100 A>T",
@@ -895,7 +895,7 @@ class TestContaminationCompositionChart:
         from kmer_denovo_filter.report import _make_contamination_composition_chart
         strat = self._make_stratification()
         # All variants are clean (NHF < 0.05)
-        variants = [self._base_variant(stage=1, dka_nhf=0.01) for _ in range(5)]
+        variants = [self._make_test_variant(stage=1, dka_nhf=0.01) for _ in range(5)]
         assert _make_contamination_composition_chart(strat, variants) is None
 
     def test_returns_div_with_coarse_categories(self):
@@ -903,7 +903,7 @@ class TestContaminationCompositionChart:
         from kmer_denovo_filter.report import _make_contamination_composition_chart
         strat = self._make_stratification()
         variants = [
-            self._base_variant(
+            self._make_test_variant(
                 stage=i,
                 dka_nhf=0.20,
                 dka_hlf=0.60,
@@ -922,7 +922,7 @@ class TestContaminationCompositionChart:
         from kmer_denovo_filter.report import _make_contamination_composition_chart
         strat = self._make_stratification()
         variants = [
-            self._base_variant(
+            self._make_test_variant(
                 stage=i,
                 dka_nhf=0.30,
                 dka_bf=0.15,
@@ -947,7 +947,7 @@ class TestContaminationCompositionChart:
         from kmer_denovo_filter.report import _make_contamination_composition_chart
         strat = self._make_stratification()
         variants = [
-            self._base_variant(
+            self._make_test_variant(
                 stage=0,
                 dka_nhf=0.20,
                 dka_bf=0.20,
@@ -966,7 +966,7 @@ class TestContaminationCompositionChart:
         strat = self._make_stratification()
         # Create a single contaminated variant at stage 0 only with known fractions
         variants = [
-            self._base_variant(
+            self._make_test_variant(
                 stage=0,
                 dka_nhf=0.20,
                 dka_bf=0.20,
@@ -984,7 +984,7 @@ class TestContaminationCompositionChart:
         strat = self._make_stratification()
         # Only bacterial and HLF are non-zero; fungal/viral/etc absent
         variants = [
-            self._base_variant(
+            self._make_test_variant(
                 stage=i,
                 dka_nhf=0.20,
                 dka_bf=0.20,
