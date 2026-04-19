@@ -640,14 +640,15 @@ class TestClassifyVariantType:
 
 
 class TestStratification:
-    """Tests for the 4-stage stratification cascade."""
+    """Tests for the 6-stage stratification cascade."""
 
-    def _v(self, dka=0, dka_dkt=0.0, dka_nhf=None, label="chr1:1 A>C"):
+    def _v(self, dka=0, dka_dkt=0.0, dka_nhf=None, max_pkc_alt=0,
+            label="chr1:1 A>C"):
         v = {
             "label": label, "dku": 0, "dkt": 10, "dka": dka,
             "dku_dkt": 0.0, "dka_dkt": dka_dkt,
             "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0,
-            "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0,
+            "max_pkc_alt": max_pkc_alt, "avg_pkc_alt": 0.0, "min_pkc_alt": 0,
             "call": "DE_NOVO" if dka > 0 else "inherited",
         }
         if dka_nhf is not None:
@@ -663,62 +664,85 @@ class TestStratification:
         from kmer_denovo_filter.report import _stratify_variant
         assert _stratify_variant(self._v(dka=1, dka_dkt=0.05)) == 1
 
-    def test_stage_2_higher_quality(self):
+    def test_stage_2_dka_ge_5(self):
         from kmer_denovo_filter.report import _stratify_variant
-        # No NHF data → stage 4 collapses to stage 3 (has_nhf_data=False)
+        # DKA=5 but DKA_DKT too low for stage 3
+        assert _stratify_variant(self._v(dka=5, dka_dkt=0.05)) == 2
+
+    def test_stage_3_higher_quality(self):
+        from kmer_denovo_filter.report import _stratify_variant
+        # DKA >= 5 and DKA_DKT > 0.1 but MAX_PKC_ALT >= 1
         assert _stratify_variant(
-            self._v(dka=10, dka_dkt=0.5),
+            self._v(dka=10, dka_dkt=0.5, max_pkc_alt=2),
             has_nhf_data=False,
         ) == 3
 
-    def test_stage_4_requires_low_nhf(self):
+    def test_stage_4_parental_confirmed(self):
+        from kmer_denovo_filter.report import _stratify_variant
+        # DKA >= 5, DKA_DKT > 0.1, MAX_PKC_ALT < 1 but has NHF data
+        # and no NHF field → stays at stage 4
+        assert _stratify_variant(
+            self._v(dka=10, dka_dkt=0.5, max_pkc_alt=0),
+            has_nhf_data=True,
+        ) == 4
+
+    def test_stage_5_full_pass_no_nhf_data(self):
+        from kmer_denovo_filter.report import _stratify_variant
+        # No NHF data → stage 5 collapses (has_nhf_data=False)
+        assert _stratify_variant(
+            self._v(dka=10, dka_dkt=0.5, max_pkc_alt=0),
+            has_nhf_data=False,
+        ) == 5
+
+    def test_stage_5_requires_low_nhf(self):
         from kmer_denovo_filter.report import _stratify_variant
         # NHF data is present cohort-wide; this variant fails NHF
         assert _stratify_variant(
-            self._v(dka=10, dka_dkt=0.5, dka_nhf=0.10),
+            self._v(dka=10, dka_dkt=0.5, max_pkc_alt=0, dka_nhf=0.10),
             has_nhf_data=True,
-        ) == 2
-        # Below threshold → stage 3
+        ) == 4
+        # Below threshold → stage 5
         assert _stratify_variant(
-            self._v(dka=10, dka_dkt=0.5, dka_nhf=0.01),
+            self._v(dka=10, dka_dkt=0.5, max_pkc_alt=0, dka_nhf=0.01),
             has_nhf_data=True,
-        ) == 3
+        ) == 5
 
-    def test_stage_4_missing_nhf_when_cohort_has_data(self):
+    def test_stage_5_missing_nhf_when_cohort_has_data(self):
         """Conservative: when other variants have NHF but this one doesn't,
-        we cannot confirm non-contamination → stays at stage 2."""
+        we cannot confirm non-contamination → stays at stage 4."""
         from kmer_denovo_filter.report import _stratify_variant
         assert _stratify_variant(
-            self._v(dka=10, dka_dkt=0.5),  # no dka_nhf
+            self._v(dka=10, dka_dkt=0.5, max_pkc_alt=0),  # no dka_nhf
             has_nhf_data=True,
-        ) == 2
+        ) == 4
 
     def test_compute_stratification_counts(self):
         from kmer_denovo_filter.report import _compute_stratification
         variants = [
-            self._v(dka=0, dka_dkt=0.0),                       # stage 0
-            self._v(dka=2, dka_dkt=0.1),                       # stage 1
-            self._v(dka=15, dka_dkt=0.30, dka_nhf=0.01),       # stage 3
-            self._v(dka=15, dka_dkt=0.30, dka_nhf=0.20),       # stage 2 (contam)
+            self._v(dka=0, dka_dkt=0.0),                                    # stage 0
+            self._v(dka=2, dka_dkt=0.05),                                   # stage 1 (DKA<5)
+            self._v(dka=15, dka_dkt=0.30, max_pkc_alt=0, dka_nhf=0.01),    # stage 5
+            self._v(dka=15, dka_dkt=0.30, max_pkc_alt=0, dka_nhf=0.20),    # stage 4 (contam)
         ]
         strat = _compute_stratification(variants)
         assert strat["has_nhf_data"] is True
-        assert strat["counts"] == [4, 3, 2, 1]
-        # Lost at each step: 0, 1, 1, 1
-        assert strat["lost"] == [0, 1, 1, 1]
+        # counts: [4, 3, 2, 2, 2, 1]
+        assert strat["counts"] == [4, 3, 2, 2, 2, 1]
+        # Lost at each step: 0, 1, 1, 0, 0, 1
+        assert strat["lost"] == [0, 1, 1, 0, 0, 1]
 
     def test_compute_stratification_no_nhf(self):
         from kmer_denovo_filter.report import _compute_stratification
         variants = [
             self._v(dka=0, dka_dkt=0.0),
-            self._v(dka=2, dka_dkt=0.1),
-            self._v(dka=15, dka_dkt=0.30),
-            self._v(dka=20, dka_dkt=0.50),
+            self._v(dka=2, dka_dkt=0.05),
+            self._v(dka=15, dka_dkt=0.30, max_pkc_alt=0),
+            self._v(dka=20, dka_dkt=0.50, max_pkc_alt=0),
         ]
         strat = _compute_stratification(variants)
         assert strat["has_nhf_data"] is False
-        # Stage 4 collapses to stage 3
-        assert strat["counts"][3] == strat["counts"][2]
+        # Stage 5 collapses to stage 4 (NHF filter not applied)
+        assert strat["counts"][5] == strat["counts"][4]
 
 
 class TestReportStratificationContent:
@@ -744,12 +768,13 @@ class TestReportStratificationContent:
         assert "putative" in html.lower()
         assert "miscalled" in html.lower()
 
-    def test_stratification_funnel_has_four_stages(self):
+    def test_stratification_funnel_has_six_stages(self):
         html = self._generate()
         assert "Putative denovo" in html
         assert "Putative kmer denovo" in html
         assert "Higher-quality denovo" in html
-        # Stage 4 label appears (escaped &lt;)
+        assert "MAX_PKC_ALT" in html
+        # Stage 6 label appears (NHF)
         assert "NHF" in html
 
     def test_stratification_sankey_present(self):
@@ -768,13 +793,11 @@ class TestReportStratificationContent:
         html = self._generate()
         assert "Results Highlights" in html
 
-    def test_per_variant_table_only_higher_quality(self):
-        """Per-variant table must only contain higher-quality variants
-        (DKA_DKT > 0.25)."""
+    def test_per_variant_table_only_final_set(self):
+        """Per-variant table must only contain final DNM set variants
+        (stage 5 = all filters passed)."""
         html = self._generate()
-        assert "Higher-Quality DNMs" in html
-        # In the example data, chr11:55003995 has DKA_DKT=0.4565 → should appear
-        assert "chr11:55003995" in html
+        assert "Final DNM Set" in html
         # chr8:40003391 has DKA_DKT=0.0588 → must NOT appear in the per-variant
         # table (it should still appear in scatter/heatmap data, but the
         # table filtering means its row HTML <td>chr8:40003391...</td> is gone)
@@ -791,9 +814,13 @@ class TestStratificationConstants:
             _HIGH_QUALITY_DKA_DKT_THRESHOLD,
             _NHF_CONTAMINATION_THRESHOLD,
             _KMER_DENOVO_DKA_THRESHOLD,
+            _KMER_DENOVO_DKA_STRONG_THRESHOLD,
+            _MAX_PKC_ALT_THRESHOLD,
         )
         assert _KMER_DENOVO_DKA_THRESHOLD == 0
-        assert _HIGH_QUALITY_DKA_DKT_THRESHOLD == 0.25
+        assert _KMER_DENOVO_DKA_STRONG_THRESHOLD == 5
+        assert _HIGH_QUALITY_DKA_DKT_THRESHOLD == 0.1
+        assert _MAX_PKC_ALT_THRESHOLD == 1
         assert _NHF_CONTAMINATION_THRESHOLD == 0.05
 
 
