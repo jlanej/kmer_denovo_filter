@@ -856,3 +856,314 @@ class TestReportCLI:
         assert args.vcf_summary == "/tmp/summary.txt"
         assert args.vcf is None
         assert args.discovery_metrics is None
+
+
+class TestContaminationCompositionChart:
+    """Unit tests for the 100% normalised contamination composition chart."""
+
+    def _make_test_variant(self, stage=0, dka_nhf=None, **kwargs):
+        """Return a minimal variant dict suitable for stratification tests."""
+        v = {
+            "label": "chr1:100 A>T",
+            "dku": 10, "dkt": 20, "dka": 10,
+            "dku_dkt": 0.5, "dka_dkt": 0.5,
+            "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0,
+            "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0,
+            "call": "DE_NOVO",
+            "stage": stage,
+        }
+        if dka_nhf is not None:
+            v["dka_nhf"] = dka_nhf
+        v.update(kwargs)
+        return v
+
+    def _make_stratification(self, has_nhf_data=True, n_stages=6):
+        from kmer_denovo_filter.report import _STAGE_SHORT_LABELS, _STAGE_COLORS
+        return {
+            "has_nhf_data": has_nhf_data,
+            "counts": [10, 8, 6, 5, 4, 3],
+            "short_labels": list(_STAGE_SHORT_LABELS),
+            "colors": list(_STAGE_COLORS),
+        }
+
+    def test_returns_none_when_no_nhf_data(self):
+        from kmer_denovo_filter.report import _make_contamination_composition_chart
+        strat = self._make_stratification(has_nhf_data=False)
+        assert _make_contamination_composition_chart(strat, []) is None
+
+    def test_returns_none_when_no_contaminated_variants(self):
+        from kmer_denovo_filter.report import _make_contamination_composition_chart
+        strat = self._make_stratification()
+        # All variants are clean (NHF < 0.05)
+        variants = [self._make_test_variant(stage=1, dka_nhf=0.01) for _ in range(5)]
+        assert _make_contamination_composition_chart(strat, variants) is None
+
+    def test_returns_div_with_coarse_categories(self):
+        """Falls back to coarse NHF/HLF/UCF/UF when granular fields absent."""
+        from kmer_denovo_filter.report import _make_contamination_composition_chart
+        strat = self._make_stratification()
+        variants = [
+            self._make_test_variant(
+                stage=i,
+                dka_nhf=0.20,
+                dka_hlf=0.60,
+                dka_ucf=0.10,
+                dka_uf=0.10,
+            )
+            for i in range(6)
+        ]
+        div = _make_contamination_composition_chart(strat, variants)
+        assert div is not None
+        assert "Non-Human" in div
+        assert "Human Lineage" in div
+
+    def test_returns_div_with_granular_categories(self):
+        """Uses granular breakdown when DKA_BF / DKA_VF fields are present."""
+        from kmer_denovo_filter.report import _make_contamination_composition_chart
+        strat = self._make_stratification()
+        variants = [
+            self._make_test_variant(
+                stage=i,
+                dka_nhf=0.30,
+                dka_bf=0.15,
+                dka_vf=0.10,
+                dka_ff=0.05,
+                dka_af=0.00,
+                dka_pf=0.00,
+                dka_ucf=0.10,
+                dka_uf=0.10,
+                dka_hlf=0.50,
+            )
+            for i in range(6)
+        ]
+        div = _make_contamination_composition_chart(strat, variants)
+        assert div is not None
+        assert "Bacterial" in div
+        assert "Viral" in div
+        assert "Fungal" in div
+
+    def test_chart_includes_stage_counts(self):
+        """Each stage bar should include the contaminated-variant count."""
+        from kmer_denovo_filter.report import _make_contamination_composition_chart
+        strat = self._make_stratification()
+        variants = [
+            self._make_test_variant(
+                stage=0,
+                dka_nhf=0.20,
+                dka_bf=0.20,
+                dka_hlf=0.80,
+            )
+        ]
+        div = _make_contamination_composition_chart(strat, variants)
+        assert div is not None
+        # The x-axis label for stage 0 must include the count annotation
+        assert "n=1" in div
+
+    def test_chart_is_100_percent_normalised(self):
+        """Sum of percentages per stage should equal ~100%."""
+        import re
+        from kmer_denovo_filter.report import _make_contamination_composition_chart
+        strat = self._make_stratification()
+        # Create a single contaminated variant at stage 0 only with known fractions
+        variants = [
+            self._make_test_variant(
+                stage=0,
+                dka_nhf=0.20,
+                dka_bf=0.20,
+                dka_hlf=0.80,
+            )
+        ]
+        div = _make_contamination_composition_chart(strat, variants)
+        assert div is not None
+        # The chart must use barmode="stack"
+        assert "stack" in div
+
+    def test_granular_categories_not_shown_when_zero(self):
+        """Categories with all-zero values must be omitted from the chart."""
+        from kmer_denovo_filter.report import _make_contamination_composition_chart
+        strat = self._make_stratification()
+        # Only bacterial and HLF are non-zero; fungal/viral/etc absent
+        variants = [
+            self._make_test_variant(
+                stage=i,
+                dka_nhf=0.20,
+                dka_bf=0.20,
+                dka_vf=0.00,
+                dka_ff=0.00,
+                dka_af=0.00,
+                dka_pf=0.00,
+                dka_ucf=0.00,
+                dka_uf=0.00,
+                dka_hlf=0.80,
+            )
+            for i in range(3)
+        ]
+        div = _make_contamination_composition_chart(strat, variants)
+        assert div is not None
+        assert "Bacterial" in div
+        # Fungal should not appear since its values are always 0
+        assert "Fungal" not in div
+
+
+class TestVariantTypeBreakdownByStage:
+    """Tests for the stage-aware variant type breakdown chart."""
+
+    def _make_variants(self):
+        """Create synthetic variants at various stages."""
+        from kmer_denovo_filter.report import _compute_stratification
+        variants = [
+            # Stage 0 only (DKA=0)
+            {"label": "chr1:100 A>C", "dku": 0, "dkt": 10, "dka": 0,
+             "dku_dkt": 0.0, "dka_dkt": 0.0,
+             "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0,
+             "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0,
+             "call": "inherited", "vtype": "SNV"},
+            # Stage 1 (DKA=2 but < 5)
+            {"label": "chr2:200 AT>A", "dku": 2, "dkt": 10, "dka": 2,
+             "dku_dkt": 0.2, "dka_dkt": 0.05,
+             "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0,
+             "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0,
+             "call": "DE_NOVO", "vtype": "DEL"},
+            # Stage 5 (high-quality, non-contaminated)
+            {"label": "chr3:300 A>ACGT", "dku": 10, "dkt": 20, "dka": 15,
+             "dku_dkt": 0.5, "dka_dkt": 0.5,
+             "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0,
+             "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0,
+             "call": "DE_NOVO", "vtype": "INS"},
+        ]
+        strat = _compute_stratification(variants, has_nhf_data=False)
+        return variants, strat
+
+    def test_variant_type_uses_stage_labels(self):
+        from kmer_denovo_filter.report import _make_variant_type_breakdown
+        variants, _ = self._make_variants()
+        div = _make_variant_type_breakdown(variants)
+        assert div is not None
+        # Stage labels should appear (from _STAGE_SHORT_LABELS)
+        assert "Putative" in div
+        assert "Kmer DNM" in div
+
+    def test_variant_type_shows_types(self):
+        from kmer_denovo_filter.report import _make_variant_type_breakdown
+        variants, _ = self._make_variants()
+        div = _make_variant_type_breakdown(variants)
+        assert div is not None
+        assert "SNV" in div
+        assert "DEL" in div
+        assert "INS" in div
+
+    def test_variant_type_stage_counts(self):
+        """Stage 0 should have all 3 variants, later stages should have fewer."""
+        from kmer_denovo_filter.report import _make_variant_type_breakdown
+        variants, _ = self._make_variants()
+        div = _make_variant_type_breakdown(variants)
+        assert div is not None
+        assert "Filtering Stage" in div
+
+
+class TestChromosomalDistributionByStage:
+    """Tests for the stage-aware chromosomal distribution chart."""
+
+    def _make_variants(self):
+        from kmer_denovo_filter.report import _compute_stratification
+        variants = [
+            # Stage 0 only (DKA=0) on chr1
+            {"label": "chr1:100 A>C", "dku": 0, "dkt": 10, "dka": 0,
+             "dku_dkt": 0.0, "dka_dkt": 0.0,
+             "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0,
+             "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0,
+             "call": "inherited", "vtype": "SNV"},
+            # Stage 5 on chr2
+            {"label": "chr2:200 G>T", "dku": 10, "dkt": 20, "dka": 15,
+             "dku_dkt": 0.5, "dka_dkt": 0.5,
+             "max_pkc": 0, "avg_pkc": 0.0, "min_pkc": 0,
+             "max_pkc_alt": 0, "avg_pkc_alt": 0.0, "min_pkc_alt": 0,
+             "call": "DE_NOVO", "vtype": "SNV"},
+        ]
+        strat = _compute_stratification(variants, has_nhf_data=False)
+        return variants, strat
+
+    def test_chrom_dist_uses_stage_labels(self):
+        from kmer_denovo_filter.report import _make_chromosomal_distribution
+        variants, _ = self._make_variants()
+        div = _make_chromosomal_distribution(variants)
+        assert div is not None
+        # Stage labels should appear
+        assert "Putative" in div
+        assert "Kmer DNM" in div
+
+    def test_chrom_dist_shows_chromosomes(self):
+        from kmer_denovo_filter.report import _make_chromosomal_distribution
+        variants, _ = self._make_variants()
+        div = _make_chromosomal_distribution(variants)
+        assert div is not None
+        assert "chr1" in div
+        assert "chr2" in div
+
+    def test_chrom_dist_title(self):
+        from kmer_denovo_filter.report import _make_chromosomal_distribution
+        variants, _ = self._make_variants()
+        div = _make_chromosomal_distribution(variants)
+        assert div is not None
+        assert "Chromosomal Distribution by Filtering Stage" in div
+
+
+class TestNhfByStage:
+    """Tests for the mean NHF by stage plot."""
+
+    def _make_stratification(self, has_nhf_data=True):
+        from kmer_denovo_filter.report import _STAGE_SHORT_LABELS, _STAGE_COLORS
+        return {
+            "has_nhf_data": has_nhf_data,
+            "counts": [10, 8, 6, 5, 4, 3],
+            "short_labels": list(_STAGE_SHORT_LABELS),
+            "colors": list(_STAGE_COLORS),
+        }
+
+    def test_returns_none_when_no_nhf_data(self):
+        from kmer_denovo_filter.report import _make_nhf_by_stage_plot
+        strat = self._make_stratification(has_nhf_data=False)
+        assert _make_nhf_by_stage_plot(strat, []) is None
+
+    def test_returns_none_when_all_zero(self):
+        from kmer_denovo_filter.report import _make_nhf_by_stage_plot
+        strat = self._make_stratification()
+        variants = [
+            {"label": "chr1:100 A>T", "stage": 0, "dka_nhf": 0.0},
+            {"label": "chr1:200 A>T", "stage": 1, "dka_nhf": 0.0},
+        ]
+        assert _make_nhf_by_stage_plot(strat, variants) is None
+
+    def test_returns_div_with_nhf_data(self):
+        from kmer_denovo_filter.report import _make_nhf_by_stage_plot
+        strat = self._make_stratification()
+        variants = [
+            {"label": "chr1:100 A>T", "stage": 0, "dka_nhf": 0.10},
+            {"label": "chr1:200 A>T", "stage": 1, "dka_nhf": 0.02},
+            {"label": "chr1:300 A>T", "stage": 3, "dka_nhf": 0.01},
+        ]
+        div = _make_nhf_by_stage_plot(strat, variants)
+        assert div is not None
+        assert "Mean" in div
+        assert "Median" in div
+
+    def test_shows_contamination_threshold(self):
+        from kmer_denovo_filter.report import _make_nhf_by_stage_plot
+        strat = self._make_stratification()
+        variants = [
+            {"label": "chr1:100 A>T", "stage": 0, "dka_nhf": 0.10},
+        ]
+        div = _make_nhf_by_stage_plot(strat, variants)
+        assert div is not None
+        assert "0.05" in div
+
+    def test_includes_stage_counts(self):
+        from kmer_denovo_filter.report import _make_nhf_by_stage_plot
+        strat = self._make_stratification()
+        variants = [
+            {"label": "chr1:100 A>T", "stage": 0, "dka_nhf": 0.10},
+        ]
+        div = _make_nhf_by_stage_plot(strat, variants)
+        assert div is not None
+        assert "n=1" in div
+

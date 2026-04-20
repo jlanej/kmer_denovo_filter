@@ -66,6 +66,12 @@ _STAGE_COLORS = [
     "#4C78A8", "#F58518", "#E45756", "#72B7B2", "#EECA3B", "#54A24B",
 ]
 
+# Colour palette for variant type categories (SNV, INS, DEL, MNV, Other).
+_VARIANT_TYPE_COLORS = {
+    "SNV": "#4C78A8", "INS": "#F58518", "DEL": "#E45756",
+    "MNV": "#72B7B2", "Other": "#BAB0AC",
+}
+
 # Maximum rows in the evidence heatmap.  Above this threshold the heatmap
 # switches to cluster-summary mode: k-means is run on all variants and one row
 # per cluster is shown (centroid values).  This scales to 100k+ variants.
@@ -1342,6 +1348,256 @@ def _make_contamination_funnel(stratification, variants,
     return _plotly_div(fig, div_id)
 
 
+def _make_contamination_composition_chart(stratification, variants,
+                                          div_id="contam-composition-plot"):
+    """100% normalised stacked bar chart of contamination-type composition by stage.
+
+    For each filtering stage (s0–s5), shows the relative composition of
+    Kraken2 read-classification categories among contaminated variants
+    (DKA_NHF >= 0.05).  This answers the question: *are certain types of
+    contamination harder to filter out?*  For example, environmental bacteria
+    may drop out early while closely-related viral or primate sequences may
+    persist until the NHF filter at s5.
+
+    At each stage the chart includes all contaminated variants that *reach or
+    pass* that stage (``variant.stage >= stage_idx``), which is the same
+    cumulative convention used by ``_make_contamination_funnel``.
+
+    When the granular taxonomy fields (DKA_BF, DKA_VF, DKA_FF, DKA_AF,
+    DKA_PF) are present they are used; otherwise the function falls back to
+    the coarser NHF / HLF / UCF / UF split.
+
+    Parameters
+    ----------
+    stratification : dict
+        Output of ``_compute_stratification``; must contain ``has_nhf_data``
+        and ``short_labels`` keys.
+    variants : list[dict]
+        Per-variant dicts annotated with ``stage`` (int 0–5) and lowercase
+        Kraken2 fraction fields (``dka_nhf``, ``dka_bf``, ``dka_hlf``, …).
+    div_id : str
+        HTML element id assigned to the generated ``<div>``.
+
+    Returns ``None`` when no contaminated variants with Kraken2 data exist.
+    """
+    import plotly.graph_objects as go
+
+    if not stratification["has_nhf_data"]:
+        return None
+
+    short_labels = stratification["short_labels"]
+
+    # Granular taxonomy categories (preferred when available in the data).
+    granular_categories = [
+        ("dka_bf",  "Bacterial",      "#E45756"),
+        ("dka_vf",  "Viral",          "#F58518"),
+        ("dka_ff",  "Fungal",         "#72B7B2"),
+        ("dka_af",  "Archaeal",       "#EECA3B"),
+        ("dka_pf",  "Plant",          "#54A24B"),
+        ("dka_ucf", "UniVec Core",    "#B279A2"),
+        ("dka_uf",  "Unclassified",   "#BAB0AC"),
+        ("dka_hlf", "Human Lineage",  "#4C78A8"),
+    ]
+    # Coarse fallback when only aggregate NHF is annotated.
+    coarse_categories = [
+        ("dka_nhf", "Non-Human",      "#E45756"),
+        ("dka_ucf", "UniVec Core",    "#B279A2"),
+        ("dka_uf",  "Unclassified",   "#BAB0AC"),
+        ("dka_hlf", "Human Lineage",  "#4C78A8"),
+    ]
+
+    # Decide granular vs coarse based on whether any contaminated variant
+    # carries a non-zero DKA_BF or DKA_VF value.
+    has_granular = any(
+        v.get("dka_bf") is not None or v.get("dka_vf") is not None
+        for v in variants
+        if v.get("dka_nhf", 0.0) >= _NHF_CONTAMINATION_THRESHOLD
+    )
+    categories = granular_categories if has_granular else coarse_categories
+
+    # For each stage, sum each category's fraction values across contaminated
+    # variants that reach (or pass) that stage.
+    stage_data = []
+    stage_n = []
+    for stage_idx in range(6):
+        contam_variants = [
+            v for v in variants
+            if v.get("stage", 0) >= stage_idx
+            and v.get("dka_nhf") is not None
+            and v["dka_nhf"] >= _NHF_CONTAMINATION_THRESHOLD
+        ]
+        totals = {field: 0.0 for field, _, _ in categories}
+        for v in contam_variants:
+            for field, _, _ in categories:
+                totals[field] += v.get(field, 0.0)
+        stage_data.append(totals)
+        stage_n.append(len(contam_variants))
+
+    if all(n == 0 for n in stage_n):
+        return None
+
+    # Only include categories that have non-zero values anywhere.
+    present_cats = [
+        (field, label, color)
+        for field, label, color in categories
+        if any(stage_data[i][field] > 0 for i in range(6))
+    ]
+    if not present_cats:
+        return None
+
+    # X-axis labels include the contaminated variant count at each stage.
+    x_labels = [
+        f"{sl}<br>(n={n})"
+        for sl, n in zip(short_labels, stage_n)
+    ]
+
+    fig = go.Figure()
+    for field, label, color in present_cats:
+        pcts = []
+        for i in range(6):
+            row_total = sum(stage_data[i][f] for f, _, _ in present_cats)
+            pcts.append(
+                100.0 * stage_data[i][field] / row_total if row_total > 0 else 0.0
+            )
+        fig.add_trace(go.Bar(
+            x=x_labels,
+            y=pcts,
+            name=label,
+            marker_color=color,
+            hovertemplate=(
+                "<b>%{x}</b><br>"
+                f"Category: {label}<br>"
+                "Proportion: %{y:.1f}%"
+                "<extra></extra>"
+            ),
+        ))
+
+    subtitle = (
+        "granular Kraken2 taxonomy (BF/VF/FF/AF/PF + UCF/UF/HLF)"
+        if has_granular
+        else "aggregate fractions (NHF/UCF/UF/HLF)"
+    )
+    fig.update_layout(
+        barmode="stack",
+        title=dict(
+            text=(
+                "Contamination Type Composition by Stage (100% Normalised)<br>"
+                f"<sup>Among variants with DKA_NHF &ge; "
+                f"{_NHF_CONTAMINATION_THRESHOLD}; {subtitle}</sup>"
+            ),
+            font=dict(size=16),
+        ),
+        yaxis=dict(
+            title="Proportion of Total Signal (%)",
+            range=[0, 100],
+        ),
+        xaxis_title="Filtering Stage",
+        template="plotly_white",
+        height=450,
+        margin=dict(t=90, b=80),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02,
+            xanchor="right", x=1,
+        ),
+    )
+    return _plotly_div(fig, div_id)
+
+
+def _make_nhf_by_stage_plot(stratification, variants,
+                            div_id="nhf-by-stage-plot"):
+    """Bar chart of mean NHF at each filtering stage across all variants.
+
+    Unlike the contamination prevalence funnel (which only counts the
+    proportion with NHF ≥ 0.05), this plot shows the *mean* NHF across
+    **all** variants at each stage — including those with low or zero NHF.
+    This gives the reviewer a sense of the overall contamination burden
+    and how it decreases as filters are applied.
+
+    Returns ``None`` when no NHF data is available.
+    """
+    import plotly.graph_objects as go
+
+    if not stratification["has_nhf_data"]:
+        return None
+
+    short_labels = stratification["short_labels"]
+    colors = stratification["colors"]
+
+    means = []
+    medians = []
+    ns = []
+    for stage_idx in range(6):
+        nhf_vals = [
+            v["dka_nhf"] for v in variants
+            if v.get("stage", 0) >= stage_idx
+            and v.get("dka_nhf") is not None
+        ]
+        ns.append(len(nhf_vals))
+        if nhf_vals:
+            means.append(stats.mean(nhf_vals))
+            medians.append(stats.median(nhf_vals))
+        else:
+            means.append(0.0)
+            medians.append(0.0)
+
+    if all(m == 0 for m in means):
+        return None
+
+    x_labels = [
+        f"{sl}<br>(n={n})" for sl, n in zip(short_labels, ns)
+    ]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=x_labels,
+        y=means,
+        name="Mean NHF",
+        marker_color=colors,
+        text=[f"{m:.4f}" for m in means],
+        textposition="outside",
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Mean NHF: %{y:.4f}<br>"
+            "<extra></extra>"
+        ),
+    ))
+    fig.add_trace(go.Scatter(
+        x=x_labels,
+        y=medians,
+        name="Median NHF",
+        mode="markers+lines",
+        marker=dict(size=8, color="#333", symbol="diamond"),
+        line=dict(color="#333", dash="dot", width=2),
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "Median NHF: %{y:.4f}<br>"
+            "<extra></extra>"
+        ),
+    ))
+    fig.add_hline(
+        y=_NHF_CONTAMINATION_THRESHOLD,
+        line_dash="dash", line_color="#E45756", line_width=2,
+        annotation_text=f"Contamination threshold ({_NHF_CONTAMINATION_THRESHOLD})",
+        annotation_position="top right",
+        annotation_font=dict(size=11, color="#E45756"),
+    )
+    fig.update_layout(
+        title=dict(
+            text=("Mean Non-Human Fraction (NHF) by Stage<br>"
+                  "<sup>Aggregate contamination level across all variants "
+                  "at each filter level</sup>"),
+            font=dict(size=16),
+        ),
+        yaxis_title="DKA_NHF (mean)",
+        template="plotly_white",
+        height=420,
+        margin=dict(t=80, b=80),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1),
+    )
+    return _plotly_div(fig, div_id)
+
+
 def _make_discovery_region_scatter(regions, div_id="disc-scatter-plot"):
     """Create scatter plot of discovery regions: reads vs k-mers.
 
@@ -1553,60 +1809,55 @@ def _classify_variant_type(label):
 
 
 def _make_variant_type_breakdown(variants, div_id="variant-type-plot"):
-    """Create a grouped bar chart of variant types by call status.
+    """Grouped bar chart of variant types at each filtering stage (s0–s5).
 
-    Shows the count of SNVs, insertions, deletions, and MNVs for
-    DE_NOVO vs. inherited variants.  A genomics reviewer expects the
-    de novo SNV rate (~38/genome for Illumina WGS) to be consistent
-    with published trio studies.
+    For each of the six filtering stages, shows a per-variant-type count
+    (SNV, INS, DEL, MNV, Other) of variants that reach or pass that stage.
+    This mirrors the DNM funnel breakdown, letting the reviewer see how each
+    variant type progresses through the filtering cascade and whether one
+    type is disproportionately filtered.
     """
     import plotly.graph_objects as go
 
     type_order = ["SNV", "INS", "DEL", "MNV", "Other"]
-    denovo_counts = {t: 0 for t in type_order}
-    inherited_counts = {t: 0 for t in type_order}
 
-    for v in variants:
-        vtype = _classify_variant_type(v["label"])
-        if v["call"] == "DE_NOVO":
-            denovo_counts[vtype] += 1
-        else:
-            inherited_counts[vtype] += 1
+    # Count variants per type at each stage
+    stage_type_counts = {}
+    for stage_idx in range(6):
+        stage_variants = [v for v in variants if v.get("stage", 0) >= stage_idx]
+        counts = {t: 0 for t in type_order}
+        for v in stage_variants:
+            vtype = _classify_variant_type(v["label"])
+            counts[vtype] += 1
+        stage_type_counts[stage_idx] = counts
 
-    # Only include types that appear in the data
+    # Only include types that appear anywhere
     present_types = [t for t in type_order
-                     if denovo_counts[t] > 0 or inherited_counts[t] > 0]
+                     if any(stage_type_counts[s][t] > 0 for s in range(6))]
     if not present_types:
         return None
 
     fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=present_types,
-        y=[denovo_counts[t] for t in present_types],
-        name="De Novo",
-        marker_color="#54A24B",
-        text=[denovo_counts[t] for t in present_types],
-        textposition="outside",
-    ))
-    fig.add_trace(go.Bar(
-        x=present_types,
-        y=[inherited_counts[t] for t in present_types],
-        name="Inherited / Unclear",
-        marker_color="#E45756",
-        text=[inherited_counts[t] for t in present_types],
-        textposition="outside",
-    ))
+    for vtype in present_types:
+        fig.add_trace(go.Bar(
+            x=list(_STAGE_SHORT_LABELS),
+            y=[stage_type_counts[s][vtype] for s in range(6)],
+            name=vtype,
+            marker_color=_VARIANT_TYPE_COLORS.get(vtype, "#999"),
+            text=[stage_type_counts[s][vtype] for s in range(6)],
+            textposition="outside",
+        ))
     fig.update_layout(
         barmode="group",
         title=dict(
-            text="Variant Type Breakdown by Call Status",
+            text="Variant Type Breakdown by Filtering Stage",
             font=dict(size=18),
         ),
-        xaxis_title="Variant Type",
-        yaxis_title="Count",
+        xaxis_title="Filtering Stage",
+        yaxis_title="Variant Count",
         template="plotly_white",
-        height=400,
-        margin=dict(t=60, b=40),
+        height=450,
+        margin=dict(t=60, b=60),
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="right", x=1),
     )
@@ -1614,11 +1865,12 @@ def _make_variant_type_breakdown(variants, div_id="variant-type-plot"):
 
 
 def _make_chromosomal_distribution(variants, div_id="chrom-dist-plot"):
-    """Create a stacked bar chart of variant counts per chromosome.
+    """Stacked bar chart of variant counts per chromosome at each filtering stage.
 
-    A genomics reviewer will check that de novo candidates are
-    distributed across chromosomes as expected rather than clustered
-    on a single chromosome (which may indicate a systematic error).
+    For each chromosome, shows the count of variants that reach each of the
+    six filtering stages.  This mirrors the DNM funnel breakdown on a
+    per-chromosome basis, letting the reviewer see whether variants from
+    any chromosome are disproportionately filtered or enriched.
     """
     import plotly.graph_objects as go
 
@@ -1631,46 +1883,43 @@ def _make_chromosomal_distribution(variants, div_id="chrom-dist-plot"):
         except ValueError:
             return order.get(c, 99)
 
-    chrom_denovo = {}
-    chrom_inherited = {}
+    # Collect all chromosomes present
+    all_chroms_set = set()
     for v in variants:
-        # Label: "chr8:40003391 A>C"
         chrom_part = v["label"].split(":")[0]
-        if v["call"] == "DE_NOVO":
-            chrom_denovo[chrom_part] = chrom_denovo.get(chrom_part, 0) + 1
-        else:
-            chrom_inherited[chrom_part] = chrom_inherited.get(chrom_part, 0) + 1
-
-    all_chroms = sorted(
-        set(chrom_denovo) | set(chrom_inherited),
-        key=_chrom_sort_key,
-    )
+        all_chroms_set.add(chrom_part)
+    all_chroms = sorted(all_chroms_set, key=_chrom_sort_key)
     if not all_chroms:
         return None
 
+    # Count per chromosome at each stage
+    stage_chrom_counts = {}
+    for stage_idx in range(6):
+        chrom_counts = {c: 0 for c in all_chroms}
+        for v in variants:
+            if v.get("stage", 0) >= stage_idx:
+                chrom_part = v["label"].split(":")[0]
+                chrom_counts[chrom_part] += 1
+        stage_chrom_counts[stage_idx] = chrom_counts
+
     fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=all_chroms,
-        y=[chrom_denovo.get(c, 0) for c in all_chroms],
-        name="De Novo",
-        marker_color="#54A24B",
-    ))
-    fig.add_trace(go.Bar(
-        x=all_chroms,
-        y=[chrom_inherited.get(c, 0) for c in all_chroms],
-        name="Inherited / Unclear",
-        marker_color="#E45756",
-    ))
+    for stage_idx in range(6):
+        fig.add_trace(go.Bar(
+            x=all_chroms,
+            y=[stage_chrom_counts[stage_idx].get(c, 0) for c in all_chroms],
+            name=_STAGE_SHORT_LABELS[stage_idx],
+            marker_color=_STAGE_COLORS[stage_idx],
+        ))
     fig.update_layout(
-        barmode="stack",
+        barmode="group",
         title=dict(
-            text="Chromosomal Distribution of Candidate Variants",
+            text="Chromosomal Distribution by Filtering Stage",
             font=dict(size=18),
         ),
         xaxis_title="Chromosome",
         yaxis_title="Variant Count",
         template="plotly_white",
-        height=400,
+        height=450,
         margin=dict(t=60, b=40),
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="right", x=1),
@@ -2088,18 +2337,21 @@ _HTML_TEMPLATE = """\
 {% if variant_type_div or chrom_dist_div %}
 <h2>4. Variant Breakdown</h2>
 <div class="section-rationale">
-  <strong>What this shows:</strong> A genomics reviewer will
-  immediately check whether the call set has the expected
-  composition: ~38 SNVs and ~3–5 indels per WGS trio, distributed
-  across all autosomes.  Excess calls on one chromosome or an
-  unexpected type ratio are red flags for a systematic artefact.
+  <strong>What this shows:</strong> These charts mirror the filtering
+  funnel by breaking down variant counts at each successive stage.  A
+  genomics reviewer expects ~38 SNVs and ~3–5 indels per WGS trio,
+  distributed across all autosomes.  Seeing how each variant type and
+  each chromosome progresses through the filtering cascade reveals
+  whether one category or region is disproportionately removed.
 </div>
 
 {% if variant_type_div %}
 <div class="plot-container">
   {{ variant_type_div | safe }}
   <p class="plot-caption">
-    SNV / insertion / deletion / MNV counts split by call status.
+    Per-variant-type counts (SNV, INS, DEL, MNV) at each filtering
+    stage (s0–s5).  The chart shows how each type is progressively
+    filtered, mirroring the DNM funnel breakdown.
   </p>
 </div>
 {% endif %}
@@ -2108,7 +2360,8 @@ _HTML_TEMPLATE = """\
 <div class="plot-container">
   {{ chrom_dist_div | safe }}
   <p class="plot-caption">
-    Per-chromosome variant counts.  Clustering on a single chromosome
+    Per-chromosome variant counts at each filtering stage.  Clustering
+    on a single chromosome or disproportionate filtering of one region
     can indicate a systematic artefact.
   </p>
 </div>
@@ -2235,8 +2488,9 @@ _HTML_TEMPLATE = """\
   per-class read-fraction tags listed in the methods (DKA_HLF,
   DKA_NHF, DKA_UCF, DKA_UF).  The final contamination filter excludes
   any variant with <code>DKA_NHF &ge; 0.05</code>.  The plots below
-  focus on variants that actually exhibit contamination (NHF &ge; 0.05)
-  rather than the full set, which is predominantly clean.
+  provide a comprehensive view of contamination at each filtering
+  stage: prevalence, type composition (bacterial, viral, fungal,
+  etc.), aggregate NHF levels, distribution, and per-variant breakdown.
 </div>
 
 {% if contam_funnel_div %}
@@ -2247,6 +2501,33 @@ _HTML_TEMPLATE = """\
     proportion of variants with DKA_NHF &ge; 0.05 at each filter level,
     revealing how contamination is progressively removed and what
     baseline contamination rate exists in the input set.
+  </p>
+</div>
+{% endif %}
+
+{% if contam_composition_div %}
+<div class="plot-container">
+  {{ contam_composition_div | safe }}
+  <p class="plot-caption">
+    100% normalised stacked bar chart showing the relative composition of
+    contamination types at each filtering stage, restricted to variants with
+    DKA_NHF &ge; 0.05.  Each bar sums to 100%; the chart reveals which
+    categories (bacterial, viral, fungal, archaeal, plant, UniVec Core,
+    unclassified, human-lineage) are progressively removed and which persist
+    to later stages.  Stages with no contaminated variants are shown with an
+    empty bar (n=0).
+  </p>
+</div>
+{% endif %}
+
+{% if nhf_by_stage_div %}
+<div class="plot-container">
+  {{ nhf_by_stage_div | safe }}
+  <p class="plot-caption">
+    Mean and median NHF across <em>all</em> variants at each filtering
+    stage (not just those above the 0.05 threshold).  Shows the aggregate
+    contamination burden and how it decreases as filters are applied.
+    The dashed red line marks the contamination threshold.
   </p>
 </div>
 {% endif %}
@@ -2609,6 +2890,8 @@ def generate_report(
         "contamination_div": None,
         "nhf_dist_div": None,
         "contam_funnel_div": None,
+        "contam_composition_div": None,
+        "nhf_by_stage_div": None,
         "disc_scatter_div": None,
         "disc_size_div": None,
         "sv_evidence_div": None,
@@ -2679,6 +2962,14 @@ def generate_report(
                 )
                 context["nhf_dist_div"] = _make_nhf_distribution_plot(variants)
                 context["contam_funnel_div"] = _make_contamination_funnel(
+                    stratification, variants,
+                )
+                context["contam_composition_div"] = (
+                    _make_contamination_composition_chart(
+                        stratification, variants,
+                    )
+                )
+                context["nhf_by_stage_div"] = _make_nhf_by_stage_plot(
                     stratification, variants,
                 )
 
