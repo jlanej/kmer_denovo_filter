@@ -66,6 +66,12 @@ _STAGE_COLORS = [
     "#4C78A8", "#F58518", "#E45756", "#72B7B2", "#EECA3B", "#54A24B",
 ]
 
+# Colour palette for variant type categories (SNV, INS, DEL, MNV, Other).
+_VARIANT_TYPE_COLORS = {
+    "SNV": "#4C78A8", "INS": "#F58518", "DEL": "#E45756",
+    "MNV": "#72B7B2", "Other": "#BAB0AC",
+}
+
 # Maximum rows in the evidence heatmap.  Above this threshold the heatmap
 # switches to cluster-summary mode: k-means is run on all variants and one row
 # per cluster is shown (centroid values).  This scales to 100k+ variants.
@@ -1528,13 +1534,8 @@ def _make_nhf_by_stage_plot(stratification, variants,
         ]
         ns.append(len(nhf_vals))
         if nhf_vals:
-            means.append(sum(nhf_vals) / len(nhf_vals))
-            sorted_vals = sorted(nhf_vals)
-            mid = len(sorted_vals) // 2
-            if len(sorted_vals) % 2 == 0:
-                medians.append((sorted_vals[mid - 1] + sorted_vals[mid]) / 2.0)
-            else:
-                medians.append(sorted_vals[mid])
+            means.append(stats.mean(nhf_vals))
+            medians.append(stats.median(nhf_vals))
         else:
             means.append(0.0)
             medians.append(0.0)
@@ -1819,10 +1820,6 @@ def _make_variant_type_breakdown(variants, div_id="variant-type-plot"):
     import plotly.graph_objects as go
 
     type_order = ["SNV", "INS", "DEL", "MNV", "Other"]
-    type_colors = {
-        "SNV": "#4C78A8", "INS": "#F58518", "DEL": "#E45756",
-        "MNV": "#72B7B2", "Other": "#BAB0AC",
-    }
 
     # Count variants per type at each stage
     stage_type_counts = {}
@@ -1846,7 +1843,7 @@ def _make_variant_type_breakdown(variants, div_id="variant-type-plot"):
             x=list(_STAGE_SHORT_LABELS),
             y=[stage_type_counts[s][vtype] for s in range(6)],
             name=vtype,
-            marker_color=type_colors.get(vtype, "#999"),
+            marker_color=_VARIANT_TYPE_COLORS.get(vtype, "#999"),
             text=[stage_type_counts[s][vtype] for s in range(6)],
             textposition="outside",
         ))
