@@ -12,6 +12,8 @@ import time
 
 import pysam
 
+from nonhuman_screen.bam import classify_reads_from_bam
+
 from kmer_denovo_filter.core.bam_scanner import (
     _collect_read_alignment_metadata,
     _extract_softclips,
@@ -95,16 +97,17 @@ def _run_kraken2_on_reads(
     if not read_names:
         return Kraken2Runner.Result()
 
-    # Collect sequences from BAM.
-    # Prefer targeted locus fetches when variant→read mappings are
-    # available; otherwise fall back to a whole-file scan.
-    sequences = {}
-    bam = pysam.AlignmentFile(
-        child_bam, reference_filename=ref_fasta if ref_fasta else None,
-    )
-    used_targeted_fetch = False
+    # Sequence extraction + kraken2 classification live in the standalone
+    # ``nonhuman-screen`` package. The only host-specific step is translating
+    # this pipeline's ``chrom:pos`` (0-based) variant keys into the package's
+    # ``{(chrom, pos): names}`` loci form, so that classification fetches only
+    # the informative loci rather than scanning the whole file. Names are
+    # pre-intersected with *read_names* exactly as before: when no locus has
+    # any informative read, ``loci`` is left empty and the package falls back
+    # to a whole-file scan.
+    loci = None
     if informative_reads_by_variant:
-        loci_to_names = {}
+        loci = {}
         for var_key, names in informative_reads_by_variant.items():
             if not names:
                 continue
@@ -115,10 +118,8 @@ def _run_kraken2_on_reads(
                     var_key,
                 )
                 continue
-            chrom = parts[0]
-            pos_str = parts[1]
             try:
-                pos = int(pos_str)
+                pos = int(parts[1])
             except ValueError:
                 logger.warning(
                     "[Kraken2] Skipping malformed variant key (non-integer pos): %s",
@@ -128,36 +129,14 @@ def _run_kraken2_on_reads(
             target_names = set(names).intersection(read_names)
             if not target_names:
                 continue
-            loci_to_names.setdefault((chrom, pos), set()).update(target_names)
+            loci.setdefault((parts[0], pos), set()).update(target_names)
 
-        if loci_to_names:
-            used_targeted_fetch = True
-            for (chrom, pos), target_names in sorted(loci_to_names.items()):
-                for read in bam.fetch(chrom, pos, pos + 1):
-                    if (
-                        read.query_name in target_names
-                        and read.query_sequence
-                        and read.query_name not in sequences
-                    ):
-                        sequences[read.query_name] = read.query_sequence
-
-    if not used_targeted_fetch:
-        for read in bam.fetch(until_eof=True):
-            if read.query_name in read_names and read.query_sequence:
-                if read.query_name not in sequences:
-                    sequences[read.query_name] = read.query_sequence
-    bam.close()
-
-    if not sequences:
-        return Kraken2Runner.Result()
-
-    kr = Kraken2Runner(
-        kraken2_db,
-        confidence=confidence,
-        threads=threads,
-        memory_mapping=memory_mapping,
+    return classify_reads_from_bam(
+        child_bam, kraken2_db,
+        read_names=read_names, loci=loci, ref_fasta=ref_fasta,
+        confidence=confidence, threads=threads,
+        memory_mapping=memory_mapping, tmpdir=tmpdir,
     )
-    return kr.classify_sequences(sequences, tmpdir=tmpdir)
 
 
 def _parse_kmer_votes(kmer_string, name_map=None, top_n=10):
