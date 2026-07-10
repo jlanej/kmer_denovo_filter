@@ -22,7 +22,7 @@ import tempfile
 
 import pytest
 
-from kmer_denovo_filter.kmer_utils import Kraken2Runner
+from nonhuman_screen.engine import Kraken2Runner
 
 _KRAKEN2_AVAILABLE = shutil.which("kraken2") is not None
 _KRAKEN2_BUILD_AVAILABLE = shutil.which("kraken2-build") is not None

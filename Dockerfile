@@ -22,11 +22,15 @@ RUN apt-get update && \
 WORKDIR /app
 
 COPY pyproject.toml README.md ./
+COPY packages/ packages/
 COPY src/ src/
 COPY scripts/ scripts/
 COPY examples/ examples/
 
-RUN pip install --no-cache-dir .
+# Install the extracted contamination package first (from the in-repo path),
+# then the main package which depends on it.
+RUN pip install --no-cache-dir './packages/nonhuman-screen[bam]' \
+    && pip install --no-cache-dir .
 
 # Default entrypoint is kmer-denovo (VCF mode).
 # For discovery mode, override with: --entrypoint kmer-discovery

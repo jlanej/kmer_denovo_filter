@@ -14,6 +14,13 @@ dependencies = [
     "pyahocorasick>=2.0.0",
     "plotly>=5.18.0",
     "jinja2>=3.1.0",
+    # Non-human contamination screening (Kraken2Runner + allele-based NHF) was
+    # extracted into the standalone `nonhuman-screen` package. Until it is
+    # published to PyPI it is installed from the in-repo path
+    # `packages/nonhuman-screen` (see README / Dockerfile / CI); this
+    # declaration documents the runtime requirement and is satisfied once that
+    # local install has happened.
+    "nonhuman-screen>=0.1,<0.2",
 ]
 
 [project.scripts]

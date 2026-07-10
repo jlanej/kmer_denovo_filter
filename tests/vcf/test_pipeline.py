@@ -412,7 +412,10 @@ class TestPipelineIntegration:
             def classify_sequences(self, _sequences, tmpdir=None):
                 return self.Result()
 
-        monkeypatch.setattr(vcf_pipeline_mod, "Kraken2Runner", _FakeKraken2Runner)
+        # _run_kraken2_on_reads now delegates BAM extraction + classification
+        # to nonhuman_screen.bam.classify_reads_from_bam, which is where the
+        # Kraken2Runner is instantiated, so patch it there.
+        monkeypatch.setattr("nonhuman_screen.bam.Kraken2Runner", _FakeKraken2Runner)
 
         vcf_pipeline_mod._run_kraken2_on_reads(
             child_bam=child_bam,

@@ -1,4 +1,8 @@
-"""Tests for Kraken2Runner non-human content classification."""
+"""Tests for Kraken2Runner non-human content classification.
+
+Migrated verbatim from kmer_denovo_filter/tests/test_kraken2.py; only the
+module path (kmer_denovo_filter.kmer_utils -> nonhuman_screen.engine) changed.
+"""
 
 import os
 import struct
@@ -8,7 +12,7 @@ from unittest import mock
 
 import pytest
 
-from kmer_denovo_filter.kmer_utils import (
+from nonhuman_screen.engine import (
     Kraken2Runner,
     _ARCHAEA_TAXID,
     _BACTERIA_TAXID,
@@ -169,7 +173,7 @@ class TestKraken2RunnerClassify:
         result = kr.classify_sequences([])
         assert result.total == 0
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_classify_parses_output(self, mock_popen, caplog):
         """Test that kraken2 output is correctly parsed."""
         # Simulate kraken2 per-read output:
@@ -193,7 +197,7 @@ class TestKraken2RunnerClassify:
         kr = Kraken2Runner("/fake/db")
 
         # Without taxonomy files, only exact taxid matching
-        caplog.set_level("WARNING", logger="kmer_denovo_filter.kmer_utils")
+        caplog.set_level("WARNING", logger="nonhuman_screen.engine")
         with mock.patch.object(
             Kraken2Runner, '_load_all_taxid_sets', return_value=None,
         ):
@@ -215,7 +219,7 @@ class TestKraken2RunnerClassify:
         assert "lineage matching is unavailable" in caplog.text
         assert "exact taxid matching only" in caplog.text
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_classify_with_bacterial_taxids(self, mock_popen):
         """Test bacterial lineage-aware matching."""
         kraken2_output = (
@@ -263,7 +267,7 @@ class TestKraken2RunnerClassify:
         assert "read1" in result.nonhuman_read_names
         assert "read2" in result.nonhuman_read_names
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_classify_nonzero_exit(self, mock_popen):
         """Non-zero exit code returns empty result with correct total."""
         mock_proc = mock.MagicMock()
@@ -276,7 +280,7 @@ class TestKraken2RunnerClassify:
         assert result.total == 1
         assert result.classified == 0
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_classify_nonzero_exit_logs_elapsed(self, mock_popen, caplog):
         """Non-zero exit code warning should include elapsed time."""
         mock_proc = mock.MagicMock()
@@ -285,7 +289,7 @@ class TestKraken2RunnerClassify:
         mock_popen.return_value = mock_proc
 
         kr = Kraken2Runner("/fake/db")
-        caplog.set_level("WARNING", logger="kmer_denovo_filter.kmer_utils")
+        caplog.set_level("WARNING", logger="nonhuman_screen.engine")
         result = kr.classify_sequences({"r1": "ACGT"})
         assert result.total == 1
         assert result.classified == 0
@@ -293,7 +297,7 @@ class TestKraken2RunnerClassify:
         assert "-9" in caplog.text
         assert "after" in caplog.text
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_classify_success_logs_completion(self, mock_popen, caplog):
         """Successful classification should log a completion message."""
         kraken2_output = "C\tread1\t9606\t100\t9606:20\n"
@@ -303,7 +307,7 @@ class TestKraken2RunnerClassify:
         mock_popen.return_value = mock_proc
 
         kr = Kraken2Runner("/fake/db")
-        caplog.set_level("INFO", logger="kmer_denovo_filter.kmer_utils")
+        caplog.set_level("INFO", logger="nonhuman_screen.engine")
         with mock.patch.object(
             Kraken2Runner, "_load_all_taxid_sets", return_value=None,
         ):
@@ -313,7 +317,7 @@ class TestKraken2RunnerClassify:
         # Completion message should appear in logs
         assert "classification complete" in caplog.text
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_classify_malformed_kmer_field(self, mock_popen):
         """Malformed kmer information field is ignored during parsing."""
         kraken2_output = (
@@ -343,7 +347,7 @@ class TestKraken2RunnerClassify:
         assert result.bacterial_count == 1
         assert result.human_count == 1
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_classify_list_input(self, mock_popen):
         """Accepts list of (name, seq) tuples."""
         kraken2_output = "C\tread1\t9606\t100\t9606:20\n"
@@ -363,7 +367,7 @@ class TestKraken2RunnerClassify:
         assert result.total == 1
         assert result.human_count == 1
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_temp_fastq_cleaned_up(self, mock_popen):
         """Temporary FASTQ file is cleaned up after classification."""
         mock_proc = mock.MagicMock()
@@ -383,7 +387,7 @@ class TestKraken2RunnerClassify:
                 ]
                 assert remaining == []
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_fastq_content(self, mock_popen):
         """Verify FASTQ written to kraken2 has correct format."""
         captured_args = {}
@@ -411,7 +415,7 @@ class TestKraken2RunnerClassify:
         assert "ACGTACGT\n" in content
         assert "+\n" in content
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_command_includes_confidence(self, mock_popen):
         """Verify confidence flag is passed to kraken2."""
         mock_proc = mock.MagicMock()
@@ -435,7 +439,7 @@ class TestKraken2RunnerClassify:
         assert "4" in cmd
         assert "--memory-mapping" not in cmd
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_command_includes_memory_mapping_when_enabled(self, mock_popen):
         """Verify memory-mapping flag is passed to kraken2 when enabled."""
         mock_proc = mock.MagicMock()
@@ -717,7 +721,7 @@ class TestTaxidConstants:
 class TestKrakenHomologyGuard:
     """Ensure human-homologous reads are not over-flagged as non-human."""
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_bacterial_assignment_with_human_kmers_not_flagged(
         self, mock_popen,
     ):
@@ -757,7 +761,7 @@ class TestKrakenHomologyGuard:
         assert "read2" in result.nonhuman_read_names
         assert result.nonhuman_count == 1
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_archaeal_assignment_with_human_kmers_not_flagged(
         self, mock_popen,
     ):
@@ -795,7 +799,7 @@ class TestKrakenHomologyGuard:
         assert "read2" in result.archaeal_read_names
         assert result.nonhuman_count == 1
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_viral_assignment_with_human_kmers_not_flagged(
         self, mock_popen,
     ):
@@ -843,7 +847,7 @@ class TestKrakenHomologyGuard:
 class TestMultiDomainClassification:
     """Test classification across bacteria, archaea, fungi, protist, viral."""
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_multi_domain_classification(self, mock_popen):
         """Reads from different domains are classified correctly."""
         kraken2_output = (
@@ -904,7 +908,7 @@ class TestMultiDomainClassification:
         for name in ("read_bact", "read_arch", "read_fung", "read_prot", "read_vir"):
             assert name in result.nonhuman_read_names
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_ambiguous_eukaryota_not_counted_nonhuman(self, mock_popen):
         """Reads classified at Eukaryota level are NOT counted as non-human."""
         kraken2_output = (
@@ -945,7 +949,7 @@ class TestUniVecCoreExclusion:
     """Reads classified as UniVec Core are excluded from non-human counts
     but tracked independently via univec_core_read_names/univec_core_count."""
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_univec_core_not_counted_as_nonhuman(self, mock_popen):
         """A read classified as UniVec Core (81077) is NOT non-human."""
         # read1 → UniVec Core (synthetic vector); must not count as non-human
@@ -991,7 +995,7 @@ class TestUniVecCoreExclusion:
         assert "read1" in result.univec_core_read_names
         assert "read2" not in result.univec_core_read_names
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_univec_core_child_taxid_not_counted_as_nonhuman(self, mock_popen):
         """A read classified under a UniVec Core descendant taxid is excluded."""
         # Use a fictitious child taxid (99999) that is under 81077
@@ -1024,7 +1028,7 @@ class TestUniVecCoreExclusion:
         assert result.univec_core_count == 1
         assert "read1" in result.univec_core_read_names
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_univec_core_fallback_excluded(self, mock_popen):
         """In the fallback path (no taxonomy tree), UniVec Core is excluded."""
         kraken2_output = (
@@ -1054,7 +1058,7 @@ class TestUniVecCoreExclusion:
         assert result.univec_core_count == 1
         assert "read1" in result.univec_core_read_names
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_univec_core_with_human_kmers_also_excluded(self, mock_popen):
         """UniVec Core read with human k-mer evidence is excluded by both guards."""
         # read classified as UniVec Core AND has human k-mers
@@ -1147,7 +1151,7 @@ class TestLoadNameMap:
 class TestPerReadDetail:
     """Tests for per_read_detail population in classify_sequences."""
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_per_read_detail_populated(self, mock_popen):
         """per_read_detail is populated for all parsed reads."""
         kraken2_output = (
@@ -1216,7 +1220,7 @@ class TestPerReadDetail:
         assert d["domain"] == "Root"
         assert d["is_nonhuman"] is False
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_per_read_detail_hhg_guard(self, mock_popen):
         """Human homology guard sets guard_status to HHG."""
         kraken2_output = (
@@ -1248,7 +1252,7 @@ class TestPerReadDetail:
         assert d["guard_status"] == "HHG"
         assert d["is_nonhuman"] is False  # guard excluded it
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_per_read_detail_univec_core(self, mock_popen):
         """UniVec Core reads get UVC guard status."""
         kraken2_output = "C\tread1\t81077\t100\t81077:10\n"
@@ -1294,7 +1298,7 @@ class TestUnclassifiedAndHumanLineageSets:
         assert r.human_lineage_read_names == set()
         assert r.human_lineage_count == 0
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_unclassified_read_names_populated(self, mock_popen):
         """Unclassified reads are tracked in unclassified_read_names."""
         kraken2_output = "U\tread_unk\t0\t100\t0:30\n"
@@ -1324,7 +1328,7 @@ class TestUnclassifiedAndHumanLineageSets:
         assert "read_unk" not in result.human_lineage_read_names
         assert "read_unk" not in result.nonhuman_read_names
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_human_lineage_read_names_populated(self, mock_popen):
         """Human reads go into human_lineage_read_names."""
         kraken2_output = "C\tread_hum\t9606\t100\t9606:30\n"
@@ -1354,7 +1358,7 @@ class TestUnclassifiedAndHumanLineageSets:
         assert "read_hum" not in result.nonhuman_read_names
         assert "read_hum" not in result.unclassified_read_names
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_hhg_guarded_reads_in_human_lineage(self, mock_popen):
         """HHG-guarded reads (non-human with human kmer) go into human_lineage."""
         kraken2_output = "C\tread1\t562\t100\t562:8 9606:4\n"
@@ -1385,7 +1389,7 @@ class TestUnclassifiedAndHumanLineageSets:
         assert "read1" not in result.nonhuman_read_names
         assert "read1" not in result.univec_core_read_names
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_root_reads_in_human_lineage(self, mock_popen):
         """Root (taxid 1) reads go into human_lineage (classified, not NHF, not UCF)."""
         kraken2_output = "C\tread_root\t1\t100\t1:30\n"
@@ -1413,7 +1417,7 @@ class TestUnclassifiedAndHumanLineageSets:
         assert "read_root" in result.human_lineage_read_names
         assert result.human_lineage_count == 1
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_nonhuman_reads_not_in_human_lineage(self, mock_popen):
         """Definitively non-human reads are NOT in human_lineage."""
         kraken2_output = "C\tread_bact\t562\t100\t562:30\n"
@@ -1441,7 +1445,7 @@ class TestUnclassifiedAndHumanLineageSets:
         assert "read_bact" in result.nonhuman_read_names
         assert "read_bact" not in result.human_lineage_read_names
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_univec_core_not_in_human_lineage(self, mock_popen):
         """UniVec Core reads are NOT in human_lineage."""
         kraken2_output = "C\tread_ucf\t81077\t100\t81077:30\n"
@@ -1469,7 +1473,7 @@ class TestUnclassifiedAndHumanLineageSets:
         assert "read_ucf" in result.univec_core_read_names
         assert "read_ucf" not in result.human_lineage_read_names
 
-    @mock.patch("kmer_denovo_filter.kmer_utils.subprocess.Popen")
+    @mock.patch("nonhuman_screen.engine.subprocess.Popen")
     def test_four_sets_partition_all_reads(self, mock_popen):
         """nonhuman + univec_core + human_lineage + unclassified = all reads."""
         kraken2_output = (
