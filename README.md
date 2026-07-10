@@ -17,6 +17,14 @@ Both commands compare k-mers from the child's sequencing reads against
 both parents. K-mers present in the child but absent from both parents
 signal potential *de novo* mutations.
 
+Non-human contamination screening (Kraken2-based read classification and the
+allele-based non-human fraction) is provided by the bundled
+[`nonhuman-screen`](packages/nonhuman-screen) package — the engine was extracted
+there so it can be reused independently (see its
+[README](packages/nonhuman-screen/README.md)). This repository owns only the
+trio/VCF *integration* of that engine: the `DKU_*`/`DKA_*` VCF annotations,
+informative-read selection, the Kraken2 BED outputs, and the `--kraken2*` flags.
+
 ## Algorithm
 
 ### VCF Mode
@@ -95,9 +103,16 @@ signal potential *de novo* mutations.
 
 ## Installation
 
+This package depends on the bundled [`nonhuman-screen`](packages/nonhuman-screen)
+package. Until it is published to PyPI, install it from the in-repo path **first**,
+then install this package:
+
 ```bash
-pip install .
+pip install './packages/nonhuman-screen[bam]'   # bundled contamination engine
+pip install .                                    # kmer_denovo_filter
 ```
+
+(The [Dockerfile](Dockerfile) and CI do the same two-step install.)
 
 This installs two commands:
 
@@ -806,9 +821,16 @@ apptainer exec --bind /data,/references "$SIF" kmer-denovo \
 
 ## Testing
 
+The test suite imports `kmer_denovo_filter`, which re-exports the contamination
+engine from `nonhuman-screen`, so that package must be installed first (see
+[Installation](#installation)):
+
 ```bash
-pip install pytest
-pytest
+pip install './packages/nonhuman-screen[bam]'
+pip install -e '.[test]' || { pip install -e . && pip install pytest; }
+
+pytest                          # host test suite
+pytest packages/nonhuman-screen/tests   # extracted-package test suite
 ```
 
 ## References

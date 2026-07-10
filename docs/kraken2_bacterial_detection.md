@@ -5,6 +5,19 @@ to detect non-human content — bacteria, archaea, fungi, protists, viruses,
 and synthetic sequencing vectors — in the child's sequencing reads, and why
 Kraken2's k-mer–based classification approach is well suited to that goal.
 
+> **Scope / where the engine lives.** The classification *engine* (Kraken2 LCA
+> classification, lineage-aware domain assignment, the human-homology guard,
+> UniVec-Core exclusion, and the non-human fraction) was extracted into the
+> standalone [`nonhuman-screen`](../packages/nonhuman-screen) package and is
+> **authoritatively documented there** —
+> [methodology](../packages/nonhuman-screen/docs/methodology.md) and
+> [database setup](../packages/nonhuman-screen/docs/database.md). This document
+> covers only how `kmer-denovo` *integrates* that engine into the trio/VCF de
+> novo workflow: informative-read selection, the `DKU_*`/`DKA_*` VCF
+> annotations, the Kraken2 BED outputs, and the `--kraken2*` flags. Engine
+> internals below are summarized for context; the package docs are the source
+> of truth.
+
 ---
 
 ## Why Non-Human Content Detection Matters
@@ -33,68 +46,40 @@ call.
 
 ## How Kraken2 Classification Works
 
-Kraken2 uses a **k-mer–based taxonomic classification** algorithm
-([Wood & Salzberg, 2014](https://genomebiology.biomedcentral.com/articles/10.1186/gb-2014-15-3-r46);
-[Wood et al., 2019](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-019-1891-0)):
+Kraken2 assigns each read a taxon via k-mer–based LCA classification, gated by a
+`--confidence` threshold (exposed here as `--kraken2-confidence`, default
+`0.0`). See the package
+[methodology §1](../packages/nonhuman-screen/docs/methodology.md) for the full
+algorithm and confidence-threshold semantics.
 
-1. **Database construction** — Every k-mer (default k=35 for Kraken2) from all
-   reference sequences in the database is mapped to its *Lowest Common Ancestor*
-   (LCA) in the NCBI taxonomy tree. If a k-mer appears in genomes from multiple
-   species, its LCA is promoted upward in the tree to the most specific node
-   that covers all contributing species.
+The one detail this integration depends on directly is the **per-read output
+format** the host parses into BED columns — Kraken2 emits one line per read:
 
-2. **Per-read classification** — For each input read, Kraken2 extracts every
-   k-mer in a sliding window and looks up each k-mer in the database. Each
-   k-mer lookup returns the taxid at whose LCA that k-mer was stored. All
-   retrieved taxids are fed into an LCA vote: the read's final classification
-   is the deepest taxon in the NCBI tree that is consistent with a sufficient
-   fraction of the k-mer votes.
+```
+C/U  read_name  taxid  length  kmer_detail_string
+```
 
-3. **Confidence threshold** — The `--confidence` parameter (exposed as
-   `--kraken2-confidence`, default `0.0`) sets a minimum fraction of k-mers
-   that must vote at or below the assigned clade. Higher values give more
-   specific but potentially fewer classifications; lower values are more
-   sensitive. A value of `0.0` assigns the LCA of all k-mer votes regardless
-   of consistency.
-
-4. **Per-read output** — Kraken2 emits one output line per read:
-
-   ```
-   C/U  read_name  taxid  length  kmer_detail_string
-   ```
-
-   - `C` = classified, `U` = unclassified
-   - `taxid` = NCBI taxonomy ID of the LCA classification
-   - `kmer_detail_string` = space-separated `taxid:count` tokens showing
-     how many k-mers voted for each taxid (paired-end reads use `|:|` as a
-     mate delimiter)
+- `C` = classified, `U` = unclassified
+- `taxid` = NCBI taxonomy ID of the LCA classification
+- `kmer_detail_string` = space-separated `taxid:count` tokens showing how many
+  k-mers voted for each taxid (paired-end reads use `|:|` as a mate delimiter)
 
 ---
 
 ## The PrackenDB Reference Database
 
-`kmer-denovo` downloads **PrackenDB** — a curated, pre-built Kraken2 database
-published by the Kraken2 project
-([CCB JHU downloads](https://ccb.jhu.edu/software/kraken2/index.shtml?t=downloads)).
+Database acquisition, layout, required files, and the k-mer length are
+documented in the package
+[database setup guide](../packages/nonhuman-screen/docs/database.md); the
+bundled `download_kraken2_db.sh` fetches and validates **PrackenDB** (a curated,
+pre-built Kraken2 database with `taxonomy/nodes.dmp` and `taxonomy/names.dmp`).
 
-As of January 2026, PrackenDB contains all NCBI reference assemblies (GenBank
-and RefSeq) of bacteria, archaea, protists, and fungi as of October 7, 2025.
-It also includes the human genome, RefSeq viral genomes, and UniVec Core. A
-key difference from other Kraken2 databases is that PrackenDB has only a single
-reference genome per species (with a couple of exceptions such as normal and
-pathogenic *E. coli*), which is useful for methods that count k-mers per
-species.
-
-**Why one genome per species matters**: Because each species contributes exactly
-one reference, a k-mer that appears in multiple species is LCA-elevated to a
-genus or family node — not to an unrelated lineage. This preserves the
-specificity of classification while avoiding inflation from redundant genomes.
-It also makes k-mer counting per species unambiguous.
-
-**Taxonomy files**: PrackenDB includes `taxonomy/nodes.dmp` (used for
-lineage-aware classification) and `taxonomy/names.dmp` (used to map taxonomy
-IDs to scientific names in the per-read detail BED file).  Both are validated
-by the download script.
+**Why PrackenDB for this workflow**: it uses a single reference genome per
+species (with a couple of exceptions such as normal and pathogenic *E. coli*),
+so a k-mer shared across species is LCA-elevated to a genus/family node rather
+than an unrelated lineage. This keeps k-mer counting per species unambiguous —
+which matters because `kmer-denovo` reasons about per-read, per-species
+evidence.
 
 ---
 
@@ -114,155 +99,62 @@ This is substantially more efficient than classifying all reads, and ensures
 the fraction annotations are computed on exactly the reads contributing to each
 variant's evidence.
 
+The host does not call the engine per read; `_run_kraken2_on_reads`
+(`src/kmer_denovo_filter/vcf/pipeline.py`) translates the informative
+`chrom:pos → read-names` map into loci and delegates extraction +
+classification to the package:
+
 ```python
-kr = Kraken2Runner(kraken2_db, confidence=confidence, threads=threads)
-result = kr.classify_sequences(sequences, tmpdir=tmpdir)
+from nonhuman_screen.bam import classify_reads_from_bam
+result = classify_reads_from_bam(child_bam, kraken2_db, read_names=..., loci=...)
 ```
 
 ### Step 3 — Lineage-aware multi-domain classification
 
-Kraken2 assigns each read a single taxid. The pipeline classifies each read
-into one or more biological domains by traversing the NCBI taxonomy tree loaded
-from `taxonomy/nodes.dmp` (or `nodes.dmp` at the database root for PrackenDB)
-in the database directory.
+The engine assigns each read a single taxid and maps it to one or more domains
+by walking the NCBI taxonomy (`nodes.dmp`). The domains and their root taxids
+(Bacteria 2, Archaea 2157, Fungi 4751, Viruses 10239, UniVec-Core 81077, and
+Protist = Eukaryota − Metazoa − Fungi − Viridiplantae) — plus the exact-taxid
+fallback when `nodes.dmp` is missing — are documented in the package
+[methodology §2 and §7](../packages/nonhuman-screen/docs/methodology.md).
 
-The following domain-specific taxid sets are computed:
-
-| Domain | Root taxid | Description |
-|--------|-----------|-------------|
-| **Bacteria** | 2 | All descendants of the Bacteria domain |
-| **Archaea** | 2157 | All descendants of the Archaea domain |
-| **Fungi** | 4751 | All descendants of the Fungi kingdom |
-| **Protist** | (computed) | Eukaryota (2759) descendants **minus** Metazoa (33208), Fungi (4751), and Viridiplantae (33090) descendants |
-| **Viruses** | 10239 | All descendants of the Viruses superkingdom (PrackenDB includes RefSeq viral genomes) |
-| **UniVec Core** | 81077 | Synthetic sequencing-vector and adapter sequences — **excluded** from non-human counts (see below) |
-
-```python
-taxid_sets = Kraken2Runner._load_all_taxid_sets(db_path)
-# taxid_sets["bacterial"]   = set of ALL taxids descending from taxid 2
-# taxid_sets["archaeal"]    = set of ALL taxids descending from taxid 2157
-# taxid_sets["fungal"]      = set of ALL taxids descending from taxid 4751
-# taxid_sets["protist"]     = eukaryota - metazoa - fungi - viridiplantae
-# taxid_sets["viral"]       = set of ALL taxids descending from taxid 10239
-# taxid_sets["univec_core"] = set of ALL taxids descending from taxid 81077
-```
-
-This lineage-aware check correctly classifies reads assigned to a specific
-genus, family, or order — not just reads whose LCA happens to be the domain
-root. Without this tree traversal, reads assigned to *Escherichia coli*
-(taxid 562) or *Staphylococcus aureus* (taxid 1280) would be missed because
-those taxids are not equal to 2.
-
-If `taxonomy/nodes.dmp` is missing or unreadable, `Kraken2Runner` logs a
-warning and falls back to exact taxid matching only (taxid == 2 for bacteria,
-taxid == 2157 for archaea, etc.). This is a less sensitive fallback: reads
-assigned to specific species below the domain root will be missed. The download
-script warns when `nodes.dmp` is absent after extraction; PrackenDB does
-include this file.
+What matters for the integration: each informative read contributes to the
+per-domain **DKU_\*/DKA_\*** fractions below according to its assigned domain,
+and lineage-aware matching means a read assigned to *E. coli* (562) or
+*S. aureus* (1280) counts toward the bacterial fraction — not only reads whose
+LCA is exactly taxid 2. UniVec-Core (81077) reads are tracked separately and
+excluded from the non-human fraction.
 
 ### Step 4 — Human homology guard
 
-Some non-human k-mers share sequence with the human genome (e.g. highly
-conserved ribosomal sequences, mobile genetic elements, or horizontal gene
-transfer events). A read that contains such shared k-mers could be assigned a
-non-human LCA by Kraken2 even though it actually originated from human DNA.
+The engine's **human-homology guard** drops any read with human (taxid 9606)
+k-mer evidence from *every* non-human numerator — a conservative measure that
+avoids over-flagging human reads carrying non-human-like k-mers. The mechanism,
+and why it matters for integrating viruses (ERVs, HBV, HPV), is documented in
+the package
+[methodology §3](../packages/nonhuman-screen/docs/methodology.md).
 
-To reduce false flagging, `kmer-denovo` applies a **human homology guard** to
-**all** non-human categories (bacterial, archaeal, fungal, protist, viral,
-UniVec Core, and consolidated non-human):
+For this integration the consequences are:
 
-```python
-# kmer_taxids = taxids voting in the per-read kmer_detail_string
-has_human_kmer = _HUMAN_TAXID in kmer_taxids
-
-# Applied to EVERY non-human category:
-if has_human_kmer:
-    is_bacterial = False
-    is_archaeal = False
-    is_fungal = False
-    is_protist = False
-    is_viral = False
-    is_univec_core = False
-    is_nonhuman = False
-```
-
-If Kraken2's per-read k-mer detail string includes any k-mer that voted for
-human (taxid 9606), the read is conservatively excluded from **every**
-non-human numerator. This means:
-
-- A read assigned to *Bacteria* LCA but with some human k-mer evidence →
-  **not counted as bacterial or non-human**
-- A read assigned to *Archaea* LCA with some human k-mer evidence →
-  **not counted as archaeal or non-human**
-- A read assigned to a virus with some human k-mer evidence →
-  **not counted as viral or non-human**
-- A read assigned to *Bacteria* LCA with no human k-mer evidence →
-  **counted as bacterial and non-human**
-
-This is deliberately conservative: it may slightly undercount non-human reads
-that happen to contain a human-matching k-mer, but it avoids over-flagging
-human reads with non-human-like k-mers as contamination.
-
-#### Viral reads and human DNA integration
-
-Viruses receive the same human homology guard as all other domains, but the
-guard is **especially important** for viral reads because some viruses can
-integrate into or co-evolve with the human genome:
-
-- **Endogenous retroviruses (ERVs)** — ERV sequences make up ~8% of the human
-  genome. Reads from known ERV loci are already covered by the human reference
-  and will be classified as human (not viral) by Kraken2 without any special
-  handling. Exogenous retroviruses or novel ERV insertions may share k-mers
-  with both viral references and the human reference, making the human homology
-  guard essential.
-- **HBV and HPV** — Hepatitis B virus and human papillomavirus can integrate
-  into host chromosomes. A read spanning an integration junction would contain
-  both viral and human k-mers, and the human homology guard conservatively
-  excludes it from the viral count.
-- **UniVec Core** — PrackenDB includes UniVec Core (sequencing vector and
-  adapter sequences, taxid 81077). These synthetic constructs are handled in
-  two layers: (1) the human homology guard excludes any UniVec-classified read
-  that also has human k-mer evidence, and (2) UniVec Core reads are
-  *unconditionally* excluded from the consolidated non-human fraction (NHF),
-  because they are artificial sequences, not biological organisms, and their
-  k-mers can overlap with real human genomic sequence.  See
-  [Step 5](#step-5--conservative-non-human-fraction-nhf) for details.
-
-In practice, reads from stably integrated viral sequences are expected to
-produce human k-mer evidence and be excluded from the viral count, meaning
-**DKU_VF reflects only reads from exogenous, non-integrated viral contamination**.
-This is the conservative behavior intended by the design.
+- the guard status is surfaced per read in the detail BED (`guard_status`
+  column, value `HHG` for a guard-excluded read); and
+- **DKU_VF reflects only exogenous, non-integrated viral contamination** — a
+  read spanning an integrating virus's integration junction carries human
+  k-mers and is conservatively excluded from the viral count.
 
 ### Step 5 — Conservative non-human fraction (NHF)
 
-In addition to domain-specific fractions, the pipeline computes a consolidated
-**non-human fraction** (DKU_NHF / DKA_NHF). A read is counted as "non-human"
-only if:
+The consolidated **non-human fraction** (DKU_NHF / DKA_NHF) counts a read as
+non-human only when it is classified, off the human→root lineage, outside the
+human clade, outside UniVec-Core, and clears the human-homology guard. The full
+read-inclusion definition, worked taxid examples, and the four-way partition
+(`nonhuman + univec_core + human_lineage + unclassified = 1`) are documented in
+the package
+[methodology §5](../packages/nonhuman-screen/docs/methodology.md).
 
-1. It is classified (not unclassified)
-2. Its assigned taxid is **not** on the human lineage (the path from
-   taxid 9606 up to root) — this excludes ambiguous ranks like Eukaryota
-   (2759), Metazoa (33208), or root (1) where the read could plausibly
-   be human
-3. Its assigned taxid is **not** a descendant of human (9606) — this
-   excludes human subspecies and populations
-4. Its assigned taxid is **not** under UniVec Core (taxid 81077) — synthetic
-   vector/adapter sequences are unconditionally excluded from NHF because
-   they are artificial constructs and may share k-mers with human DNA,
-   meaning a human read misclassified as UniVec Core would otherwise produce
-   a false positive
-5. It has **no human k-mer evidence** in the k-mer detail string (the
-   human homology guard)
-
-This conservative definition means:
-
-- A read classified as *E. coli* (562) with no human k-mers → **counted as non-human** ✓
-- A read classified as *Bacteria* (2) with no human k-mers → **counted as non-human** ✓
-- A read classified as *Eukaryota* (2759) → **not counted as non-human** (ambiguous ancestor of human)
-- A read classified as *Metazoa* (33208) → **not counted as non-human** (ancestor of human)
-- A read classified as *Drosophila melanogaster* (7227) → **counted as non-human** ✓ (not in human lineage)
-- A read classified as *Homo sapiens* (9606) → **not counted as non-human**
-- A read classified as UniVec Core (81077) → **not counted as non-human** (synthetic construct)
+The host maps those per-domain and consolidated fractions onto the `DKU_*`
+(all informative reads) and `DKA_*` (alt-supporting reads) VCF tags described in
+[Output Annotations](#output-annotations) below.
 
 ---
 
@@ -391,7 +283,7 @@ columns carry classification detail.
 | `read_set` | Enum | `DKU` (informative-only) or `DKA` (also supports alt allele). |
 | `kraken2_status` | Enum | `C` (classified) or `U` (unclassified). |
 | `assigned_taxid` | Integer | NCBI taxonomy ID assigned by Kraken2. `0` for unclassified. |
-| `assigned_taxon` | String | Scientific name from `names.dmp` (spaces → underscores). `.` if unclassified or name unavailable. |
+| `assigned_taxon` | String | `.` if the read is unclassified; otherwise the scientific name from `names.dmp` (spaces → underscores), falling back to the numeric taxid when `names.dmp` is unavailable. |
 | `domain` | String | `Bacteria`, `Archaea`, `Fungi`, `Protist`, `Viruses`, `UniVec_Core`, `Human`, `Root`, `Unclassified`, or `Ambiguous_Ancestor`. |
 | `guard_status` | String | `PASS`, `HHG` (human homology guard), `UVC` (UniVec Core), `HUMAN`, or `UNCLASSIFIED`. |
 | `is_nonhuman` | Boolean | `true` if counted in NHF numerator after all guards. |
@@ -637,6 +529,7 @@ powerful visual contamination auditing:
 |---|---|---|
 | `--kraken2-db` | *(disabled)* | Path to the Kraken2 database directory; enables non-human fraction annotations (DKU_BF/DKA_BF, DKU_AF/DKA_AF, DKU_FF/DKA_FF, DKU_PF/DKA_PF, DKU_VF/DKA_VF, DKU_UCF/DKA_UCF, DKU_NHF/DKA_NHF) in VCF mode |
 | `--kraken2-confidence` | `0.0` | LCA confidence threshold (0.0–1.0); higher values reduce sensitivity, increase specificity |
+| `--kraken2-memory-mapping` | `false` | Pass `--memory-mapping` to Kraken2 so the database index is memory-mapped rather than loaded into RAM (much lower resident memory, slower classification) |
 | `--kraken2-read-detail` | *(auto-derived)* | Output path for the per-read classification detail BED file. Auto-derived from `--output` when `--kraken2-db` is provided (e.g. `my_trio.annotated.kraken2_reads.bed.gz`). |
 | `--kraken2-span-bed` | *(auto-derived)* | Output path for the species-annotated genomic span BED file. Auto-derived from `--output` when `--kraken2-db` is provided (e.g. `my_trio.annotated.kraken2_spans.bed.gz`). |
 | `--no-expanded-bed` | `false` | When set, disables generation of the expanded span BED file. By default both standard and expanded span BEDs are produced. |

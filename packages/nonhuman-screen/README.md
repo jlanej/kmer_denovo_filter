@@ -48,8 +48,11 @@ taxid 81077, are tracked separately and never counted as contamination). See
 ```bash
 pip install nonhuman-screen           # core engine (standard library only)
 pip install 'nonhuman-screen[bam]'    # + BAM/CRAM & allele-based NHF (pysam)
-pip install 'nonhuman-screen[plots]'  # + optional plotting helpers (plotly)
 ```
+
+The **`bam` extra is required for the BAM/allele helpers and for the
+`nonhuman-screen` CLI** (both classify modes import pysam). The core install
+covers only `Kraken2Runner.classify_sequences` on in-memory reads.
 
 You also need the `kraken2` binary on `PATH` and a kraken2 database — see
 [docs/database.md](docs/database.md).
@@ -113,12 +116,30 @@ VCF and handles the conversion for you.
 | `Kraken2Runner.classify_sequences(seqs)` | no | Classify `{name: seq}` → `ClassificationResult` |
 | `ClassificationResult` | no | Per-domain read-name sets, counts, `fractions()`, `nonhuman_fraction`, `taxonomy_available` |
 | `TaxonomicFractions` | no | Per-domain fractions; `from_result` / `over_reads` |
-| `read_supports_alt(read, pos, ref, alt)` | no | Does an aligned read carry the ALT allele? |
+| `read_supports_alt(read, variant_pos, ref, alt)` | no | Does an aligned read carry the ALT allele? |
 | `parse_kmer_votes(kmer_string)` | no | Parse kraken2 per-read k-mer detail into taxid votes |
+| `VariantNHF` | no | Result of the allele-based helpers: `variant_key`, `nonhuman_fraction`, `supporting_reads`, `fractions`, `to_dict()` (pos 0-based) |
 | `classify_variant_alt_reads(...)` | yes | Allele-based NHF for one variant → `VariantNHF` |
 | `classify_variants_alt_reads(...)` | yes | Batched allele-based NHF for many variants |
 | `classify_reads_from_bam(...)` | yes | Classify reads by name and/or locus |
 | `reads_supporting_alt(...)` | yes | Read names supporting an ALT allele |
+
+## Docker
+
+The included [`Dockerfile`](Dockerfile) installs the pinned kraken2 (v2.17.1) and
+the package with the `[bam]` extra:
+
+```bash
+docker build -t nonhuman-screen packages/nonhuman-screen   # from the monorepo root
+# (once this package is its own repo:  docker build -t nonhuman-screen .)
+
+docker run --rm -v "$PWD:/data" nonhuman-screen \
+    classify --bam /data/sample.bam --kraken2-db /data/kraken2_db \
+             --variants /data/calls.vcf.gz --out-prefix /data/contam
+```
+
+The image entrypoint is `nonhuman-screen`; mount your BAM and kraken2 database in.
+You still supply the kraken2 database yourself (see [docs/database.md](docs/database.md)).
 
 ## License
 

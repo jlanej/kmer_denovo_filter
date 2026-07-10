@@ -27,8 +27,6 @@ dependencies = []
 [project.optional-dependencies]
 # BAM/CRAM + allele-based NHF helpers.
 bam = ["pysam>=0.21.0"]
-# Optional plotting helpers (per-sample composition / NHF distribution).
-plots = ["plotly>=5.18.0"]
 dev = ["pytest>=7.0", "pysam>=0.21.0"]
 
 [project.scripts]
