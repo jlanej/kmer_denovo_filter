@@ -223,7 +223,11 @@ Parameters can also be set via environment variables (e.g. `DATA_DIR`,
 | `HG002_denovo_annotated.vcf`    | Annotated VCF with DKU/DKT/DKA scores         |
 | `HG002_metrics.json`            | Per-variant metrics in JSON format             |
 | `HG002_summary.txt`             | Human-readable summary of results              |
+| `HG002_report.html`             | Interactive HTML report (Plotly) generated via `--report` |
 | `HG002_informative_reads.bam`   | BAM with reads carrying child-unique k-mers    |
+| `HG002_denovo_annotated.kraken2_reads.bed.gz`* | Per-read Kraken2 classification detail BED (bgzipped + tabix) |
+| `HG002_denovo_annotated.kraken2_spans.bed.gz`* | Species-annotated genomic span BED             |
+| `HG002_denovo_annotated.kraken2_spans_expanded.bed.gz`* | Soft-clip-expanded span BED (unless `--no-expanded-bed`) |
 | `mini_crams/`                   | Directory with mini alignment files for IGV    |
 | `mini_crams/HG002_trio_child.*` | Child reads ±1 kb around each candidate        |
 | `mini_crams/HG002_trio_father.*`| Father reads ±1 kb around each candidate       |
@@ -231,6 +235,10 @@ Parameters can also be set via environment variables (e.g. `DATA_DIR`,
 | `mini_crams/HG002_trio_regions.bed` | Extraction regions BED file                |
 | `mini_crams/HG002_trio_regions_merged.bed` | Merged extraction regions         |
 | `HG002_igv_review.tsv`                  | IGV variant review server input (variant table with mini CRAM + annotated VCF paths) |
+
+\* Written only when `--kraken2-db` is supplied. These Kraken2 outputs are
+produced by the bundled [`nonhuman-screen`](../../packages/nonhuman-screen)
+engine and their paths are auto-derived from the annotated-VCF output.
 
 ## Scripts
 

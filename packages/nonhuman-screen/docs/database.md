@@ -19,11 +19,13 @@ Or use the package's Docker image, which installs the pinned version.
 ## The database
 
 A kraken2 database directory must contain the index files `hash.k2d`,
-`opts.k2d`, `taxo.k2d`, **and** the taxonomy dumps `nodes.dmp` and `names.dmp`
-(either under `taxonomy/` or at the database root). The taxonomy dumps are
-required for lineage-aware classification and taxon naming — without
-`nodes.dmp`, non-human fractions are undercounted (see
-[methodology.md §7](methodology.md)).
+`opts.k2d`, and `taxo.k2d`. It should **also** contain the taxonomy dumps
+`nodes.dmp` and `names.dmp` (either under `taxonomy/` or at the database root):
+these are strongly recommended but technically optional — without them the
+engine still runs but falls back to exact-taxid matching, which corrupts the
+non-human signal in both directions (see [methodology.md §7](methodology.md)).
+`nodes.dmp` drives lineage-aware classification and `names.dmp` supplies taxon
+names.
 
 ### PrackenDB (recommended)
 
@@ -39,7 +41,8 @@ scripts/download_kraken2_db.sh --db /path/to/kraken_db
 The script downloads the tarball
 (`k2_NCBI_reference_20251007.tar.gz` by default), extracts it (handling the
 versioned subdirectory layout), and validates that `hash.k2d`, `opts.k2d`, and
-`taxo.k2d` are present, warning if `nodes.dmp` is missing.
+`taxo.k2d` are present (failing if any is missing), warning separately if
+`nodes.dmp` or `names.dmp` is absent.
 
 ### Confirming the database k-mer length
 

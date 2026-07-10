@@ -15,7 +15,7 @@ Requires the `[bam]` extra (pysam) and a `kraken2` binary on `PATH`.
 | `--ref-fasta` | Reference FASTA (required for CRAM). |
 | `--variants` | VCF/BCF. When given, compute the allele-based NHF for every concrete ALT allele instead of a whole-BAM summary. |
 | `--min-baseq` | Minimum base quality for a base to count as ALT support (default: 0). |
-| `--out-prefix` | Write `<prefix>.variant_nhf.tsv` and `<prefix>.summary.json`; otherwise print to stdout. |
+| `--out-prefix` | Write outputs to files instead of stdout. With `--variants`: `<prefix>.variant_nhf.tsv` **and** `<prefix>.summary.json`. Without `--variants` (whole-BAM mode): only `<prefix>.summary.json`. |
 | `--threads` | kraken2 threads (default: 1). |
 | `--confidence` | kraken2 confidence threshold 0.0–1.0 (default: 0.0). |
 | `--memory-mapping` | Pass `--memory-mapping` to kraken2 to reduce RAM. |
@@ -44,7 +44,7 @@ chr8:40119:G:GAC  12                0.83               0.83       0.0       ...
 and `sample_contam.summary.json` (the full per-variant breakdown including
 per-domain fractions and supporting-read counts).
 
-Whole-BAM summary (all mapped reads):
+Whole-BAM summary (every read in the file, including unmapped):
 
 ```bash
 nonhuman-screen classify --bam sample.bam --kraken2-db kraken2_db

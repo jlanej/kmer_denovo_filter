@@ -86,13 +86,24 @@ allele-based NHF therefore measures "how many ALT-supporting reads are non-human
 reads," which is the intended signal for contamination screening but should not
 be read as locus-level taxonomy.
 
-## 7. When taxonomy is unavailable (fail-open warning)
+## 7. When taxonomy is unavailable
 
 If `nodes.dmp` cannot be read, classification falls back to **exact-taxid
-matching only**, which severely undercounts non-human content. In that case the
-engine logs a warning and sets `ClassificationResult.taxonomy_available = False`.
-**Consumers that gate decisions on non-human content should treat
-`taxonomy_available is False` as "unknown", not "clean"** — a broken database
-otherwise looks like a clean sample. Always verify your database includes
-`nodes.dmp` (and `names.dmp` for taxon names); see
+matching only** (no lineage walk), and the results become unreliable in *both*
+directions:
+
+- The **per-domain breakdowns** (`bacterial`, `viral`, …) **under-count**: only
+  reads assigned to the exact domain-root taxid match, and `protist` cannot be
+  computed at all, so all descendant taxa are missed.
+- The **consolidated non-human fraction over-counts**: the fallback treats a
+  read as non-human unless its taxid is exactly human (9606), root (1), or
+  UniVec-Core, so human-lineage ancestors (e.g. genus *Homo*, Eukaryota) and
+  non-9606 human subspecies fall through and are mis-counted as non-human.
+
+In this mode the engine logs a warning and sets
+`ClassificationResult.taxonomy_available = False`. **Consumers that gate
+decisions on non-human content should treat `taxonomy_available is False` as
+"unknown" — neither "clean" nor "contaminated"** — since a database missing its
+taxonomy dumps otherwise silently corrupts the signal. Always verify your
+database includes `nodes.dmp` (and `names.dmp` for taxon names); see
 [database.md](database.md).

@@ -17,6 +17,7 @@ import shutil
 import sys
 
 from nonhuman_screen import __version__
+from nonhuman_screen.alleles import _is_symbolic
 
 
 def _build_parser():
@@ -77,8 +78,11 @@ def _read_vcf_variants(path):
             if rec.alts is None:
                 continue
             for alt in rec.alts:
-                if alt is None or alt.startswith("<") or "[" in alt or "]" in alt:
-                    continue  # skip symbolic / breakend alleles
+                # Skip symbolic (<DEL>), breakend (N[chr2:321[), and the
+                # spanning-deletion (*) alleles — none has a literal sequence to
+                # match reads against.
+                if _is_symbolic(alt):
+                    continue
                 yield (rec.chrom, rec.start, rec.ref, alt)
 
 
