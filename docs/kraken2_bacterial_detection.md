@@ -8,10 +8,10 @@ Kraken2's k-mer–based classification approach is well suited to that goal.
 > **Scope / where the engine lives.** The classification *engine* (Kraken2 LCA
 > classification, lineage-aware domain assignment, the human-homology guard,
 > UniVec-Core exclusion, and the non-human fraction) was extracted into the
-> standalone [`nonhuman-screen`](../packages/nonhuman-screen) package and is
+> standalone [`nonhuman-screen`](https://github.com/jlanej/nonhuman-screen) package and is
 > **authoritatively documented there** —
-> [methodology](../packages/nonhuman-screen/docs/methodology.md) and
-> [database setup](../packages/nonhuman-screen/docs/database.md). This document
+> [methodology](https://github.com/jlanej/nonhuman-screen/blob/main/docs/methodology.md) and
+> [database setup](https://github.com/jlanej/nonhuman-screen/blob/main/docs/database.md). This document
 > covers only how `kmer-denovo` *integrates* that engine into the trio/VCF de
 > novo workflow: informative-read selection, the `DKU_*`/`DKA_*` VCF
 > annotations, the Kraken2 BED outputs, and the `--kraken2*` flags. Engine
@@ -49,7 +49,7 @@ call.
 Kraken2 assigns each read a taxon via k-mer–based LCA classification, gated by a
 `--confidence` threshold (exposed here as `--kraken2-confidence`, default
 `0.0`). See the package
-[methodology §1](../packages/nonhuman-screen/docs/methodology.md) for the full
+[methodology §1](https://github.com/jlanej/nonhuman-screen/blob/main/docs/methodology.md) for the full
 algorithm and confidence-threshold semantics.
 
 The one detail this integration depends on directly is the **per-read output
@@ -70,7 +70,7 @@ C/U  read_name  taxid  length  kmer_detail_string
 
 Database acquisition, layout, required files, and the k-mer length are
 documented in the package
-[database setup guide](../packages/nonhuman-screen/docs/database.md); the
+[database setup guide](https://github.com/jlanej/nonhuman-screen/blob/main/docs/database.md); the
 bundled `download_kraken2_db.sh` fetches and validates **PrackenDB** (a curated,
 pre-built Kraken2 database with `taxonomy/nodes.dmp` and `taxonomy/names.dmp`).
 
@@ -116,7 +116,7 @@ by walking the NCBI taxonomy (`nodes.dmp`). The domains and their root taxids
 (Bacteria 2, Archaea 2157, Fungi 4751, Viruses 10239, UniVec-Core 81077, and
 Protist = Eukaryota − Metazoa − Fungi − Viridiplantae) — plus the exact-taxid
 fallback when `nodes.dmp` is missing — are documented in the package
-[methodology §2 and §7](../packages/nonhuman-screen/docs/methodology.md).
+[methodology §2 and §7](https://github.com/jlanej/nonhuman-screen/blob/main/docs/methodology.md).
 
 What matters for the integration: each informative read contributes to the
 per-domain **DKU_\*/DKA_\*** fractions below according to its assigned domain,
@@ -132,7 +132,7 @@ k-mer evidence from *every* non-human numerator — a conservative measure that
 avoids over-flagging human reads carrying non-human-like k-mers. The mechanism,
 and why it matters for integrating viruses (ERVs, HBV, HPV), is documented in
 the package
-[methodology §3](../packages/nonhuman-screen/docs/methodology.md).
+[methodology §3](https://github.com/jlanej/nonhuman-screen/blob/main/docs/methodology.md).
 
 For this integration the consequences are:
 
@@ -150,7 +150,7 @@ human clade, outside UniVec-Core, and clears the human-homology guard. The full
 read-inclusion definition, worked taxid examples, and the four-way partition
 (`nonhuman + univec_core + human_lineage + unclassified = 1`) are documented in
 the package
-[methodology §5](../packages/nonhuman-screen/docs/methodology.md).
+[methodology §5](https://github.com/jlanej/nonhuman-screen/blob/main/docs/methodology.md).
 
 The host maps those per-domain and consolidated fractions onto the `DKU_*`
 (all informative reads) and `DKA_*` (alt-supporting reads) VCF tags described in

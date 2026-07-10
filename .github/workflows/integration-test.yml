@@ -26,14 +26,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install nonhuman-screen (extracted contamination package)
-        run: pip install -e 'packages/nonhuman-screen[bam]'
-
       - name: Install package
         run: pip install -e '.[test]' || pip install -e . && pip install pytest
-
-      - name: Run nonhuman-screen package tests
-        run: pytest packages/nonhuman-screen/tests -v
 
       - name: Run unit tests
         run: pytest tests/test_cli.py tests/test_kmer_utils.py tests/test_kraken2_bed.py -v

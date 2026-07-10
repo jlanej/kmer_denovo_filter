@@ -237,7 +237,7 @@ Parameters can also be set via environment variables (e.g. `DATA_DIR`,
 | `HG002_igv_review.tsv`                  | IGV variant review server input (variant table with mini CRAM + annotated VCF paths) |
 
 \* Written only when `--kraken2-db` is supplied. These Kraken2 outputs are
-produced by the bundled [`nonhuman-screen`](../../packages/nonhuman-screen)
+produced by the bundled [`nonhuman-screen`](https://github.com/jlanej/nonhuman-screen)
 engine and their paths are auto-derived from the annotated-VCF output.
 
 ## Scripts

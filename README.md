@@ -18,12 +18,12 @@ both parents. K-mers present in the child but absent from both parents
 signal potential *de novo* mutations.
 
 Non-human contamination screening (Kraken2-based read classification and the
-allele-based non-human fraction) is provided by the bundled
-[`nonhuman-screen`](packages/nonhuman-screen) package — the engine was extracted
-there so it can be reused independently (see its
-[README](packages/nonhuman-screen/README.md)). This repository owns only the
-trio/VCF *integration* of that engine: the `DKU_*`/`DKA_*` VCF annotations,
-informative-read selection, the Kraken2 BED outputs, and the `--kraken2*` flags.
+allele-based non-human fraction) is provided by the standalone
+[`nonhuman-screen`](https://github.com/jlanej/nonhuman-screen) package, a PyPI
+dependency — the engine was extracted there so it can be reused independently.
+This repository owns only the trio/VCF *integration* of that engine: the
+`DKU_*`/`DKA_*` VCF annotations, informative-read selection, the Kraken2 BED
+outputs, and the `--kraken2*` flags.
 
 ## Algorithm
 
@@ -103,16 +103,13 @@ informative-read selection, the Kraken2 BED outputs, and the `--kraken2*` flags.
 
 ## Installation
 
-This package depends on the bundled [`nonhuman-screen`](packages/nonhuman-screen)
-package. Until it is published to PyPI, install it from the in-repo path **first**,
-then install this package:
-
 ```bash
-pip install './packages/nonhuman-screen[bam]'   # bundled contamination engine
-pip install .                                    # kmer_denovo_filter
+pip install .
 ```
 
-(The [Dockerfile](Dockerfile) and CI do the same two-step install.)
+This automatically pulls the
+[`nonhuman-screen`](https://github.com/jlanej/nonhuman-screen) contamination
+engine from PyPI as a dependency.
 
 This installs two commands:
 
@@ -821,17 +818,12 @@ apptainer exec --bind /data,/references "$SIF" kmer-denovo \
 
 ## Testing
 
-The test suite imports `kmer_denovo_filter`, which re-exports the contamination
-engine from `nonhuman-screen`, so that package must be installed first (see
-[Installation](#installation)):
-
 ```bash
-pip install './packages/nonhuman-screen[bam]'
 pip install -e '.[test]' || { pip install -e . && pip install pytest; }
-
-pytest                          # host test suite
-pytest packages/nonhuman-screen/tests   # extracted-package test suite
+pytest
 ```
+
+(`nonhuman-screen` is installed automatically from PyPI as a dependency.)
 
 ## References
 
