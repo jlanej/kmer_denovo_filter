@@ -291,7 +291,8 @@ jobs:
             --out-prefix integration_output_discovery/giab_discovery \
             --min-child-count 3 \
             --kmer-size 31 \
-            --candidate-summary integration_output/summary.txt
+            --candidate-summary integration_output/summary.txt \
+            --dnm-regions examples/HG002_trio/sulovari2023_dnm_regions.tsv
 
       - name: Display discovery-mode summary
         run: cat integration_output_discovery/giab_discovery.summary.txt

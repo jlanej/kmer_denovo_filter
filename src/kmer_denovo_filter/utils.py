@@ -331,6 +331,12 @@ def _validate_inputs(args):
                 f"Reference Jellyfish index (--ref-jf): file not found: "
                 f"{ref_jf}"
             )
+        dnm_regions = getattr(args, 'dnm_regions', None)
+        if dnm_regions is not None and not os.path.isfile(dnm_regions):
+            errors.append(
+                f"Known de novo events (--dnm-regions): file not found: "
+                f"{dnm_regions}"
+            )
         min_child_count = getattr(args, 'min_child_count', 3)
         if min_child_count < 1:
             errors.append(

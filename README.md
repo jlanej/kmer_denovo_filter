@@ -255,6 +255,7 @@ k-mer parameters. Each command also has its own mode-specific arguments.
 | `--min-bedgraph-reads` | 3 | Minimum distinct reads at a position for inclusion in the bedGraph and read coverage BED |
 | `--parent-max-count` | 0 | Maximum k-mer count in a parent before the k-mer is considered parental; k-mers with count > this value in either parent are removed |
 | `--candidate-summary` | – | Path to a VCF-mode `summary.txt` for candidate comparison. High-quality *de novos* (DKA\_DKT > 0.25, DKA > 10) are checked against discovered regions |
+| `--dnm-regions` | – | Tab-separated file of known *de novo* events to check the discovered regions against: `chrom`, 1-based `pos`, `size` in bp (`.` if unknown), `event_type`; `#` lines are comments. Adds a per-event detection table to the metrics JSON, summary and report. [`examples/HG002_trio/sulovari2023_dnm_regions.tsv`](examples/HG002_trio/sulovari2023_dnm_regions.tsv) lists the Sulovari et al. 2023 candidates used by the GIAB (HG002) integration test |
 | `--sv-bedpe` | – | Output BEDPE file for linked SV breakpoint pairs (default: `[out-prefix].sv.bedpe`) |
 | `--report` | – | Output path for an interactive HTML report summarizing discovery results with Plotly visualizations. When omitted, no report is generated |
 
@@ -559,7 +560,9 @@ Machine-readable pipeline statistics:
 ```
 
 When `--candidate-summary` is used, a `candidate_comparison` object is
-included with capture rate and per-candidate details.
+included with capture rate and per-candidate details. When `--dnm-regions`
+is used, a `dnm_evaluation` object is included with the source file name,
+the detection rate, and per-event evidence from the overlapping regions.
 
 #### Summary text (`{prefix}.summary.txt`)
 
@@ -570,6 +573,7 @@ Human-readable overview including:
 * Region size statistics (mean, median, max)
 * Per-region results table with coordinates, size, read count, k-mer count, SV annotations, and classification
 * Candidate comparison results (when `--candidate-summary` is provided)
+* Detection of known *de novo* events (when `--dnm-regions` is provided)
 
 #### SV breakpoints BEDPE (`{prefix}.sv.bedpe`)
 

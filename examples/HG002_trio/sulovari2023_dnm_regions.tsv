@@ -1,0 +1,14 @@
+# SV-like de novo mutation candidates from Sulovari et al. 2023
+# (PMID 36894594, PMC10006329), as extracted for the GIAB HG002 test data
+# by scripts/download_giab_dnm_testdata.sh.
+#
+# Use with: kmer-discovery ... --dnm-regions sulovari2023_dnm_regions.tsv
+# Columns (tab-separated): chrom, pos (1-based event start),
+# size (bp, "." if unknown), event_type
+chr17	53340465	107	deletion
+chr14	23280711	.	microsatellite_expansion
+chr3	85552367	64	sv_like
+chr5	97089276	43	sv_like
+chr8	125785998	43	sv_like
+chr18	62805217	34	sv_like
+chr7	142786222	10607	deletion

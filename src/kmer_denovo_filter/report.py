@@ -2648,11 +2648,13 @@ _HTML_TEMPLATE = """\
      Section 12: Curated DNM Evaluation
      ═══════════════════════════════════════════════════════════════════ -->
 {% if dnm_evaluation and dnm_evaluation.get("loci") %}
-<h2>12. Curated DNM Region Evaluation (Sulovari et al. 2023)</h2>
+<h2>12. Curated DNM Region Evaluation</h2>
 <p class="description">
-  Evaluation of discovery regions against curated de novo mutation loci
-  from Sulovari et al. 2023.  This gold-standard validation demonstrates
-  the method's ability to detect known structural de novo events.
+  Evaluation of discovery regions against known de novo events
+  {%- if dnm_evaluation.get("source") %} listed in
+  <code>{{ dnm_evaluation.get("source")|e }}</code>{% endif %} (supplied with
+  <code>--dnm-regions</code>).  An event counts as detected when at least
+  one discovery region overlaps it.
 </p>
 
 <div class="metric-cards">
@@ -2680,8 +2682,8 @@ _HTML_TEMPLATE = """\
   <tbody>
     {% for locus in dnm_evaluation.get("loci", []) %}
     <tr>
-      <td>{{ locus.locus }}</td>
-      <td>{{ locus.event_type }}</td>
+      <td>{{ locus.locus|e }}</td>
+      <td>{{ locus.event_type|e }}</td>
       <td>{{ (locus.event_size|string ~ "bp") if locus.event_size else "—" }}</td>
       <td>{{ locus.total_reads }}</td>
       <td>{{ locus.total_unique_kmers }}</td>

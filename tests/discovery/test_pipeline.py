@@ -127,6 +127,8 @@ class TestDiscoveryPipeline:
         assert metrics["proband_unique_kmers"] > 0
         assert metrics["informative_reads"] > 0
         assert metrics["candidate_regions"] >= 1
+        # No curated-locus evaluation unless --dnm-regions is given
+        assert "dnm_evaluation" not in metrics
         # Per-region detail should be present
         assert "regions" in metrics
         assert len(metrics["regions"]) >= 1
@@ -161,6 +163,7 @@ class TestDiscoveryPipeline:
         assert "Per-Region Results" in summary
         assert "Split" in summary
         assert "Class" in summary
+        assert "Curated DNM" not in summary
 
     def test_discovery_ignores_kraken2_for_now(self, tmpdir, monkeypatch):
         """Discovery mode should not invoke kraken2 even if args are provided."""
@@ -920,6 +923,31 @@ class TestDiscoveryValidation:
         args = self._make_discovery_args(tmpdir, min_child_count=0)
         with pytest.raises(SystemExit):
             _validate_inputs(args)
+
+    def test_discovery_dnm_regions_not_found(self, tmpdir):
+        args = self._make_discovery_args(
+            tmpdir, dnm_regions="/no/such/dnms.tsv",
+        )
+        with pytest.raises(SystemExit):
+            _validate_inputs(args)
+
+    def test_malformed_dnm_regions_fail_before_any_work(
+        self, tmpdir, monkeypatch, caplog,
+    ):
+        bad = os.path.join(tmpdir, "dnms.tsv")
+        with open(bad, "w") as fh:
+            fh.write("chr1\t100\n")
+        args = self._make_discovery_args(tmpdir, dnm_regions=bad)
+        monkeypatch.setattr(
+            discovery_pipeline_mod, "_check_tool", lambda name: True,
+        )
+
+        with pytest.raises(SystemExit):
+            run_discovery_pipeline(args)
+
+        assert "expected 4 tab-separated columns" in caplog.text
+        # Failed before the temp directory (the first real work) existed
+        assert not os.path.exists(os.path.join(tmpdir, "kmer_denovo_tmp"))
 
     def test_discovery_with_ref_jf_only(self, tmpdir):
         """When --ref-jf is provided, --ref-fasta can be None."""

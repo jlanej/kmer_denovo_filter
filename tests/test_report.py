@@ -142,7 +142,7 @@ class TestGenerateReport:
             assert "Discovery mode" in html
             assert "Candidate Regions" in html
             assert "Curated DNM" in html
-            assert "Sulovari" in html
+            assert "sulovari2023_dnm_regions.tsv" in html
         finally:
             os.unlink(out)
 

@@ -1634,30 +1634,59 @@ def _compare_candidates_to_regions(candidates, regions):
     return results
 
 
-# ── Curated DNM region definitions (Sulovari et al. 2023) ──────────
+def _load_dnm_regions(path):
+    """Load known de novo events for :func:`_evaluate_dnm_regions`.
 
-#: Curated de novo mutation regions from Sulovari et al. 2023
-#: (PMID: 36894594, PMC10006329).  Each tuple:
-#: (chrom, position, size_bp_or_None, event_type)
-SULOVARI_DNM_REGIONS = [
-    ("chr17", 53340465, 107, "deletion"),
-    ("chr14", 23280711, None, "microsatellite_expansion"),
-    ("chr3", 85552367, 64, "sv_like"),
-    ("chr5", 97089276, 43, "sv_like"),
-    ("chr8", 125785998, 43, "sv_like"),
-    ("chr18", 62805217, 34, "sv_like"),
-    ("chr7", 142786222, 10607, "deletion"),
-]
+    The file is tab-separated, one event per line: chrom, 1-based
+    position of the event start, size in bp (``.`` or ``0`` when
+    unknown) and an event-type label.  Blank lines and lines starting
+    with ``#`` are skipped.
+
+    Returns:
+        List of ``(chrom, pos, size_or_None, event_type)`` tuples.
+
+    Raises:
+        ValueError: If a line is malformed (the message gives its line
+            number) or the file lists no events.
+    """
+    regions = []
+    with open(path) as fh:
+        for lineno, line in enumerate(fh, 1):
+            line = line.rstrip("\r\n")
+            if not line.strip() or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) != 4:
+                raise ValueError(
+                    f"{path}:{lineno}: expected 4 tab-separated columns "
+                    f"(chrom, pos, size, event_type), found {len(parts)}"
+                )
+            chrom, pos, size, event_type = parts
+            try:
+                pos = int(pos)
+                size = None if size == "." else int(size)
+            except ValueError:
+                raise ValueError(
+                    f"{path}:{lineno}: pos and size must be integers "
+                    f"(size may be '.')"
+                ) from None
+            if pos < 1 or (size is not None and size < 0):
+                raise ValueError(
+                    f"{path}:{lineno}: pos must be >= 1 and size >= 0"
+                )
+            regions.append((chrom, pos, size or None, event_type))
+    if not regions:
+        raise ValueError(f"{path}: no de novo events listed")
+    return regions
 
 
-def _evaluate_dnm_regions(discovery_regions, region_detail,
-                          dnm_regions=None):
-    """Evaluate how well VCF-free discovery captures curated DNM regions.
+def _evaluate_dnm_regions(discovery_regions, region_detail, dnm_regions):
+    """Evaluate how well VCF-free discovery captures known DNM regions.
 
-    For each curated de novo mutation region from Sulovari et al. 2023,
-    determines whether it was nominated by the discovery pipeline and
-    collects quantitative k-mer and SV-signal evidence from the
-    overlapping discovery region(s).
+    For each known de novo event (from ``--dnm-regions``), determines
+    whether it was nominated by the discovery pipeline and collects
+    quantitative k-mer and SV-signal evidence from the overlapping
+    discovery region(s).
 
     The evaluation provides a simple genotype-like assessment per region:
 
@@ -1675,11 +1704,13 @@ def _evaluate_dnm_regions(discovery_regions, region_detail,
             half-open) from the discovery BED.
         region_detail: List of dicts with per-region metrics (the
             ``regions`` array from the discovery metrics JSON).
-        dnm_regions: Optional list of (chrom, pos, size_or_None,
-            event_type) tuples.  Defaults to ``SULOVARI_DNM_REGIONS``.
+        dnm_regions: List of (chrom, pos, size_or_None, event_type)
+            tuples, as returned by :func:`_load_dnm_regions`.  *pos* is
+            1-based; each event covers *size* bp from *pos* (1 bp when
+            the size is unknown).
 
     Returns:
-        List of dicts, one per curated region, with keys:
+        List of dicts, one per known event, with keys:
 
         - locus (str): ``chrom:pos``
         - event_type (str): Event type label.
@@ -1696,9 +1727,6 @@ def _evaluate_dnm_regions(discovery_regions, region_detail,
         - kmer_signal (float): ``total_unique_kmers / span_bp``.
         - assessment (str): ``DETECTED`` or ``NOT_DETECTED``.
     """
-    if dnm_regions is None:
-        dnm_regions = SULOVARI_DNM_REGIONS
-
     # Build an index from region tuple → detail dict
     detail_by_key = {}
     for rd in region_detail:
@@ -1707,8 +1735,9 @@ def _evaluate_dnm_regions(discovery_regions, region_detail,
 
     results = []
     for chrom, pos, size, event_type in dnm_regions:
-        dnm_start = pos
-        dnm_end = pos + (size if size else 1)  # point if no size
+        # 1-based pos → 0-based half-open, like the discovery regions
+        dnm_start = pos - 1
+        dnm_end = dnm_start + (size if size else 1)  # point if no size
 
         # Find overlapping discovery regions
         matches = []
@@ -1929,8 +1958,10 @@ def _write_discovery_summary(summary_path, regions, region_reads,
         n_total = len(dnm_evaluation)
         n_detected = sum(1 for e in dnm_evaluation if e["detected"])
         pct = (n_detected / n_total * 100) if n_total else 0.0
+        source = metrics.get("dnm_evaluation", {}).get("source")
         lines.append(
-            "Curated DNM Region Evaluation (Sulovari et al. 2023)"
+            f"Curated DNM Region Evaluation ({source})" if source
+            else "Curated DNM Region Evaluation"
         )
         lines.append("-" * 80)
         lines.append(f"  Curated DNM loci:            {n_total:>8}")
@@ -2107,6 +2138,17 @@ def run_discovery_pipeline(args):
 
     _validate_inputs(args)
 
+    # Parse the known de novo events up front so a malformed file fails
+    # before hours of counting rather than after.
+    dnm_regions_path = getattr(args, "dnm_regions", None)
+    dnm_regions = None
+    if dnm_regions_path:
+        try:
+            dnm_regions = _load_dnm_regions(dnm_regions_path)
+        except ValueError as exc:
+            logger.error("Validation error: %s", exc)
+            sys.exit(1)
+
     out_prefix = args.out_prefix
     bed_path = f"{out_prefix}.bed"
     info_bam_path = f"{out_prefix}.informative.bam"
@@ -2153,6 +2195,11 @@ def run_discovery_pipeline(args):
         else "(auto-detect)",
     )
     logger.info("  Tmp dir:           %s", getattr(args, 'tmp_dir', None) or "(auto)")
+    logger.info(
+        "  DNM regions:       %s",
+        f"{dnm_regions_path} ({len(dnm_regions)} events)" if dnm_regions
+        else "(none)",
+    )
     total_mem_gb, avail_mem_gb = _get_available_memory_gb()
     if total_mem_gb is not None:
         logger.info(
@@ -2517,23 +2564,24 @@ def run_discovery_pipeline(args):
             ],
         }
 
-    # ── Curated DNM region evaluation ─────────────────────────────
-    dnm_evaluation = _evaluate_dnm_regions(
-        regions, metrics["regions"],
-    )
-    n_dnm_detected = sum(1 for e in dnm_evaluation if e["detected"])
-    logger.info(
-        "[Module 4] Curated DNM evaluation: %d / %d detected",
-        n_dnm_detected, len(dnm_evaluation),
-    )
-    metrics["dnm_evaluation"] = {
-        "total_loci": len(dnm_evaluation),
-        "detected": n_dnm_detected,
-        "detection_rate": (
-            n_dnm_detected / len(dnm_evaluation)
-        ) if dnm_evaluation else 0.0,
-        "loci": dnm_evaluation,
-    }
+    # ── Optional evaluation against known de novo events ──────────
+    dnm_evaluation = None
+    if dnm_regions:
+        dnm_evaluation = _evaluate_dnm_regions(
+            regions, metrics["regions"], dnm_regions,
+        )
+        n_dnm_detected = sum(1 for e in dnm_evaluation if e["detected"])
+        logger.info(
+            "[Module 4] Curated DNM evaluation: %d / %d detected",
+            n_dnm_detected, len(dnm_evaluation),
+        )
+        metrics["dnm_evaluation"] = {
+            "source": os.path.basename(dnm_regions_path),
+            "total_loci": len(dnm_evaluation),
+            "detected": n_dnm_detected,
+            "detection_rate": n_dnm_detected / len(dnm_evaluation),
+            "loci": dnm_evaluation,
+        }
 
     with open(metrics_path, "w") as fh:
         json.dump(metrics, fh, indent=2)

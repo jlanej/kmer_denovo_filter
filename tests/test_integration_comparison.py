@@ -5,9 +5,10 @@ the VCF-based pipeline (DKA_DKT > 0.25, DKA > 10) are captured within
 the genomic regions discovered by the VCF-free discovery pipeline.
 
 Additionally, the curated de novo mutation (DNM) regions from Sulovari
-et al. 2023 (PMC10006329) are evaluated against the discovery output to
-verify that all known SV-like DNMs are nominated and characterised by
-the VCF-free pipeline.
+et al. 2023 (PMC10006329), shipped as
+``examples/HG002_trio/sulovari2023_dnm_regions.tsv``, are evaluated
+against the discovery output to verify that the known SV-like DNMs are
+nominated and characterised by the VCF-free pipeline.
 """
 
 import json
@@ -16,9 +17,9 @@ import os
 import pytest
 
 from kmer_denovo_filter.pipeline import (
-    SULOVARI_DNM_REGIONS,
     _compare_candidates_to_regions,
     _evaluate_dnm_regions,
+    _load_dnm_regions,
     _parse_candidate_summary,
 )
 
@@ -27,6 +28,11 @@ EXAMPLE_OUTPUT_DISCOVERY_DIR = os.path.join(
     os.path.dirname(__file__), "example_output_discovery",
 )
 GIAB_DIR = os.path.join(os.path.dirname(__file__), "data", "giab")
+SULOVARI_TSV = os.path.join(
+    os.path.dirname(__file__), os.pardir, "examples", "HG002_trio",
+    "sulovari2023_dnm_regions.tsv",
+)
+DNM_REGIONS = _load_dnm_regions(SULOVARI_TSV)
 GIAB_DISCOVERY_DATA_EXISTS = (
     os.path.isfile(os.path.join(GIAB_DIR, "HG002_child.bam"))
     and os.path.isfile(os.path.join(GIAB_DIR, "mini_ref.fa"))
@@ -228,7 +234,9 @@ class TestEvaluateDNMRegions:
                 parts = line.strip().split("\t")
                 regions.append((parts[0], int(parts[1]), int(parts[2])))
 
-        results = _evaluate_dnm_regions(regions, metrics["regions"])
+        results = _evaluate_dnm_regions(
+            regions, metrics["regions"], DNM_REGIONS,
+        )
         assert len(results) == 7
         detected = [r for r in results if r["detected"]]
         assert len(detected) == 5
@@ -263,9 +271,9 @@ class TestEvaluateDNMRegions:
         assert results[0]["kmer_signal"] == 0.0
 
     def test_adjacent_not_overlapping(self):
-        """A DNM at region end boundary (half-open) → NOT_DETECTED."""
-        # Region [50, 200) and DNM at 200 → adjacent, not overlapping
-        dnm = [("chr1", 200, None, "sv_like")]
+        """A DNM just past the region end (half-open) → NOT_DETECTED."""
+        # Region [50, 200) ends at 1-based 200, so 1-based 201 is adjacent
+        dnm = [("chr1", 201, None, "sv_like")]
         regions = [("chr1", 50, 200)]
         detail = [{"chrom": "chr1", "start": 50, "end": 200, "size": 150,
                     "reads": 5, "unique_kmers": 10, "split_reads": 0,
@@ -273,6 +281,18 @@ class TestEvaluateDNMRegions:
                     "unmapped_mates": 0, "class": "SMALL"}]
         results = _evaluate_dnm_regions(regions, detail, dnm_regions=dnm)
         assert results[0]["detected"] is False
+
+    def test_last_base_of_region_overlaps(self):
+        """1-based 200 is the last base of the half-open region [50, 200)."""
+        dnm = [("chr1", 200, None, "sv_like")]
+        regions = [("chr1", 50, 200)]
+        detail = [{"chrom": "chr1", "start": 50, "end": 200, "size": 150,
+                    "reads": 5, "unique_kmers": 10, "split_reads": 0,
+                    "discordant_pairs": 0, "max_clip_len": 20,
+                    "unmapped_mates": 0, "class": "SMALL"}]
+        results = _evaluate_dnm_regions(regions, detail, dnm_regions=dnm)
+        assert results[0]["detected"] is True
+        assert results[0]["locus"] == "chr1:200"
 
     def test_multi_region_overlap(self):
         """A large deletion spanning multiple regions aggregates evidence."""
@@ -331,7 +351,9 @@ class TestEvaluateDNMRegions:
                 parts = line.strip().split("\t")
                 regions.append((parts[0], int(parts[1]), int(parts[2])))
 
-        results = _evaluate_dnm_regions(regions, metrics["regions"])
+        results = _evaluate_dnm_regions(
+            regions, metrics["regions"], DNM_REGIONS,
+        )
         expected_fields = {
             "locus", "event_type", "event_size", "detected",
             "discovery_regions", "total_reads", "total_unique_kmers",
@@ -360,7 +382,9 @@ class TestEvaluateDNMRegions:
                 parts = line.strip().split("\t")
                 regions.append((parts[0], int(parts[1]), int(parts[2])))
 
-        results = _evaluate_dnm_regions(regions, metrics["regions"])
+        results = _evaluate_dnm_regions(
+            regions, metrics["regions"], DNM_REGIONS,
+        )
         chr7_del = [r for r in results if r["locus"] == "chr7:142786222"]
         assert len(chr7_del) == 1
         result = chr7_del[0]
@@ -388,12 +412,56 @@ class TestEvaluateDNMRegions:
                 parts = line.strip().split("\t")
                 regions.append((parts[0], int(parts[1]), int(parts[2])))
 
-        results = _evaluate_dnm_regions(regions, metrics["regions"])
+        results = _evaluate_dnm_regions(
+            regions, metrics["regions"], DNM_REGIONS,
+        )
         for r in results:
             if r["detected"]:
                 assert r["kmer_signal"] > 0, (
                     f"{r['locus']} detected but kmer_signal is 0"
                 )
+
+
+class TestLoadDNMRegions:
+    """Unit tests for _load_dnm_regions()."""
+
+    def test_shipped_sulovari_file(self):
+        assert len(DNM_REGIONS) == 7
+        assert DNM_REGIONS[0] == ("chr17", 53340465, 107, "deletion")
+        assert ("chr14", 23280711, None, "microsatellite_expansion") in (
+            DNM_REGIONS
+        )
+
+    def test_comments_blank_lines_and_unknown_sizes(self, tmp_path):
+        path = tmp_path / "dnms.tsv"
+        path.write_text(
+            "# header\n\nchr1\t10\t.\tins\nchr2\t20\t0\tdup\n"
+            "chr3\t30\t5\tdel\n"
+        )
+        assert _load_dnm_regions(str(path)) == [
+            ("chr1", 10, None, "ins"),
+            ("chr2", 20, None, "dup"),
+            ("chr3", 30, 5, "del"),
+        ]
+
+    @pytest.mark.parametrize("line, message", [
+        ("chr1\t10\t5\n", "expected 4 tab-separated columns"),
+        ("chr1 10 5 del\n", "expected 4 tab-separated columns"),
+        ("chr1\tten\t5\tdel\n", "must be integers"),
+        ("chr1\t0\t5\tdel\n", "pos must be >= 1"),
+    ])
+    def test_malformed_line_reports_line_number(self, tmp_path, line,
+                                                 message):
+        path = tmp_path / "dnms.tsv"
+        path.write_text("# header\n" + line)
+        with pytest.raises(ValueError, match=rf":2: .*{message}"):
+            _load_dnm_regions(str(path))
+
+    def test_file_without_events_is_rejected(self, tmp_path):
+        path = tmp_path / "dnms.tsv"
+        path.write_text("# only a comment\n")
+        with pytest.raises(ValueError, match="no de novo events"):
+            _load_dnm_regions(str(path))
 
 
 @pytest.mark.skipif(
@@ -429,7 +497,7 @@ class TestDNMRegionIntegration:
             text = fh.read()
 
         assert "Curated DNM Region Evaluation" in text
-        assert "Sulovari et al. 2023" in text
+        assert "(sulovari2023_dnm_regions.tsv)" in text
         assert "Detected by discovery" in text
         assert "5 / 7 (71.4%)" in text
 

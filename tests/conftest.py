@@ -19,6 +19,10 @@ EXAMPLE_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "example_output")
 EXAMPLE_OUTPUT_DISCOVERY_DIR = os.path.join(
     os.path.dirname(__file__), "example_output_discovery",
 )
+SULOVARI_DNM_REGIONS_TSV = os.path.join(
+    os.path.dirname(__file__), os.pardir, "examples", "HG002_trio",
+    "sulovari2023_dnm_regions.tsv",
+)
 
 
 @pytest.fixture(scope="session")
@@ -107,6 +111,7 @@ def generated_discovery_output():
         "--candidate-summary", os.path.join(
             EXAMPLE_OUTPUT_DIR, "summary.txt",
         ),
+        "--dnm-regions", SULOVARI_DNM_REGIONS_TSV,
     ])
     run_discovery_pipeline(args)
 
