@@ -380,7 +380,7 @@ class TestParseDiscoveryArgs:
     def test_defaults(self):
         args = parse_discovery_args(self.REQUIRED_ARGS)
         assert args.kmer_size == 31
-        assert args.min_baseq == 20
+        assert args.min_baseq is None  # unused in discovery mode
         assert args.threads == 4
         assert args.debug_kmers is False
         assert args.memory is None
@@ -477,3 +477,19 @@ class TestEntryPoints:
         from kmer_denovo_filter.cli import discovery_main
         with pytest.raises(SystemExit):
             discovery_main([])
+
+    @pytest.mark.parametrize("extra, warned", [
+        ([], False),
+        (["--min-baseq", "30"], True),
+    ])
+    def test_discovery_main_warns_that_min_baseq_is_unused(
+        self, monkeypatch, capsys, extra, warned,
+    ):
+        import kmer_denovo_filter.discovery.pipeline as discovery_pipeline
+        from kmer_denovo_filter.cli import discovery_main
+        monkeypatch.setattr(
+            discovery_pipeline, "run_discovery_pipeline", lambda args: None,
+        )
+        discovery_main(TestParseDiscoveryArgs.REQUIRED_ARGS + extra)
+        err = capsys.readouterr().err
+        assert ("--min-baseq has no effect in kmer-discovery" in err) is warned

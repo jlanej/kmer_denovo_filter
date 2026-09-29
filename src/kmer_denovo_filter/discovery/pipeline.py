@@ -2185,7 +2185,6 @@ def run_discovery_pipeline(args):
     logger.info("  Output prefix:     %s", out_prefix)
     logger.info("  k-mer size:        %d", args.kmer_size)
     logger.info("  Min child count:   %d", args.min_child_count)
-    logger.info("  Min base quality:  %d", args.min_baseq)
     logger.info("  Min distinct kmers/read: %d", min_dk_per_read)
     logger.info("  JF hash size:      %s", jf_hash_size or "(auto)")
     logger.info("  Threads:           %d", args.threads)

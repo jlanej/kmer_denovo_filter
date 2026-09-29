@@ -215,7 +215,7 @@ k-mer parameters. Each command also has its own mode-specific arguments.
 | `--father` | *required* | Father BAM/CRAM file (indexed) |
 | `--ref-fasta` / `-r` | – | Reference FASTA with `.fai` index (required for CRAM; required for `kmer-discovery` unless `--ref-jf` is provided) |
 | `--kmer-size` / `-k` | 31 | K-mer size (must be odd, 3–201) |
-| `--min-baseq` | 20 | Minimum base quality for read k-mers |
+| `--min-baseq` | 20 | Minimum base quality for read k-mers. Used by `kmer-denovo` only: `kmer-discovery` counts k-mers from all bases (one-off sequencing errors are removed by `--min-child-count`) and warns if this is set |
 | `--threads` / `-t` | 4 | Number of threads for Jellyfish and parallel anchoring workers |
 | `--memory` | auto | Available memory in GB. On HPC (e.g. SLURM), set this to the allocated memory so worker counts and hash sizes are tuned correctly. When omitted, auto-detected from the system |
 | `--debug-kmers` | false | Enable per-variant debug output |

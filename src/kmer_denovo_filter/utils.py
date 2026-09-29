@@ -309,7 +309,7 @@ def _validate_inputs(args):
             f"--kmer-size should be odd for canonical k-mer symmetry, "
             f"got {args.kmer_size}"
         )
-    if args.min_baseq < 0:
+    if args.min_baseq is not None and args.min_baseq < 0:
         errors.append(
             f"--min-baseq must be >= 0, got {args.min_baseq}"
         )
