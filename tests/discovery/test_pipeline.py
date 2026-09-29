@@ -924,6 +924,13 @@ class TestDiscoveryValidation:
         with pytest.raises(SystemExit):
             _validate_inputs(args)
 
+    def test_discovery_min_distinct_kmers_per_read_zero(self, tmpdir):
+        args = self._make_discovery_args(
+            tmpdir, min_distinct_kmers_per_read=0,
+        )
+        with pytest.raises(SystemExit):
+            _validate_inputs(args)
+
     def test_discovery_dnm_regions_not_found(self, tmpdir):
         args = self._make_discovery_args(
             tmpdir, dnm_regions="/no/such/dnms.tsv",

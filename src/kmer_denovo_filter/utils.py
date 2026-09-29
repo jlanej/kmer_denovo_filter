@@ -342,6 +342,13 @@ def _validate_inputs(args):
             errors.append(
                 f"--min-child-count must be >= 1, got {min_child_count}"
             )
+        # 0 would count reads with no proband-unique k-mers as informative
+        min_dk_per_read = getattr(args, 'min_distinct_kmers_per_read', None)
+        if min_dk_per_read is not None and min_dk_per_read < 1:
+            errors.append(
+                f"--min-distinct-kmers-per-read must be >= 1, "
+                f"got {min_dk_per_read}"
+            )
 
     # VCF-mode-specific validation
     if _vcf is not None:
