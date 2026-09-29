@@ -12,8 +12,12 @@ import kmer_denovo_filter.pipeline as pipeline_mod
 import kmer_denovo_filter.discovery.pipeline as discovery_pipeline_mod
 import kmer_denovo_filter.core.bam_scanner as bam_scanner_mod
 from kmer_denovo_filter.cli import parse_args
+from kmer_denovo_filter.core.jellyfish_wrappers import _run_samtools_jellyfish
+from kmer_denovo_filter.kmer_utils import canonicalize
 from kmer_denovo_filter.pipeline import (
+    _anchor_and_cluster,
     _classify_regions,
+    _count_parent_jellyfish,
     _validate_inputs,
     _write_bedgraph,
     _write_bedpe,
@@ -1557,6 +1561,7 @@ class TestJellyfishBatchScanMemory:
             read_sv_meta,
             kmer_coverage,
             read_coverage,
+            bam_out=None,
         ):
             seen_reads.append((read.query_sequence, unique_in_read))
             return 0
@@ -1596,3 +1601,152 @@ class TestJellyfishBatchScanMemory:
         assert jf_query.query_calls[1] == {"GGGGG"}
         assert jf_query.close_calls == 2
         assert len(seen_reads) == 3
+
+
+class TestInformativeBamFromAnchoring:
+    """The informative BAM is written by the anchoring scan itself."""
+
+    K = 11
+
+    def _build_inputs(self, tmp_path):
+        ref_fa = str(tmp_path / "ref.fa")
+        ref = _create_ref_fasta(ref_fa, "chr1", 300)
+        kmers = {
+            canonicalize(ref[i:i + self.K]) for i in (100, 101, 102, 200)
+        }
+        child_bam = str(tmp_path / "child.bam")
+        _create_bam_with_supplementary(
+            child_bam, ref_fa, ["chr1"], [300],
+            [
+                {"name": "plain", "pos": 10, "seq": ref[10:60]},
+                {"name": "strong_a", "pos": 90, "seq": ref[90:140]},
+                {"name": "strong_b", "pos": 95, "seq": ref[95:145]},
+                # Carries a single proband-unique k-mer: below threshold.
+                {"name": "weak", "pos": 190, "seq": ref[190:240]},
+                # Pair-less unmapped read with no position.
+                {"name": "unplaced", "chrom_idx": -1, "pos": -1,
+                 "seq": ref[98:125], "flag": 4, "cigar": [], "mapq": 0},
+            ],
+        )
+        return ref_fa, child_bam, kmers
+
+    @pytest.mark.parametrize("threads", [1, 2])
+    def test_bam_holds_exactly_the_retained_reads(self, tmp_path, threads):
+        """Reads below --min-distinct-kmers-per-read are left out, and
+        unplaced unmapped informative reads are included."""
+        ref_fa, child_bam, kmers = self._build_inputs(tmp_path)
+        out_bam = str(tmp_path / "informative.bam")
+
+        result = _anchor_and_cluster(
+            child_bam, ref_fa, kmers, self.K, threads=threads,
+            min_distinct_kmers_per_read=2, tmpdir=str(tmp_path),
+            informative_bam=out_bam,
+        )
+        total_informative, unmapped_informative = result[2], result[4]
+
+        with pysam.AlignmentFile(out_bam) as bam:
+            reads = list(bam.fetch(until_eof=True))
+        assert sorted(r.query_name for r in reads) == [
+            "strong_a", "strong_b", "unplaced",
+        ]
+        assert all(r.get_tag("dk") == 1 for r in reads)
+        assert os.path.exists(out_bam + ".bai")
+        assert total_informative == len(reads)
+        assert unmapped_informative == 1
+        # Per-contig shards live in tmpdir only while scanning.
+        assert not [
+            p for p in os.listdir(tmp_path)
+            if p.startswith("informative_reads_")
+        ]
+
+    def test_empty_bam_when_nothing_is_informative(self, tmp_path):
+        ref_fa, child_bam, _ = self._build_inputs(tmp_path)
+        out_bam = str(tmp_path / "informative.bam")
+
+        _anchor_and_cluster(
+            child_bam, ref_fa, set(), self.K, threads=1,
+            tmpdir=str(tmp_path), informative_bam=out_bam,
+        )
+
+        with pysam.AlignmentFile(out_bam) as bam:
+            assert list(bam.fetch(until_eof=True)) == []
+        assert os.path.exists(out_bam + ".bai")
+
+
+class TestSamtoolsJellyfishFailures:
+    """A failure on either side of samtools | jellyfish must raise."""
+
+    SAMTOOLS_OK = ["sh", "-c", "printf '>r1\\nACGTACGTAC\\n'"]
+    JELLYFISH_OK = ["sh", "-c", "cat > /dev/null"]
+
+    def test_success(self):
+        _run_samtools_jellyfish(self.SAMTOOLS_OK, self.JELLYFISH_OK, "child")
+
+    def test_samtools_failure_raises(self):
+        samtools = [
+            "sh", "-c",
+            "printf '>r1\\nACGT\\n'; echo 'truncated file' >&2; exit 1",
+        ]
+        with pytest.raises(
+            RuntimeError, match=r"samtools fasta \(Mother\).*truncated file",
+        ):
+            _run_samtools_jellyfish(samtools, self.JELLYFISH_OK, "Mother")
+
+    def test_jellyfish_failure_raises(self):
+        jellyfish = [
+            "sh", "-c", "cat > /dev/null; echo 'hash full' >&2; exit 2",
+        ]
+        with pytest.raises(
+            RuntimeError, match=r"jellyfish count \(child\).*hash full",
+        ):
+            _run_samtools_jellyfish(self.SAMTOOLS_OK, jellyfish, "child")
+
+    def test_missing_eof_marker_raises_despite_exit_zero(self):
+        samtools = [
+            "sh", "-c",
+            "printf '>r1\\nACGT\\n'; echo '[W::bam_hdr_read] EOF marker "
+            "is absent. The input is probably truncated' >&2",
+        ]
+        with pytest.raises(RuntimeError, match="appears truncated"):
+            _run_samtools_jellyfish(samtools, self.JELLYFISH_OK, "Father")
+
+    def test_on_poll_called_while_jellyfish_runs(self):
+        calls = []
+        jellyfish = ["sh", "-c", "cat > /dev/null; sleep 0.5"]
+        _run_samtools_jellyfish(
+            self.SAMTOOLS_OK, jellyfish, "child",
+            poll_interval=0.1, on_poll=lambda *args: calls.append(args),
+        )
+        assert calls
+        elapsed, _p_samtools, _p_jellyfish = calls[0]
+        assert elapsed > 0
+
+    @pytest.mark.parametrize("cut", ["mid_file", "eof_block_only"])
+    def test_truncated_parent_bam_raises(self, tmp_path, cut):
+        """A truncated parent BAM must fail the count rather than let it
+        use only the reads before the cut.  Dropping just the 28-byte EOF
+        block (a writer killed between blocks) reads without error."""
+        ref_fa = str(tmp_path / "ref.fa")
+        ref = _create_ref_fasta(ref_fa, "chr1", 300)
+        parent_bam = str(tmp_path / "parent.bam")
+        _create_bam(
+            parent_bam, ref_fa, "chr1",
+            [(f"r{i}", i % 200, ref[i % 200:i % 200 + 100], None)
+             for i in range(3000)],
+        )
+        truncated = str(tmp_path / "truncated.bam")
+        with open(parent_bam, "rb") as src, open(truncated, "wb") as dst:
+            data = src.read()
+            end = len(data) // 2 if cut == "mid_file" else len(data) - 28
+            dst.write(data[:end])
+        kmer_fa = str(tmp_path / "kmers.fa")
+        with open(kmer_fa, "w") as fh:
+            fh.write(f">0\n{ref[10:21]}\n")
+
+        with pytest.raises(
+            RuntimeError, match=r"samtools fasta \(Mother: .*truncated\.bam\)",
+        ):
+            _count_parent_jellyfish(
+                truncated, None, kmer_fa, 11, str(tmp_path / "mother"),
+                threads=1, label="Mother", n_filter_kmers=1,
+            )

@@ -48,7 +48,6 @@ from kmer_denovo_filter.discovery.pipeline import (  # noqa: F401
     _write_bedpe,
     _write_discovery_summary,
     _write_empty_discovery_outputs,
-    _write_informative_reads_discovery,
     _write_read_coverage_bed,
     run_discovery_pipeline,
 )

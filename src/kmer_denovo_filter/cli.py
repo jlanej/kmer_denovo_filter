@@ -206,7 +206,8 @@ def parse_discovery_args(argv=None):
     parser.add_argument(
         "--min-distinct-kmers-per-read", type=int, default=None,
         help="Minimum number of distinct proband-unique k-mers a read "
-             "must carry to be retained for region and bedGraph output. "
+             "must carry to be retained for region, bedGraph and "
+             "informative BAM output. "
              "Applied before --min-supporting-reads and "
              "--min-bedgraph-reads filters. (default: k/4)",
     )
@@ -322,7 +323,8 @@ def parse_args(argv=None):
     parser.add_argument(
         "--min-distinct-kmers-per-read", type=int, default=None,
         help="Minimum number of distinct proband-unique k-mers a read "
-             "must carry to be retained for region and bedGraph output. "
+             "must carry to be retained for region, bedGraph and "
+             "informative BAM output. "
              "Applied before --min-supporting-reads and "
              "--min-bedgraph-reads filters. (default: k/4)",
     )

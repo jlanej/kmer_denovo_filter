@@ -112,6 +112,87 @@ def _estimate_jf_hash_size(bam_path, kmer_size, default="1G"):
 # ---------------------------------------------------------------------------
 
 
+def _stderr_tail(fh, max_lines=20):
+    """Return the last *max_lines* lines written to a stderr temp file."""
+    fh.seek(0)
+    lines = fh.read().decode(errors="replace").strip().splitlines()
+    return "\n".join(lines[-max_lines:])
+
+
+def _run_samtools_jellyfish(samtools_cmd, jellyfish_cmd, label,
+                            poll_interval=30, on_poll=None):
+    """Run ``samtools fasta | jellyfish count``; raise if either side fails.
+
+    Checking jellyfish's exit status alone is not enough: when samtools
+    dies part-way through (truncated BAM, CRAM reference problems),
+    jellyfish sees an early EOF and exits cleanly having counted only the
+    reads it received.  samtools' own exit status is not enough either:
+    a file cut at a block boundary reads cleanly, and some versions (e.g.
+    1.16 with ``-@ 1``) exit 0 part-way through a truncated file.  htslib
+    does warn that the EOF marker is absent in all of these cases, so
+    that warning is treated as fatal too.
+
+    Both stderr streams go to temporary files rather than pipes, so a
+    verbose process cannot fill an unread pipe buffer and stall the
+    pipeline.
+
+    Args:
+        samtools_cmd: ``samtools fasta`` command writing reads to stdout.
+        jellyfish_cmd: ``jellyfish count`` command reading from stdin.
+        label: Input description for error messages
+            (e.g. ``"Mother: mother.bam"``).
+        poll_interval: Seconds between *on_poll* calls.
+        on_poll: Optional progress callback, called as
+            ``on_poll(elapsed_seconds, p_samtools, p_jellyfish)`` every
+            *poll_interval* seconds while jellyfish is running.
+
+    Raises:
+        RuntimeError: If samtools or jellyfish exits with a non-zero
+            status, or samtools reports that its input is truncated.
+    """
+    start = time.monotonic()
+    with tempfile.TemporaryFile() as samtools_err, \
+            tempfile.TemporaryFile() as jellyfish_err:
+        p_samtools = subprocess.Popen(
+            samtools_cmd, stdout=subprocess.PIPE, stderr=samtools_err,
+        )
+        p_jellyfish = subprocess.Popen(
+            jellyfish_cmd, stdin=p_samtools.stdout,
+            stdout=subprocess.DEVNULL, stderr=jellyfish_err,
+        )
+        # Only jellyfish should hold the read end, so samtools gets
+        # SIGPIPE instead of blocking if jellyfish exits early.
+        p_samtools.stdout.close()
+
+        while True:
+            try:
+                p_jellyfish.wait(timeout=poll_interval)
+                break
+            except subprocess.TimeoutExpired:
+                if on_poll is not None:
+                    on_poll(time.monotonic() - start, p_samtools, p_jellyfish)
+        p_samtools.wait()
+
+        if p_jellyfish.returncode != 0:
+            raise RuntimeError(
+                f"jellyfish count ({label}) failed with exit code "
+                f"{p_jellyfish.returncode}: {_stderr_tail(jellyfish_err)}"
+            )
+        if p_samtools.returncode != 0:
+            raise RuntimeError(
+                f"samtools fasta ({label}) failed with exit code "
+                f"{p_samtools.returncode}, so jellyfish counted only part "
+                f"of the input: {_stderr_tail(samtools_err)}"
+            )
+        samtools_err.seek(0)
+        if b"EOF marker is absent" in samtools_err.read():
+            raise RuntimeError(
+                f"samtools fasta ({label}): the input appears truncated "
+                f"(EOF marker is absent), so jellyfish may have counted "
+                f"only part of it: {_stderr_tail(samtools_err)}"
+            )
+
+
 def _scan_parent_jellyfish(
     parent_bam, ref_fasta, kmer_fasta, kmer_size, parent_dir, threads=4,
     n_filter_kmers=None,
@@ -184,62 +265,35 @@ def _scan_parent_jellyfish(
         kmer_size, threads, hash_size_str,
     )
 
-    scan_start = time.monotonic()
-
-    p_samtools = subprocess.Popen(
-        samtools_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    p_jellyfish = subprocess.Popen(
-        jellyfish_cmd,
-        stdin=p_samtools.stdout,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    p_samtools.stdout.close()
-
-    # Poll for completion, logging periodic progress
-    poll_interval = 30  # seconds between progress updates
-    last_log = scan_start
-    while True:
-        try:
-            p_jellyfish.wait(timeout=poll_interval)
-            break  # process finished
-        except subprocess.TimeoutExpired:
-            now = time.monotonic()
-            elapsed = now - scan_start
-            # Report jellyfish output file size as a proxy for progress
-            jf_files_progress = _find_jf_files(jf_output)
-            if jf_files_progress:
-                total_size = sum(
-                    os.path.getsize(f) for f in jf_files_progress
-                    if os.path.exists(f)
-                )
-                if total_size >= 1024**3:
-                    jf_size = f"{total_size / (1024**3):.1f} GB"
-                elif len(jf_files_progress) == 1:
-                    jf_size = _format_file_size(jf_files_progress[0])
-                else:
-                    jf_size = f"{total_size / (1024**2):.1f} MB"
-            else:
-                jf_size = "pending"
-            logger.info(
-                "  … still scanning (%s elapsed, jf index: %s)",
-                _format_elapsed(elapsed), jf_size,
+    def _log_progress(elapsed, p_samtools, p_jellyfish):
+        # Report jellyfish output file size as a proxy for progress
+        jf_files_progress = _find_jf_files(jf_output)
+        if jf_files_progress:
+            total_size = sum(
+                os.path.getsize(f) for f in jf_files_progress
+                if os.path.exists(f)
             )
-            _log_memory("parent scanning")
-            _log_subprocess_memory(p_jellyfish, "jellyfish-count")
-            _log_subprocess_memory(p_samtools, "samtools-fasta")
-            last_log = now
-
-    p_samtools.communicate()
-    jf_stderr = p_jellyfish.stderr.read()
-
-    if p_jellyfish.returncode != 0:
-        raise RuntimeError(
-            f"jellyfish count failed: {jf_stderr.decode()}"
+            if total_size >= 1024**3:
+                jf_size = f"{total_size / (1024**3):.1f} GB"
+            elif len(jf_files_progress) == 1:
+                jf_size = _format_file_size(jf_files_progress[0])
+            else:
+                jf_size = f"{total_size / (1024**2):.1f} MB"
+        else:
+            jf_size = "pending"
+        logger.info(
+            "  … still scanning (%s elapsed, jf index: %s)",
+            _format_elapsed(elapsed), jf_size,
         )
+        _log_memory("parent scanning")
+        _log_subprocess_memory(p_jellyfish, "jellyfish-count")
+        _log_subprocess_memory(p_samtools, "samtools-fasta")
+
+    scan_start = time.monotonic()
+    _run_samtools_jellyfish(
+        samtools_cmd, jellyfish_cmd, f"parent: {parent_bam}",
+        on_poll=_log_progress,
+    )
 
     # Handle multi-file output (hash overflow) — merge if needed
     jf_files = _find_jf_files(jf_output)
