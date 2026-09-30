@@ -247,7 +247,7 @@ k-mer parameters. Each command also has its own mode-specific arguments.
 | Argument | Default | Description |
 |---|---|---|
 | `--out-prefix` | *required* | Output prefix for discovery mode files |
-| `--ref-jf` | – | Precomputed Jellyfish reference index; defaults to `[ref-fasta].k[kmer-size].jf` |
+| `--ref-jf` | – | Precomputed Jellyfish reference index; defaults to `[ref-fasta].k[kmer-size].jf`, which is built if missing. An existing index must hold canonical k-mers (`jellyfish count -C`) of the `--kmer-size` length; this is checked from its header at start-up |
 | `--min-child-count` | 3 | Minimum k-mer occurrences in the child to be considered a candidate |
 | `--cluster-distance` | 500 | Maximum gap (bp) for merging adjacent regions |
 | `--min-distinct-kmers-per-read` | k/4 | Minimum distinct proband-unique k-mers a read must carry to be retained. Applied before region-level and bedGraph filters (see [Filtering Flow](#discovery-mode-filtering-flow)) |

@@ -6,6 +6,7 @@ parameters instead.
 """
 
 import glob
+import json
 import logging
 import os
 import subprocess
@@ -337,8 +338,54 @@ def _scan_parent_jellyfish(
     return found_kmers
 
 
+def _check_ref_jf(ref_jf, kmer_size):
+    """Check that a reference index suits this run; reads only its header.
+
+    Reference subtraction queries canonical child k-mers of length
+    *kmer_size*.  ``jellyfish query`` does not fail on a mismatched index:
+    with a different k it re-splits every query into k-mers of the
+    index's length, and without canonical mode it misses reference
+    k-mers that occur only on the reverse strand.
+
+    Raises:
+        RuntimeError: If the header can't be read, or the index holds
+            k-mers of another length or was built without ``-C``.
+    """
+    result = subprocess.run(
+        ["jellyfish", "info", "-j", ref_jf], capture_output=True, text=True,
+    )
+    try:
+        header = json.loads(result.stdout) if result.returncode == 0 else None
+    except ValueError:
+        header = None
+    # jellyfish info exits 0 on a non-Jellyfish file, printing a stub
+    # header without key_len.
+    if not isinstance(header, dict) or not header.get("key_len"):
+        raise RuntimeError(
+            f"Cannot read Jellyfish index {ref_jf}: "
+            f"{result.stderr.strip() or 'no Jellyfish header found'}"
+        )
+    index_k = header["key_len"] // 2
+    if index_k != kmer_size:
+        raise RuntimeError(
+            f"Reference Jellyfish index {ref_jf} holds {index_k}-mers but "
+            f"--kmer-size is {kmer_size}; pass an index built with "
+            f"-m {kmer_size}, or delete this one so it is rebuilt"
+        )
+    if not header.get("canonical"):
+        raise RuntimeError(
+            f"Reference Jellyfish index {ref_jf} was built without -C, so "
+            f"reference k-mers seen only on the reverse strand would not be "
+            f"subtracted; rebuild it with jellyfish count -C"
+        )
+
+
 def _ensure_ref_jf(ref_fasta, kmer_size, threads, ref_jf=None):
     """Ensure a Jellyfish reference index exists, building it if necessary.
+
+    An existing index is checked with :func:`_check_ref_jf`.  A new one
+    is written under a temporary name and renamed when complete, so an
+    interrupted build never leaves a partial index for later runs to use.
 
     Args:
         ref_fasta: Path to the reference FASTA file.
@@ -354,6 +401,7 @@ def _ensure_ref_jf(ref_fasta, kmer_size, threads, ref_jf=None):
         ref_jf = f"{ref_fasta}.k{kmer_size}.jf"
 
     if os.path.isfile(ref_jf):
+        _check_ref_jf(ref_jf, kmer_size)
         logger.info("Reference Jellyfish index found: %s", ref_jf)
         return ref_jf
 
@@ -364,6 +412,7 @@ def _ensure_ref_jf(ref_fasta, kmer_size, threads, ref_jf=None):
     ref_hash_size = _estimate_jf_hash_size(ref_fasta, kmer_size, default="3G")
     logger.info("  Reference JF hash size: %s", ref_hash_size)
     build_start = time.monotonic()
+    tmp_jf = f"{ref_jf}.tmp{os.getpid()}"
     cmd = [
         "jellyfish", "count",
         "-m", str(kmer_size),
@@ -371,13 +420,16 @@ def _ensure_ref_jf(ref_fasta, kmer_size, threads, ref_jf=None):
         "-t", str(threads),
         "-C",
         ref_fasta,
-        "-o", ref_jf,
+        "-o", tmp_jf,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
+        for f in _find_jf_files(tmp_jf):
+            os.remove(f)
         raise RuntimeError(
             f"jellyfish count (reference) failed: {result.stderr}"
         )
+    os.replace(tmp_jf, ref_jf)
     logger.info(
         "Reference index built in %s (%s)",
         _format_elapsed(time.monotonic() - build_start),
