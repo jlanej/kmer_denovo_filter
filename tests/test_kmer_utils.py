@@ -707,3 +707,12 @@ class TestJellyfishKmerQueryCache:
         assert len(q._cache) > 0
         q.close()
         assert len(q._cache) == 0
+
+
+class TestJellyfishKmerQueryErrors:
+    """A failed ``jellyfish query`` must raise, not look like "no hits"."""
+
+    def test_missing_index_raises(self, tmp_path):
+        q = JellyfishKmerQuery(str(tmp_path / "missing.jf"))
+        with pytest.raises(RuntimeError, match="jellyfish query"):
+            q.query_batch([canonicalize("ACGTA")])

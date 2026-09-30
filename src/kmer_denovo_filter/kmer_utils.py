@@ -167,6 +167,11 @@ class JellyfishKmerQuery:
 
         Returns:
             Set of canonical k-mers that are present (count > 0).
+
+        Raises:
+            RuntimeError: If jellyfish exits with a non-zero status.  A
+                failed query (missing index, killed process) would
+                otherwise be indistinguishable from "no k-mers present".
         """
         fasta_block = "".join(
             f">{i}\n{kmer}\n" for i, kmer in enumerate(kmers)
@@ -177,7 +182,12 @@ class JellyfishKmerQuery:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        stdout, _ = proc.communicate(fasta_block.encode())
+        stdout, stderr = proc.communicate(fasta_block.encode())
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"jellyfish query on {self.jf_path} failed with exit code "
+                f"{proc.returncode}: {stderr.decode(errors='replace').strip()}"
+            )
 
         hits = set()
         for line in stdout.decode().split("\n"):

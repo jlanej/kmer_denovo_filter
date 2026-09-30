@@ -78,9 +78,10 @@ outputs, and the `--kraken2*` flags.
 
 5. **Anchor & cluster** – Scan each child read with a sliding k-mer
    window. Each k-mer is canonicalized and queried against the
-   proband-unique Jellyfish index via a long-lived ``jellyfish query``
-   subprocess. Reads with at least `--min-distinct-kmers-per-read`
-   (default k/4) distinct proband-unique k-mers are retained. Cluster
+   proband-unique Jellyfish index in batched ``jellyfish query`` calls.
+   Reads with at least `--min-distinct-kmers-per-read` (default k/4)
+   distinct proband-unique k-mers are retained and written to the
+   informative-reads BAM during the same scan. Cluster
    nearby reads (within `--cluster-distance` bp) into candidate genomic
    regions. Regions are then filtered by `--min-supporting-reads` and
    `--min-distinct-kmers`. The number of parallel workers is dynamically
@@ -516,10 +517,11 @@ the `--min-bedgraph-reads` threshold, reports:
 
 #### Informative BAM (`{prefix}.informative.bam`)
 
-Sorted, indexed BAM containing all child reads with at least one
-proband-unique k-mer. Each read carries a `dk:i:1` tag. Both mapped and
-unmapped informative reads are included to support downstream
-re-alignment analysis.
+Sorted, indexed BAM containing the child reads retained during anchoring:
+those carrying at least `--min-distinct-kmers-per-read` distinct
+proband-unique k-mers. Each read carries a `dk:i:1` tag. Both mapped and
+unmapped informative reads (including pairs where both mates are
+unmapped) are included to support downstream re-alignment analysis.
 
 #### Metrics JSON (`{prefix}.metrics.json`)
 
@@ -612,7 +614,7 @@ Discovery mode applies filters at four levels, in this order:
      many distinct proband-unique k-mers to be considered informative.
      The default is `k/4` (e.g. 7 for k=31).  Reads below the threshold
      are excluded from **all** downstream outputs: regions, bedGraph,
-     read coverage BED, and the informative BAM's coverage signal.
+     read coverage BED, and the informative BAM.
 
 3. **Region-level** (post-clustering):
    * `--min-supporting-reads` — Minimum number of reads in a region

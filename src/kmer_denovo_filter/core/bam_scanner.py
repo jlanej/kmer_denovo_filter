@@ -281,10 +281,54 @@ def _init_scan_worker(proband_data, kmer_size,
     _worker_min_distinct_kmers_per_read = min_distinct_kmers_per_read
 
 
+def _reset_scan_worker():
+    """Drop the state set by :func:`_init_scan_worker`.
+
+    Needed when the scan runs in-process rather than in a pool worker, so
+    the automaton or query cache does not outlive the scan.
+    """
+    global _worker_automaton, _worker_jf_query, _worker_kmer_size
+    global _worker_min_distinct_kmers_per_read
+
+    _worker_automaton = None
+    _worker_jf_query = None
+    _worker_kmer_size = None
+    _worker_min_distinct_kmers_per_read = 1
+
+
+class _InformativeReadWriter:
+    """Write informative reads to a BAM file, tagged ``dk:i:1``.
+
+    The file is created when the first read arrives, so a contig without
+    informative reads leaves no file behind.
+    """
+
+    def __init__(self, path, header):
+        self.path = path
+        self._header = header
+        self._bam = None
+
+    def write(self, read):
+        if self._bam is None:
+            self._bam = pysam.AlignmentFile(
+                self.path, "wb", header=self._header,
+            )
+        read.set_tag("dk", 1, value_type="i")
+        self._bam.write(read)
+
+    def close(self):
+        if self._bam is not None:
+            self._bam.close()
+
+
 def _process_informative_read(read, unique_in_read, kmer_hit_indices,
                               kmer_size, reads_seen, read_hits,
-                              read_sv_meta, kmer_coverage, read_coverage):
+                              read_sv_meta, kmer_coverage, read_coverage,
+                              bam_out=None):
     """Record an informative read's hits, coverage, and SV metadata.
+
+    When *bam_out* is given (an :class:`_InformativeReadWriter`), the read
+    is also written to it, whether mapped or not.
 
     Returns 1 if the read is unmapped-informative, 0 otherwise.
     Mutates *reads_seen*, *read_hits*, *read_sv_meta*, *kmer_coverage*,
@@ -295,6 +339,8 @@ def _process_informative_read(read, unique_in_read, kmer_hit_indices,
         return 0
 
     reads_seen.add(dedup_key)
+    if bam_out is not None:
+        bam_out.write(read)
     if read.is_unmapped:
         return 1
 
@@ -311,7 +357,9 @@ def _process_informative_read(read, unique_in_read, kmer_hit_indices,
     cov = _collect_kmer_ref_positions(
         read, kmer_hit_indices, kmer_size,
     )
-    kmer_coverage[chrom] += cov
+    # update(), not +=: Counter.__iadd__ rescans the whole Counter on
+    # every call, which makes a contig scan quadratic.
+    kmer_coverage[chrom].update(cov)
     # Count one read per touched position
     for pos in cov:
         read_coverage[chrom][pos] += 1
@@ -337,10 +385,13 @@ def _process_informative_read(read, unique_in_read, kmer_hit_indices,
     return 0
 
 
-def _scan_contig_for_hits(child_bam, ref_fasta, contig):
+def _scan_contig_for_hits(child_bam, ref_fasta, contig, informative_bam=None):
     """Scan reads mapped to *contig* for proband-unique k-mers.
 
-    When *contig* is ``None``, unmapped reads are scanned instead.
+    When *contig* is ``None``, unmapped reads are scanned instead.  When
+    *informative_bam* is given, every informative read recorded by this
+    scan is also written to that path (created only if there is at least
+    one such read), tagged ``dk:i:1``.
 
     Supports two scanning backends:
     - **Aho-Corasick automaton** (``_worker_automaton``) — fast C-level
@@ -392,6 +443,10 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
                     read_coverage)
     else:
         iterator = bam.fetch(contig=contig)
+
+    bam_out = None
+    if informative_bam is not None:
+        bam_out = _InformativeReadWriter(informative_bam, bam.header)
 
     if jf_query is not None:
         # ── Batched jellyfish path ─────────────────────────────────
@@ -446,6 +501,7 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
                     read_obj, unique_in_read, kmer_hit_indices,
                     kmer_size, reads_seen, read_hits,
                     read_sv_meta, kmer_coverage, read_coverage,
+                    bam_out=bam_out,
                 )
             pending = []
             jf_query.close()
@@ -470,6 +526,7 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
                     read_obj, unique_in_read, kmer_hit_indices,
                     kmer_size, reads_seen, read_hits,
                     read_sv_meta, kmer_coverage, read_coverage,
+                    bam_out=bam_out,
                 )
             jf_query.close()
     else:
@@ -499,8 +556,11 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig):
                 read, unique_in_read, kmer_hit_indices,
                 kmer_size, reads_seen, read_hits,
                 read_sv_meta, kmer_coverage, read_coverage,
+                bam_out=bam_out,
             )
 
+    if bam_out is not None:
+        bam_out.close()
     bam.close()
     return (read_hits, reads_seen, unmapped_informative,
             total_reads_scanned, read_sv_meta, kmer_coverage,
