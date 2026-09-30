@@ -267,14 +267,14 @@ k-mer parameters. Each command also has its own mode-specific arguments.
 | `--out-prefix` | *required* | Output prefix for discovery mode files |
 | `--ref-jf` | – | Precomputed Jellyfish reference index; defaults to `[ref-fasta].k[kmer-size].jf`, which is built if missing. An existing index must hold canonical k-mers (`jellyfish count -C`) of the `--kmer-size` length; this is checked from its header at start-up |
 | `--min-child-count` | 3 | Minimum k-mer occurrences in the child to be considered a candidate |
-| `--cluster-distance` | 500 | Maximum gap (bp) for merging adjacent regions; also how far a split alignment or mate may land outside a region and still link to it in the BEDPE |
+| `--cluster-distance` | 500 | Maximum gap (bp) for merging adjacent regions. Also how far a split alignment or mate may land outside a region and still link to it in the BEDPE, and how far a region may lie from a `--dnm-regions` event and still count toward it |
 | `--min-distinct-kmers-per-read` | k/4 | Minimum distinct proband-unique k-mers a read must carry to be retained. Applied before region-level and bedGraph filters (see [Filtering Flow](#discovery-mode-filtering-flow)) |
 | `--min-supporting-reads` | 1 | Minimum number of supporting reads per region |
 | `--min-distinct-kmers` | 1 | Minimum number of distinct proband-unique k-mers per region |
 | `--min-bedgraph-reads` | 3 | Minimum distinct reads at a position for inclusion in the bedGraph and read coverage BED |
 | `--parent-max-count` | 0 | Maximum k-mer count in a parent before the k-mer is considered parental; k-mers with count > this value in either parent are removed |
 | `--candidate-summary` | – | Path to a VCF-mode `summary.txt` for candidate comparison. High-quality *de novos* (DKA\_DKT > 0.25, DKA > 10) are checked against discovered regions |
-| `--dnm-regions` | – | Tab-separated file of known *de novo* events to check the discovered regions against: `chrom`, 1-based `pos`, `size` in bp (`.` if unknown), `event_type`; `#` lines are comments. Adds a per-event detection table to the metrics JSON, summary and report. [`examples/HG002_trio/sulovari2023_dnm_regions.tsv`](examples/HG002_trio/sulovari2023_dnm_regions.tsv) lists the Sulovari et al. 2023 candidates used by the GIAB (HG002) integration test |
+| `--dnm-regions` | – | Tab-separated file of known *de novo* events to check the discovered regions against: `chrom`, 1-based `pos`, `size` in bp (`.` if unknown), `event_type`; `#` lines are comments. Adds a per-event detection table to the metrics JSON, summary and report. A region counts toward an event when it overlaps it or lies within `--cluster-distance` of it, because a deletion's breakpoint regions flank the deleted interval. [`examples/HG002_trio/sulovari2023_dnm_regions.tsv`](examples/HG002_trio/sulovari2023_dnm_regions.tsv) lists the Sulovari et al. 2023 candidates used by the GIAB (HG002) integration test |
 | `--sv-bedpe` | – | Output BEDPE file for linked SV breakpoint pairs (default: `[out-prefix].sv.bedpe`) |
 | `--report` | – | Output path for an interactive HTML report summarizing discovery results with Plotly visualizations. When omitted, no report is generated |
 
@@ -601,7 +601,9 @@ Machine-readable pipeline statistics:
 When `--candidate-summary` is used, a `candidate_comparison` object is
 included with capture rate and per-candidate details. When `--dnm-regions`
 is used, a `dnm_evaluation` object is included with the source file name,
-the detection rate, and per-event evidence from the overlapping regions.
+the matching slack (`slack_bp`, from `--cluster-distance`), the detection
+rate, and per-event evidence from the regions that overlap each event or lie
+within the slack of it.
 
 #### Summary text (`{prefix}.summary.txt`)
 

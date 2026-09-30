@@ -60,6 +60,7 @@ Curated DNM Region Evaluation (sulovari2023_dnm_regions.tsv)
 --------------------------------------------------------------------------------
   Curated DNM loci:                   7
   Detected by discovery:              5 / 7 (71.4%)
+  Regions counted within:           500 bp of an event
 
   Locus                                    Event     Size  Reads  Kmers  Signal  MaxClip      Class         Status
   -----                                    -----     ----  -----  -----  ------  -------      -----         ------
@@ -69,6 +70,6 @@ Curated DNM Region Evaluation (sulovari2023_dnm_regions.tsv)
   chr5:97089276                          sv_like     43bp     22     30  0.0714       50         SV       DETECTED
   chr8:125785998                         sv_like     43bp     34     53  0.0776       54         SV       DETECTED
   chr18:62805217                         sv_like     34bp      7     39  0.0716       27      SMALL       DETECTED
-  chr7:142786222                        deletion  10607bp     12    112  0.0100       94         SV       DETECTED
+  chr7:142786222                        deletion  10607bp     26    191  0.0161       98         SV       DETECTED
 
 ============================================================

@@ -116,7 +116,7 @@ from Sulovari et al. 2023 (PMC10006329).  5 of the 7 are detected:
 | chr5:97089276 | SV-like event | 43 bp | 22 | 30 | 0.0714 | 50 | SV | DETECTED |
 | chr8:125785998 | SV-like event | 43 bp | 34 | 53 | 0.0776 | 54 | SV | DETECTED |
 | chr18:62805217 | SV-like event | 34 bp | 7 | 39 | 0.0716 | 27 | SMALL | DETECTED |
-| chr7:142786222 | Deletion (TRB) | 10,607 bp | 12 | 112 | 0.0100 | 94 | SV | DETECTED |
+| chr7:142786222 | Deletion (TRB) | 10,607 bp | 26 | 191 | 0.0161 | 98 | SV | DETECTED |
 
 **Observations:**
 - The chr17 107 bp deletion is `SV` from both kinds of breakpoint evidence:
@@ -129,10 +129,11 @@ from Sulovari et al. 2023 (PMC10006329).  5 of the 7 are detected:
   `DEL`. The test BAMs are aligned with novoalign and carry no SA tags, so
   every link must come from mates.
 - Two further chr7 regions lie inside the deleted interval, each with one
-  unmapped mate (`AMBIGUOUS`). The curated interval (pos + size) covers
-  those two regions and the left breakpoint: these are the 3 regions summed
-  in the table above. The right-breakpoint region starts 1 bp after the
-  interval ends, so it is not included.
+  unmapped mate (`AMBIGUOUS`). The table above sums all four chr7 regions.
+  Regions within `--cluster-distance` (500 bp) of an event count toward it,
+  because a deletion's breakpoint regions flank the deleted interval. Here
+  the right-breakpoint region starts 1 bp after the curated interval
+  ends.
 - The chr18 34 bp event (DKU=0, inherited in VCF mode) still shows 39
   proband-unique k-mers in discovery mode, illustrating that k-mer-based
   discovery can surface variants missed by VCF-guided annotation.

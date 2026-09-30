@@ -2663,7 +2663,10 @@ _HTML_TEMPLATE = """\
   {%- if dnm_evaluation.get("source") %} listed in
   <code>{{ dnm_evaluation.get("source")|e }}</code>{% endif %} (supplied with
   <code>--dnm-regions</code>).  An event counts as detected when at least
-  one discovery region overlaps it.
+  one discovery region overlaps it
+  {%- if dnm_evaluation.get("slack_bp") %} or lies within
+  {{ dnm_evaluation.get("slack_bp") }} bp of it (<code>--cluster-distance</code>),
+  as a deletion's breakpoint regions flank the deleted interval{% endif %}.
 </p>
 
 <div class="metric-cards">

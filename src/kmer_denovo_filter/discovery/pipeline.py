@@ -1715,19 +1715,23 @@ def _load_dnm_regions(path):
     return regions
 
 
-def _evaluate_dnm_regions(discovery_regions, region_detail, dnm_regions):
+def _evaluate_dnm_regions(discovery_regions, region_detail, dnm_regions,
+                          slack=0):
     """Evaluate how well VCF-free discovery captures known DNM regions.
 
     For each known de novo event (from ``--dnm-regions``), determines
     whether it was nominated by the discovery pipeline and collects
-    quantitative k-mer and SV-signal evidence from the overlapping
-    discovery region(s).
+    quantitative k-mer and SV-signal evidence from the discovery
+    region(s) overlapping it or within *slack* bp of it.  The slack
+    matters for deletions: their breakpoint regions flank the deleted
+    interval rather than overlap it, and curated breakpoints can be off
+    by a few bases.
 
     The evaluation provides a simple genotype-like assessment per region:
 
-    - **DETECTED**: ≥1 discovery region overlaps the curated locus with
+    - **DETECTED**: ≥1 discovery region matches the curated locus with
       informative reads carrying proband-unique k-mers.
-    - **NOT_DETECTED**: No overlapping discovery region found.
+    - **NOT_DETECTED**: No matching discovery region found.
 
     For detected regions, a *k-mer signal score* summarises evidence
     strength as ``unique_kmers / region_size_bp``.  Higher density
@@ -1743,6 +1747,8 @@ def _evaluate_dnm_regions(discovery_regions, region_detail, dnm_regions):
             tuples, as returned by :func:`_load_dnm_regions`.  *pos* is
             1-based; each event covers *size* bp from *pos* (1 bp when
             the size is unknown).
+        slack: How far (bp) outside an event a region may lie and still
+            count toward it (the pipeline uses ``--cluster-distance``).
 
     Returns:
         List of dicts, one per known event, with keys:
@@ -1774,14 +1780,14 @@ def _evaluate_dnm_regions(discovery_regions, region_detail, dnm_regions):
         dnm_start = pos - 1
         dnm_end = dnm_start + (size if size else 1)  # point if no size
 
-        # Find overlapping discovery regions
+        # Find discovery regions overlapping the event or within slack
         matches = []
         for dr_key in discovery_regions:
             dr_chrom, dr_start, dr_end = dr_key
             if dr_chrom != chrom:
                 continue
-            # Overlap check (both 0-based half-open)
-            if dr_start < dnm_end and dnm_start < dr_end:
+            # Both 0-based half-open; a gap shorter than slack counts
+            if dr_start < dnm_end + slack and dnm_start - slack < dr_end:
                 matches.append(dr_key)
 
         detected = len(matches) > 0
@@ -2009,6 +2015,11 @@ def _write_discovery_summary(summary_path, regions, region_reads,
             f"  Detected by discovery:       {n_detected:>8}"
             f" / {n_total} ({pct:.1f}%)"
         )
+        slack = metrics.get("dnm_evaluation", {}).get("slack_bp")
+        if slack is not None:
+            lines.append(
+                f"  Regions counted within:      {slack:>8} bp of an event"
+            )
         lines.append("")
         lines.append(
             f"  {'Locus':<20s} {'Event':>25s} {'Size':>8s}"
@@ -2506,6 +2517,7 @@ def run_discovery_pipeline(args):
     if dnm_regions:
         dnm_evaluation = _evaluate_dnm_regions(
             regions, metrics["regions"], dnm_regions,
+            slack=args.cluster_distance,
         )
         n_dnm_detected = sum(1 for e in dnm_evaluation if e["detected"])
         logger.info(
@@ -2514,6 +2526,7 @@ def run_discovery_pipeline(args):
         )
         metrics["dnm_evaluation"] = {
             "source": os.path.basename(dnm_regions_path),
+            "slack_bp": args.cluster_distance,
             "total_loci": len(dnm_evaluation),
             "detected": n_dnm_detected,
             "detection_rate": n_dnm_detected / len(dnm_evaluation),
