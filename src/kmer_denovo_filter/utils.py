@@ -309,7 +309,7 @@ def _validate_inputs(args):
             f"--kmer-size should be odd for canonical k-mer symmetry, "
             f"got {args.kmer_size}"
         )
-    if args.min_baseq < 0:
+    if args.min_baseq is not None and args.min_baseq < 0:
         errors.append(
             f"--min-baseq must be >= 0, got {args.min_baseq}"
         )
@@ -331,10 +331,23 @@ def _validate_inputs(args):
                 f"Reference Jellyfish index (--ref-jf): file not found: "
                 f"{ref_jf}"
             )
+        dnm_regions = getattr(args, 'dnm_regions', None)
+        if dnm_regions is not None and not os.path.isfile(dnm_regions):
+            errors.append(
+                f"Known de novo events (--dnm-regions): file not found: "
+                f"{dnm_regions}"
+            )
         min_child_count = getattr(args, 'min_child_count', 3)
         if min_child_count < 1:
             errors.append(
                 f"--min-child-count must be >= 1, got {min_child_count}"
+            )
+        # 0 would count reads with no proband-unique k-mers as informative
+        min_dk_per_read = getattr(args, 'min_distinct_kmers_per_read', None)
+        if min_dk_per_read is not None and min_dk_per_read < 1:
+            errors.append(
+                f"--min-distinct-kmers-per-read must be >= 1, "
+                f"got {min_dk_per_read}"
             )
 
     # VCF-mode-specific validation

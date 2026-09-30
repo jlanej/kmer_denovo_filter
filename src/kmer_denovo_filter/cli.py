@@ -29,7 +29,9 @@ def _add_shared_args(parser):
     )
     parser.add_argument(
         "--min-baseq", type=int, default=20,
-        help="Minimum base quality for read k-mers (default: 20)",
+        help="Minimum base quality for read k-mers in kmer-denovo "
+             "(default: 20). Not used by kmer-discovery, which counts "
+             "k-mers from all bases.",
     )
     parser.add_argument(
         "--threads", "-t", type=int, default=4,
@@ -161,6 +163,9 @@ def parse_discovery_args(argv=None):
         description="VCF-free de novo k-mer discovery pipeline",
     )
     _add_shared_args(parser)
+    # Discovery mode has no base-quality filter; None records that the
+    # flag was not given, so discovery_main can warn when it is.
+    parser.set_defaults(min_baseq=None)
     parser.add_argument(
         "--out-prefix", required=True,
         help="Output prefix for discovery mode files "
@@ -183,6 +188,14 @@ def parse_discovery_args(argv=None):
         help="Path to a VCF-mode summary.txt for candidate comparison. "
              "High-quality de novos (DKA_DKT > 0.25, "
              "DKA > 10) are checked against discovered regions.",
+    )
+    parser.add_argument(
+        "--dnm-regions", default=None, metavar="TSV",
+        help="Known de novo events to check the discovered regions "
+             "against: a tab-separated file with columns chrom, 1-based "
+             "pos, size in bp ('.' if unknown) and event type. Adds a "
+             "per-event detection table to the metrics JSON, summary and "
+             "report. See examples/HG002_trio/sulovari2023_dnm_regions.tsv.",
     )
     parser.add_argument(
         "--cluster-distance", type=int, default=500,
@@ -300,6 +313,14 @@ def parse_args(argv=None):
              "DKA > 10) are checked against discovered regions.",
     )
     parser.add_argument(
+        "--dnm-regions", default=None, metavar="TSV",
+        help="Known de novo events to check the discovered regions "
+             "against in discovery mode: a tab-separated file with columns "
+             "chrom, 1-based pos, size in bp ('.' if unknown) and event "
+             "type. Adds a per-event detection table to the metrics JSON, "
+             "summary and report.",
+    )
+    parser.add_argument(
         "--cluster-distance", type=int, default=500,
         help="Maximum gap (bp) for merging adjacent regions in discovery "
              "mode (default: 500)",
@@ -402,6 +423,10 @@ def discovery_main(argv=None):
     from kmer_denovo_filter.discovery.pipeline import run_discovery_pipeline
 
     args = parse_discovery_args(argv)
+    if args.min_baseq is not None:
+        print("warning: --min-baseq has no effect in kmer-discovery; "
+              "k-mers are counted from all bases",
+              file=sys.stderr)
     run_discovery_pipeline(args)
 
 

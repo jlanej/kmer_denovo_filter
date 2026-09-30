@@ -32,7 +32,6 @@ from kmer_denovo_filter.vcf.pipeline import (  # noqa: F401
 
 # Re-export everything from the Discovery sub-package
 from kmer_denovo_filter.discovery.pipeline import (  # noqa: F401
-    SULOVARI_DNM_REGIONS,
     _anchor_and_cluster,
     _annotate_and_link_from_metadata,
     _classify_regions,
@@ -41,6 +40,7 @@ from kmer_denovo_filter.discovery.pipeline import (  # noqa: F401
     _evaluate_dnm_regions,
     _extract_child_kmers_discovery,
     _filter_parents_discovery,
+    _load_dnm_regions,
     _parse_candidate_summary,
     _subtract_reference_kmers,
     _write_bed,

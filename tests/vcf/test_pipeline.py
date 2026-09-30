@@ -2088,7 +2088,7 @@ class TestModuleSeparation:
         assert callable(pipeline.run_discovery_pipeline)
         assert callable(pipeline._anchor_and_cluster)
         assert callable(pipeline._parse_candidate_summary)
-        assert hasattr(pipeline, "SULOVARI_DNM_REGIONS")
+        assert callable(pipeline._load_dnm_regions)
         # Shared
         assert callable(pipeline._validate_inputs)
         assert callable(pipeline._check_tool)

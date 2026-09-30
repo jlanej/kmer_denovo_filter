@@ -56,7 +56,7 @@ Candidate Comparison (DKA_DKT > 0.25, DKA > 10)
   chr11:55003995 T>C                21    0.4565              chr11:55003557-55004234
   chr11:55008577 C>T                13    0.3824              chr11:55008334-55008814
 
-Curated DNM Region Evaluation (Sulovari et al. 2023)
+Curated DNM Region Evaluation (sulovari2023_dnm_regions.tsv)
 --------------------------------------------------------------------------------
   Curated DNM loci:                   7
   Detected by discovery:              5 / 7 (71.4%)
