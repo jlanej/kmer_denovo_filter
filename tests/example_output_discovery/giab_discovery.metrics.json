@@ -26,6 +26,7 @@
       "unmapped_mates": 0,
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "SMALL"
     },
     {
@@ -41,6 +42,7 @@
       "unmapped_mates": 0,
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "SMALL"
     },
     {
@@ -56,6 +58,7 @@
       "unmapped_mates": 0,
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "SMALL"
     },
     {
@@ -71,6 +74,7 @@
       "unmapped_mates": 0,
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "SMALL"
     },
     {
@@ -86,6 +90,7 @@
       "unmapped_mates": 0,
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "SMALL"
     },
     {
@@ -101,6 +106,7 @@
       "unmapped_mates": 0,
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "SMALL"
     },
     {
@@ -116,6 +122,7 @@
       "unmapped_mates": 0,
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "SMALL"
     },
     {
@@ -131,6 +138,7 @@
       "unmapped_mates": 0,
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "SMALL"
     },
     {
@@ -146,6 +154,7 @@
       "unmapped_mates": 1,
       "breakpoint_reads": 6,
       "large_indel_reads": 3,
+      "sv_type": "DEL",
       "class": "SV"
     },
     {
@@ -161,6 +170,7 @@
       "unmapped_mates": 0,
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "SMALL"
     },
     {
@@ -176,6 +186,7 @@
       "unmapped_mates": 0,
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "SMALL"
     },
     {
@@ -191,6 +202,7 @@
       "unmapped_mates": 1,
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "AMBIGUOUS"
     },
     {
@@ -206,6 +218,7 @@
       "unmapped_mates": 0,
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "SMALL"
     },
     {
@@ -221,6 +234,7 @@
       "unmapped_mates": 0,
       "breakpoint_reads": 3,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "SV"
     },
     {
@@ -236,6 +250,7 @@
       "unmapped_mates": 4,
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
+      "sv_type": "DEL",
       "class": "SV"
     },
     {
@@ -251,6 +266,7 @@
       "unmapped_mates": 1,
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "AMBIGUOUS"
     },
     {
@@ -266,6 +282,7 @@
       "unmapped_mates": 1,
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "AMBIGUOUS"
     },
     {
@@ -281,6 +298,7 @@
       "unmapped_mates": 4,
       "breakpoint_reads": 7,
       "large_indel_reads": 0,
+      "sv_type": "DEL",
       "class": "SV"
     },
     {
@@ -296,6 +314,7 @@
       "unmapped_mates": 0,
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "SMALL"
     },
     {
@@ -311,6 +330,7 @@
       "unmapped_mates": 0,
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "SMALL"
     },
     {
@@ -326,6 +346,7 @@
       "unmapped_mates": 0,
       "breakpoint_reads": 5,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "SV"
     }
   ],

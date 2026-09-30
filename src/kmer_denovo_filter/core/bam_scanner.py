@@ -14,6 +14,7 @@ No function in this module accepts an ``argparse.Namespace`` object.
 
 import collections
 import logging
+import re
 
 import pysam
 
@@ -117,16 +118,62 @@ def _collect_kmer_ref_positions(read, kmer_hit_indices, kmer_size):
     return cov
 
 
-def _infer_sv_type(region_a, region_b):
-    """Infer SV type from two linked regions.
+_CIGAR_OPS = {op: code for code, op in enumerate("MIDNSHP=X")}
 
-    Returns one of: INTRA (same chromosome) or BND (translocation).
-    Distinguishing DEL/DUP/INV would require SA tag strand information
-    which is not carried in the region data structure.
+
+def _parse_cigar(cigar):
+    """Parse a CIGAR string into (op, length) tuples, like cigartuples."""
+    return [
+        (_CIGAR_OPS[op], int(length))
+        for length, op in re.findall(r"(\d+)([MIDNSHP=X])", cigar)
+    ]
+
+
+def _clip_side(cigartuples):
+    """Return which end of an alignment faces a breakpoint.
+
+    ``"+"`` when the alignment is clipped (soft or hard) more on its
+    right, so the breakpoint follows it on the reference; ``"-"`` when
+    more on its left; ``None`` when unclipped or equally clipped.  CIGARs
+    are in reference orientation, so this holds on either strand.
+    """
+    if not cigartuples:
+        return None
+    left = right = 0
+    for op, length in cigartuples:
+        if op not in (4, 5):
+            break
+        left += length
+    for op, length in reversed(cigartuples):
+        if op not in (4, 5):
+            break
+        right += length
+    if right > left:
+        return "+"
+    if left > right:
+        return "-"
+    return None
+
+
+_SV_TYPE_BY_STRANDS = {
+    ("+", "-"): "DEL", ("-", "+"): "DUP",
+    ("+", "+"): "INV", ("-", "-"): "INV",
+}
+
+
+def _infer_sv_type(region_a, region_b, strands=None):
+    """Infer the SV type joining two regions (or two breakends in one).
+
+    *strands* is the breakpoint orientation at (region_a, region_b), with
+    region_a the earlier one: ``"+"`` when the sequence joined at the
+    breakpoint lies left of it, ``"-"`` when it lies right of it.  Returns
+    ``BND`` across chromosomes; on one chromosome ``DEL`` for (+, -),
+    ``DUP`` for (-, +), ``INV`` for (+, +) or (-, -), and ``INTRA`` when
+    the orientation is unknown.
     """
     if region_a[0] != region_b[0]:
         return "BND"
-    return "INTRA"
+    return _SV_TYPE_BY_STRANDS.get(strands, "INTRA")
 
 
 # ---------------------------------------------------------------------------
@@ -384,15 +431,21 @@ def _process_informative_read(read, unique_in_read, kmer_hit_indices,
         clip_positions.append(read.reference_start)
     if sc_right >= _SV_MIN_CLIP:
         clip_positions.append(read.reference_end)
-    # A discordant pair's mate position can link two breakpoint regions;
-    # its mapping quality is known only when the MQ tag is present.
+    # A discordant pair's mate position and strand can link two breakpoint
+    # regions; its mapping quality is known only when the MQ tag is present.
     mate = None
     if (read.is_paired and not read.mate_is_unmapped
             and not read.is_proper_pair):
         mate = (
             read.next_reference_name, read.next_reference_start,
             read.get_tag("MQ") if read.has_tag("MQ") else None,
+            read.mate_is_reverse,
         )
+    # The longest CIGAR insertion or deletion of at least _SV_MIN_INDEL bp
+    large_indel, longest = None, 0
+    for op, length in read.cigartuples or ():
+        if op in (1, 2) and length >= _SV_MIN_INDEL and length > longest:
+            large_indel, longest = ("INS" if op == 1 else "DEL"), length
     read_sv_meta[dedup_key] = {
         "has_sa": read.has_tag("SA"),
         "sa_str": read.get_tag("SA") if (
@@ -406,11 +459,11 @@ def _process_informative_read(read, unique_in_read, kmer_hit_indices,
         "max_clip": max(sc_left, sc_right),
         "mapq": read.mapping_quality,
         "pos": (chrom, read.reference_start),
+        "end": read.reference_end,
+        "is_reverse": read.is_reverse,
+        "clip_side": _clip_side(read.cigartuples),
         "clip_positions": clip_positions,
-        "large_indel": any(
-            op in (1, 2) and length >= _SV_MIN_INDEL  # CIGAR I / D
-            for op, length in read.cigartuples or ()
-        ),
+        "large_indel": large_indel,  # "DEL", "INS" or None
         "mate": mate,
     }
     return 0

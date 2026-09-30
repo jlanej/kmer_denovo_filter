@@ -111,13 +111,15 @@ from Sulovari et al. 2023 (PMC10006329).  5 of the 7 are detected:
 
 **Observations:**
 - The chr17 107 bp deletion is `SV` from both kinds of breakpoint evidence:
-  three reads carry `107D` in their CIGAR and six are soft-clipped at one
-  breakpoint.
+  three reads carry `107D` in their CIGAR, which also types the region
+  `DEL`, and six are soft-clipped at one breakpoint.
 - The chr7 TRB locus 10.6 kb deletion is captured by 3 separate discovery
   regions, the expected breakpoint pattern for a large deletion. Two
   discordant pairs join its breakpoints, which is the one link in
-  `giab_discovery.sv.bedpe` (the test BAMs are aligned with novoalign and
-  carry no SA tags, so every link must come from mates).
+  `giab_discovery.sv.bedpe`: a forward read at the left breakpoint and a
+  reverse read at the right one give orientation `+ -`, a `DEL` (the test
+  BAMs are aligned with novoalign and carry no SA tags, so every link must
+  come from mates).
 - The chr18 34 bp event (DKU=0, inherited in VCF mode) still shows 39
   proband-unique k-mers in discovery mode, illustrating that k-mer-based
   discovery can surface variants missed by VCF-guided annotation.
