@@ -10,7 +10,8 @@
   in [`examples/sv_demo`](../examples/sv_demo/). The trio has a deletion, a
   tandem duplication, an inversion, a translocation, two insertions and an
   SNV. The test checks each event's class, type and BEDPE link, and compares
-  the output with the committed expected files.
+  the output with the committed expected files. When `bwa` is installed, as
+  in CI, it repeats the checks on the same reads aligned with BWA-MEM.
 - **helpers.py** – Shared test helper functions for creating synthetic BAM, VCF, and FASTA data.
 - **test_example_output.py** – Regression tests that fail when committed example
   output changes (metrics, summary, VCF annotations). Shows a unified diff on

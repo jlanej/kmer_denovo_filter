@@ -234,7 +234,7 @@
       "unmapped_mates": 0,
       "breakpoint_reads": 3,
       "large_indel_reads": 0,
-      "sv_type": ".",
+      "sv_type": "INS",
       "class": "SV"
     },
     {
@@ -346,7 +346,7 @@
       "unmapped_mates": 0,
       "breakpoint_reads": 5,
       "large_indel_reads": 0,
-      "sv_type": ".",
+      "sv_type": "INS",
       "class": "SV"
     }
   ],

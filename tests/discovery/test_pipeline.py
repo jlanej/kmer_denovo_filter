@@ -1332,20 +1332,17 @@ class TestDiscoverySV:
         both informative is still one molecule: one split read, one
         unmapped mate or discordant pair, so not SV on its own."""
         region = ("chr1", 1000, 1600)
-        flags = {
-            "has_sa": True, "is_paired": True,
-            "is_proper_pair": False, "mate_is_unmapped": mate_is_unmapped,
-        }
+        flags = {"proper": False, "mate_unmapped": mate_is_unmapped}
         read_sv_meta = {
-            ("frag1", False): {
-                **flags, "sa_str": "chr1,1400,+,60S90M,60,0;",
-                "max_clip": 90,
-            },
-            ("frag1", True): {**flags, "sa_str": None, "max_clip": 60},
+            ("frag1", False): _sv_meta(
+                ("chr1", 1100), sa="chr1,1400,+,60S90M,60,0;", max_clip=90,
+                **flags),
+            ("frag1", True): _sv_meta(("chr1", 1399), max_clip=60, **flags),
         }
+        read_sv_meta["frag1", True]["has_sa"] = True
 
         annotations, links = _annotate_and_link_from_metadata(
-            [region], {region: {"frag1"}}, read_sv_meta,
+            [region], read_sv_meta,
         )
         _classify_regions([region], annotations, links)
 
@@ -1711,33 +1708,27 @@ class TestJellyfishBatchScanMemory:
 
 def _sv_meta(pos, mapq=60, clips=(), large_indel=None, mate=None, sa=None,
              proper=True, mate_unmapped=False, max_clip=0, reverse=False,
-             clip_side=None):
+             clip_side=None, qspan=(0, 150), end=None):
     """Per-read SV metadata as recorded by _process_informative_read.
 
-    *mate* is (chrom, pos, MQ or None, mate is reverse).
+    *mate* is (chrom, pos, MQ or None, mate is reverse).  *clips* are
+    (position, side) pairs, or positions of clips on the right ("+").
     """
     return {
         "has_sa": sa is not None, "sa_str": sa, "is_paired": True,
         "is_proper_pair": proper, "mate_is_unmapped": mate_unmapped,
         "max_clip": max_clip, "mapq": mapq, "pos": pos,
-        "end": pos[1] + 150, "is_reverse": reverse, "clip_side": clip_side,
-        "clip_positions": list(clips), "large_indel": large_indel,
-        "mate": mate,
+        "end": end or pos[1] + 150, "is_reverse": reverse,
+        "clip_side": clip_side, "qspan": qspan,
+        "clips": [c if isinstance(c, tuple) else (c, "+") for c in clips],
+        "large_indel": large_indel, "mate": mate,
     }
 
 
 def _annotate_regions(regions, read_sv_meta, link_slack=0):
     """Annotate, link and classify *regions* from per-read metadata."""
-    region_reads = collections.defaultdict(set)
-    for (qname, _is_supp), meta in read_sv_meta.items():
-        if "pos" not in meta:
-            continue
-        chrom, pos = meta["pos"]
-        for region in regions:
-            if region[0] == chrom and region[1] <= pos < region[2]:
-                region_reads[region].add(qname)
     annotations, links = _annotate_and_link_from_metadata(
-        regions, region_reads, read_sv_meta, link_slack=link_slack,
+        regions, read_sv_meta, link_slack=link_slack,
     )
     _classify_regions(regions, annotations, links)
     return annotations, links
@@ -1813,6 +1804,32 @@ class TestSVEvidence:
         assert annotations[self.A]["sv_type"] == "DEL"
         assert annotations[self.A]["class"] == "SV"
         assert annotations[self.B]["discordant_pairs"] == 2
+
+    @pytest.mark.parametrize("mapq, expected", [(60, "SV"), (5, "SMALL")])
+    def test_low_mapq_alignments_are_not_evidence(self, mapq, expected):
+        """Reads of new sequence that resembles a repeat (a new Alu copy,
+        say) align to the repeat's reference copies with low MAPQ; their
+        clips and pairs must not make an SV there."""
+        annotations, _ = self._run({
+            (f"m{i}", False): _sv_meta(
+                ("chr1", 1100 + i), mapq=mapq, proper=False,
+                clips=[1250], mate=("chr2", 9000, 0, False))
+            for i in range(3)
+        })
+        assert annotations[self.A]["class"] == expected
+
+    @pytest.mark.parametrize("mate_mapq, count", [
+        (None, 2), (60, 2), (3, 0),
+    ])
+    def test_placed_unmapped_reads_need_a_confident_mate(self, mate_mapq,
+                                                         count):
+        annotations, _ = self._run({
+            ("m1", False): _sv_meta(("chr1", 1050)),
+            **{(f"u{i}", False): {"placed_unmapped": ("chr1", 1100 + i),
+                                  "mate_mapq": mate_mapq}
+               for i in range(2)},
+        })
+        assert annotations[self.A]["unmapped_mates"] == count
 
     @pytest.mark.parametrize("n_molecules, expected", [
         (1, "AMBIGUOUS"), (2, "SV"),
@@ -1900,9 +1917,10 @@ class TestSVEvidence:
                 sv_meta, kmer_cov, read_cov,
             )
 
-        assert meta[("clipped", False)]["clip_positions"] == [1000, 1100]
+        assert meta[("clipped", False)]["clips"] == [(1000, "-"), (1100, "+")]
+        assert meta[("clipped", False)]["qspan"] == (30, 130)
         assert meta[("clipped", False)]["max_clip"] == 30
-        assert meta[("short_clip", False)]["clip_positions"] == []
+        assert meta[("short_clip", False)]["clips"] == []
         assert meta[("deletion", False)]["large_indel"] == "DEL"
         assert meta[("clipped", False)]["large_indel"] is None
         assert meta[("clipped", False)]["clip_side"] == "-"  # 30S > 25S
@@ -1910,7 +1928,9 @@ class TestSVEvidence:
         assert meta[("discordant", False)]["mate"] == ("chr2", 500, 37, False)
         assert meta[("discordant", False)]["is_reverse"] is False
         assert meta[("clipped", False)]["mate"] is None  # proper pair
-        assert meta[("placed", False)] == {"placed_unmapped": ("chr1", 1234)}
+        assert meta[("placed", False)] == {
+            "placed_unmapped": ("chr1", 1234), "mate_mapq": None,
+        }
 
 
 class TestSVTypes:
@@ -2046,6 +2066,49 @@ class TestSVTypes:
         assert annotations[self.A]["discordant_pairs"] == 2
         assert annotations[self.A]["class"] == "SV"
         assert annotations[self.A]["sv_type"] == sv_type
+
+    @pytest.mark.parametrize("sa, own_end, qspan, sv_type", [
+        # 55 read bases between the parts, no reference: an insertion
+        ("chr1,1161,+,115S35M,60,0;", 1160, (0, 60), "INS"),
+        # ...though its parts may overlap by bases matching by chance
+        ("chr1,1160,+,113S37M,60,0;", 1162, (0, 62), "INS"),
+        # 50 bp of reference between them, no read: a deletion
+        ("chr1,1211,+,60S90M,60,0;", 1160, (0, 60), "DEL"),
+        # The read runs 50 bp past where it continues: a duplication
+        ("chr1,1201,+,100S50M,60,0;", 1250, (0, 100), "DUP"),
+    ])
+    def test_split_read_within_one_region(self, sa, own_end, qspan, sv_type):
+        annotations, links = self._links(self._with_anchor(s1=_sv_meta(
+            ("chr1", 1100), clip_side="+", sa=sa, qspan=qspan, end=own_end)))
+        assert links == []
+        assert annotations[self.A]["sv_type"] == sv_type
+
+    @pytest.mark.parametrize("right, left, sv_type", [
+        (1212, 1200, "INS"),   # after a 12 bp target-site duplication
+        (1200, 1200, "INS"),
+        (1150, 1200, "."),     # 50 bp apart: not one insertion point
+        (None, 1200, "."),     # clipped from one side only
+    ])
+    def test_reads_clipped_from_both_sides(self, right, left, sv_type):
+        metas = {f"l{i}": _sv_meta(("chr1", left), clips=[(left, "-")])
+                 for i in range(2)}
+        if right is not None:
+            metas.update({
+                f"r{i}": _sv_meta(("chr1", right - 150), clips=[(right, "+")])
+                for i in range(2)
+            })
+        annotations, _ = self._links(self._with_anchor(**metas))
+        assert annotations[self.A]["sv_type"] == sv_type
+
+    def test_other_evidence_types_a_clipped_region(self):
+        annotations, _ = self._links(self._with_anchor(
+            l1=_sv_meta(("chr1", 1200), clips=[(1200, "-")]),
+            l2=_sv_meta(("chr1", 1200), clips=[(1200, "-")]),
+            r1=_sv_meta(("chr1", 1050), clips=[(1200, "+")]),
+            r2=_sv_meta(("chr1", 1050), clips=[(1200, "+")],
+                        large_indel="DEL"),
+        ))
+        assert annotations[self.A]["sv_type"] == "DEL"
 
     @pytest.mark.parametrize("kind", ["DEL", "INS"])
     def test_cigar_indel_types_its_region(self, kind):

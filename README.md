@@ -193,7 +193,9 @@ links an SV's breakpoints and gives its type. See
 [Structural Variant Calling](docs/sv_calling.md) for how this works.
 [`examples/sv_demo`](examples/sv_demo/) has a simulated trio with a
 deletion, duplication, inversion, translocation and insertions that runs
-in seconds.
+in seconds. [`scripts/sv_benchmark.py`](scripts/sv_benchmark.py)
+benchmarks SV calls on a trio simulated from real GRCh38 sequence, aligned
+with BWA-MEM.
 
 To skip the reference indexing step on subsequent runs, pass a precomputed
 Jellyfish index:
@@ -517,7 +519,7 @@ generate the file:
 | class | SV classification: `SV`, `AMBIGUOUS`, or `SMALL` (see below) |
 | breakpoint_reads | Most molecules soft-clipped (by at least 20 bp) within 5 bp of one breakpoint; 0 unless at least two |
 | large_indel_reads | Molecules with a CIGAR insertion or deletion of at least 50 bp |
-| sv_type | Majority SV type among the region's molecules: `DEL`, `DUP` or `INV` from breakpoint orientation (see the BEDPE), `INS` or `DEL` from CIGAR indels, `BND` for a link to another chromosome, or `.` when undetermined or tied |
+| sv_type | Majority SV type among the region's molecules: `DEL`, `DUP` or `INV` from breakpoint orientation (see the BEDPE); `INS` or `DEL` from CIGAR indels; `INS` from split reads with more read than reference between their parts; `BND` for a link to another chromosome. With no votes, `INS` when at least two molecules are clipped from each side at one point, otherwise `.`; also `.` on a tie |
 
 Evidence columns count molecules (read names), each at most once per
 region. A region is `SV` when at least two molecules show one kind of
@@ -526,8 +528,11 @@ breakpoint, indels of 50 bp or more, or links to one other region in the
 BEDPE. It is `SMALL` when it has none, and `AMBIGUOUS` when only one
 molecule does. Clips mark a breakpoint without measuring the event, so
 an `SV` region can hold an insertion shorter than 50 bp. Only informative
-reads are counted. See [Structural Variant Calling](docs/sv_calling.md) for
-the details and worked examples.
+reads count, and only their alignments with MAPQ ≥ 20. Reads of new
+sequence resembling a repeat, such as a new Alu copy, align to its
+reference copies with low MAPQ and must not make an SV there. See
+[Structural Variant Calling](docs/sv_calling.md) for the details, worked
+examples and a benchmark on real human sequence.
 
 #### K-mer coverage bedGraph (`{prefix}.kmer_coverage.bedgraph`)
 

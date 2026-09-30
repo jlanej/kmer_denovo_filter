@@ -13,7 +13,8 @@ calls:
 * an SV type from each breakpoint's orientation.
 
 Two worked examples follow: a simulated trio that runs in seconds, and the
-GIAB HG002 test data. The page ends with the limitations.
+GIAB HG002 test data. Then come a benchmark on real human sequence and
+the limitations.
 
 * [How it works](#how-it-works)
 * [Evidence per region](#evidence-per-region)
@@ -22,6 +23,7 @@ GIAB HG002 test data. The page ends with the limitations.
 * [Breakpoint orientation and SV types](#breakpoint-orientation-and-sv-types)
 * [Demo: a simulated trio](#demo-a-simulated-trio)
 * [Real data: GIAB HG002](#real-data-giab-hg002)
+* [Validation](#validation)
 * [Limitations](#limitations)
 * [Working with the output](#working-with-the-output)
 
@@ -61,14 +63,22 @@ Each evidence column counts **molecules** (read names). A read pair or a
 split read counts at most once per region, even when several of its
 alignments are informative.
 
+Only alignments placed with a mapping quality (MAPQ) of at least 20 count,
+the same bar that linking uses. A placed unmapped read is the exception:
+it counts unless the `MQ` tag gives its mate a MAPQ below 20. The reason
+is sequence missing from the reference that resembles a repeat, such as a
+new Alu copy. Its reads carry proband-unique k-mers but align to the
+repeat's reference copies with MAPQ near 0, and would otherwise pile up
+false evidence there. Their regions are still reported, as `SMALL`.
+
 | Column | Molecules with… | Counted in |
 |---|---|---|
-| `split_reads` | a split alignment (an SA tag) | every region holding one of the molecule's informative alignments |
-| `discordant_pairs` | a mapped mate, not properly paired | every region holding one of the molecule's informative alignments |
-| `unmapped_mates` | an unmapped mate; or an unmapped informative read that the aligner placed at its mate's position | every region holding one of the molecule's informative alignments; for a placed read, the region at the placement |
+| `split_reads` | a split alignment (an SA tag) | every region holding one of the molecule's informative alignments with MAPQ ≥ 20 |
+| `discordant_pairs` | a mapped mate, not properly paired | every region holding one of the molecule's informative alignments with MAPQ ≥ 20 |
+| `unmapped_mates` | an unmapped mate; or an unmapped informative read that the aligner placed at its mate's position | every region holding one of the molecule's informative alignments with MAPQ ≥ 20; for a placed read, the region at the placement |
 | `breakpoint_reads` | a soft clip of at least 20 bp. This is the largest group clipped at positions within 5 bp of one another, and 0 when fewer than two, because a single long clip is often an adapter or a low-quality tail | the region of the clipped alignment |
 | `large_indel_reads` | a CIGAR insertion or deletion of at least 50 bp | the region of the alignment |
-| `max_clip_len` | (not a count) the longest soft clip | the region of the alignment |
+| `max_clip_len` | (not a count) the longest soft clip, at any MAPQ | the region of the alignment |
 
 Only informative reads count. A discordant pair whose two reads both lie
 away from the junction carries no new k-mers, so it is never seen. The
@@ -162,6 +172,14 @@ comes first. The ordered pair of sides gives the type:
 | any, on two chromosomes | `BND` | A translocation, or another junction between chromosomes |
 | unknown, on one chromosome | `INTRA` | Links only: the orientation is unknown, or the molecules disagree |
 
+A split read whose two parts lie on one chromosome and strand, one
+clipped on each side, gives `+ -` or `- +`. Before that is called a
+deletion or a duplication, the read between the parts is compared with the
+reference between them. More read than reference makes it an insertion
+(`INS`): a gap of 55 read bases where the parts meet on the reference, for
+example, or overlapping parts with more read between them than they
+overlap.
+
 ### What each type looks like
 
 Capital letters are reference segments, and lowercase is a segment
@@ -191,13 +209,30 @@ BND  reference  chr1: AAAAAAAAAA BBBBBBBBBB     chr2: CCCCCCCCCC DDDDDDDDDD
                                                 chr1 comes first                        -> (-, +)
 ```
 
-**Insertions** have no second breakend. An aligner can place a short
-insertion in the CIGAR, such as `45M55I50M`. A read with a CIGAR insertion
-or deletion of at least 50 bp votes `INS` or `DEL` for its region. Reads
-reaching into a longer insertion are clipped at the insertion point from
-both sides, and reads entirely inside it are unmapped. That gives
-`breakpoint_reads` and `unmapped_mates` but no type (see
-[Limitations](#limitations)).
+**Insertions** have no second breakend. They show up in three ways:
+
+* **In the CIGAR**, such as `45M55I50M`. A CIGAR insertion or deletion of
+  at least 50 bp votes `INS` or `DEL` for its region.
+* **As a split read** around an insertion of a few tens of bp. BWA-MEM
+  does this rather than open a long gap. The parts are collinear with
+  extra read between them, so they vote `INS` (see above).
+* **As reads clipped from both sides**, when the insertion is longer than
+  the reads or its sequence aligns nowhere confidently (a new mobile
+  element, say). Reads entirely inside it are unmapped and add
+  `unmapped_mates`. A region with no other type evidence is typed `INS`
+  when at least two molecules are clipped on each side at one point:
+
+  ```
+  reference   AAAAAAAAAAAA|CCCCCCCCCCCC
+  child       AAAAAAAAAAAA nnnnnnnnnnnnnnnn CCCCCCCCCCCC      n: inserted sequence
+  reads          AAAAAAAAA~~~~~~                             clipped on the right (+)
+                                      ~~~~~~CCCCCCCCC         clipped on the left (-), same point
+  ```
+
+  The reads clipped on their right may end up to 50 bp after those
+  clipped on their left start. That allows for a target-site duplication,
+  where mobile elements repeat 7–20 bp around the insertion, and for
+  bases that match the insertion by chance.
 
 ### Voting
 
@@ -213,8 +248,9 @@ each region it touches:
 * **Region type (BED column 13).** This is the majority over the region's
   molecules. Votes come from its links, from junctions that lie wholly
   inside the region (such as a deletion shorter than `--cluster-distance`),
-  and from CIGAR indels of at least 50 bp (`DEL` or `INS`). It is `.` when
-  there are no votes or they tie.
+  and from CIGAR indels of at least 50 bp (`DEL` or `INS`). With no
+  votes, it is `INS` when reads are clipped from both sides at one point;
+  otherwise, and on a tie, it is `.`.
 * **No-vote case.** A forward-reverse pair with both reads in one region
   does not vote. Such a pair is flagged discordant either because its
   insert is too long (a deletion) or too short (an insertion, such as one
@@ -280,7 +316,10 @@ docker run --rm -v "$PWD:/data" --entrypoint kmer-discovery \
 Both steps take a few seconds. The output is deterministic, and
 [`tests/discovery/test_sv_demo.py`](../tests/discovery/test_sv_demo.py)
 checks it against
-[`examples/sv_demo/expected/`](../examples/sv_demo/expected/).
+[`examples/sv_demo/expected/`](../examples/sv_demo/expected/). Where bwa is
+installed, as in CI, the test also re-aligns the same reads with BWA-MEM
+and checks that every event is still classed, typed and linked the same
+way.
 
 Eleven regions are found: one at each breakpoint position, one at the SNV
 and one at each insertion. The table uses 1-based coordinates. BkptClip is
@@ -298,7 +337,7 @@ and one at each insertion. The table uses 1-based coordinates. BkptClip is
 | SNV | chr2:4,873–5,124 | 10 | 0 | 0 | 0 | 0 | 0 | SMALL | . |
 | 55 bp insertion | chr2:9,859–10,132 | 23 | 0 | 0 | 0 | 12 | 7 | SV | INS |
 | Translocation, chr2 | chr2:14,862–15,141 | 12 | 6 | 6 | 0 | 10 | 0 | SV | BND |
-| 250 bp insertion | chr2:21,867–22,078 | 10 | 0 | 1 | 7 | 9 | 0 | SV | . |
+| 250 bp insertion | chr2:21,867–22,078 | 10 | 0 | 1 | 7 | 9 | 0 | SV | INS |
 
 `sv_demo.sv.bedpe` (0-based, like BED):
 
@@ -334,14 +373,15 @@ How each event is called:
 * **SNV.** Its reads align end to end, so the region is `SMALL`.
 * **55 bp insertion.** Seven molecules span it with a CIGAR insertion,
   which types the region `INS`. Twelve molecules are clipped at the
-  insertion point.
+  insertion point. BWA-MEM splits these reads instead, and the 55 read
+  bases between the parts type the region `INS` all the same.
 * **250 bp insertion.** The insertion is too long for a read to align on
-  both sides of it. Reads are clipped at the insertion point (9 molecules),
-  and reads inside it are unmapped, so 7 molecules have an unmapped mate.
-  The region is `SV` but untyped (`.`):
-  * Clips alone cannot tell an insertion from one side of a translocation.
-  * The one discordant pair is forward-reverse, with an insert 250 bp
-    short. Its reads are in one region, so it does not vote.
+  both sides of it. Reads are clipped at the insertion point from both
+  sides (9 molecules), and reads inside it are unmapped, so 7 molecules
+  have an unmapped mate. No read places the clipped sequence anywhere else,
+  so the two-sided clips type the region `INS`. The one discordant pair
+  there, forward-reverse with an insert 250 bp short, lies within one
+  region and does not vote.
 
 ## Real data: GIAB HG002
 
@@ -360,9 +400,9 @@ pairs.
 | ″ inside the deleted interval | chr7:142,788,519–142,789,264 | 3 | 0 | 1 | 0 | 0 | AMBIGUOUS | . |
 | ″ inside the deleted interval | chr7:142,792,552–142,792,982 | 2 | 0 | 1 | 0 | 0 | AMBIGUOUS | . |
 | ″ right end | chr7:142,796,830–142,797,423 | 14 | 2 | 4 | 7 | 0 | SV | DEL |
-| 43 bp SV-like event at chr5:97,089,276 | chr5:97,089,091–97,089,510 | 22 | 0 | 0 | 3 | 0 | SV | . |
-| 43 bp insertion at chr8:125,785,998 | chr8:125,785,801–125,786,483 | 34 | 0 | 0 | 5 | 0 | SV | . |
-| 34 bp insertion at chr18:62,805,217 | chr18:62,804,895–62,805,439 | 7 | 0 | 0 | 0 | 0 | SMALL | . |
+| 43 bp SV-like event at chr5:97,089,276 | chr5:97,089,091–97,089,510 | 22 | 0 | 0 | 3 | 0 | SV | INS |
+| 43 bp tandem duplication at chr8:125,785,998 | chr8:125,785,801–125,786,483 | 34 | 0 | 0 | 5 | 0 | SV | INS |
+| 34 bp tandem duplication at chr18:62,805,217 | chr18:62,804,895–62,805,439 | 7 | 0 | 0 | 0 | 0 | SMALL | . |
 
 The three patterns:
 
@@ -380,10 +420,80 @@ The three patterns:
   Two reverse reads at the right end have forward mates at the left end
   (`+ -`, an 11 kb insert). Two more regions inside the deleted interval
   each have one unmapped mate, so they are `AMBIGUOUS`.
-* **Insertions shorter than 50 bp.** The 43 bp events on chr5 and chr8 are
-  `SV` from clips at one breakpoint. They are too short to count as
-  `large_indel_reads`, and clips give no type. The 34 bp insertion on chr18
-  has no two molecules clipped at one breakpoint, so it is `SMALL`.
+* **Short tandem duplications.** Sulovari et al. studied tandem-repeat
+  expansions, and the chr8 and chr18 events add an exact copy of the next
+  43 and 34 bp of the reference. The 43 bp events on chr5 and chr8 are
+  `SV` from clips at one breakpoint. The reads are clipped from both sides
+  there, so they are typed `INS`. A tandem duplication is an insertion of
+  a copy, and without split reads nothing shows the inserted bases are a
+  copy. The chr18 event has no two molecules clipped at one breakpoint, so
+  it is `SMALL`.
+
+The same reads re-aligned with BWA-MEM, which writes SA tags, give sharper
+calls:
+
+* 15 molecules (split reads and pairs) link the chr7 breakpoints, instead
+  of 2.
+* 15 split reads type the chr17 deletion.
+* The chr5 and chr8 events come out as `DUP`, which is what they are.
+
+See [Validation](#validation).
+
+## Validation
+
+Two checks go beyond the demo. Both were run on 2026-09-30.
+
+**Real reads, BWA-MEM.** The GIAB trio reads in `tests/data/giab` were
+re-aligned with BWA-MEM 0.7.19 to the GRCh38 sequence around each locus,
+then run through discovery. Unlike the committed novoalign BAMs, these
+carry SA tags:
+
+| Event | novoalign (committed) | BWA-MEM |
+|---|---|---|
+| chr7 10.6 kb deletion | `DEL` at both ends, linked by 2 molecules | `DEL` at both ends, linked by 15 molecules |
+| chr17 107 bp deletion | `DEL` (3 CIGAR deletions) | `DEL` (15 split reads) |
+| chr8 43 bp tandem duplication | `INS` | `DUP` |
+| chr5 43 bp event | `INS` | `DUP` |
+
+**A simulated trio on real sequence.**
+[`scripts/sv_benchmark.py`](../scripts/sv_benchmark.py) builds the trio on
+6 Mb of GRCh38 (chr20:30.5–34.5 Mb and chr21:30–32 Mb), repeats included:
+
+* It places 43 events on the trio's haplotypes.
+* It simulates 2×150 bp reads at 30× per sample, with a 400 ± 80 bp insert
+  and 0.2% random substitution errors.
+* It aligns the reads with BWA-MEM and scores discovery's BED and BEDPE
+  against the truth.
+
+| Events | Found | Class `SV` | Typed right | Linked |
+|---|---|---|---|---|
+| Deletions, 50 bp–10 kb | 10/10 | 10 | 10 | 4/4 from 1 kb, `+ -` |
+| Tandem duplications, 50 bp–10 kb | 6/6 | 6 | 6 | 3/3 from 1 kb, `- +` |
+| Inversions, 0.5–10 kb | 4/4 | 4 | 4 | 3/3 from 1 kb, both junctions |
+| Novel insertions, 50–400 bp | 4/4 | 4 | 4 | – |
+| AluY insertions, 12 bp target-site duplication | 4/4 | 4 | 3 | – |
+| Reciprocal translocation | 1/1 | 1 | 1 | both junctions |
+| Deletion between two Alu copies | 1/1 | 1 | 1 | yes |
+| Mosaic deletion and duplication (25% of reads) | 2/2 | 2 | 2 | 2/2 |
+| De novo SNVs and small indels | 6/6 | – | – | – (all `SMALL`) |
+| Inherited SVs (in a parent) | 0/5 | – | – | – |
+
+None of the 131 other regions is `SV`. They are single reads with chance
+error coincidences, and reads from the inserted AluYs placed on reference
+Alu copies. Before evidence required MAPQ ≥ 20, 8 of them were `SV`,
+and all 8 insertions were typed wrong or not at all. Discovery took about
+99 s on this trio (1.2 M child reads, 4 threads) both before and after
+these changes.
+
+To reproduce the benchmark (it needs a GRCh38 FASTA with a `.fai` index,
+and bwa and samtools):
+
+```bash
+python scripts/sv_benchmark.py prepare --reference GRCh38.fa --outdir bench
+kmer-discovery --child bench/child.bam --mother bench/mother.bam \
+  --father bench/father.bam --ref-fasta bench/ref.fa --out-prefix bench/disc
+python scripts/sv_benchmark.py score --outdir bench --prefix bench/disc
+```
 
 ## Limitations
 
@@ -400,9 +510,19 @@ The three patterns:
 * **Pair orientation assumes forward-reverse (FR) libraries.** This is the
   standard Illumina paired-end layout. Mate-pair (RF) libraries would be
   typed wrongly.
-* **Some insertions are untyped.** Insertions that the aligner leaves out of
-  the CIGAR give `SV` with type `.`. This includes insertions longer than
-  the reads, such as mobile-element insertions.
+* **Evidence needs confident placement.** Only alignments with MAPQ ≥ 20
+  count as SV evidence. An SV whose reads all align ambiguously, in a
+  segmental duplication say, is at most `AMBIGUOUS`. Reads of new sequence
+  that resembles a repeat, such as a new Alu copy, leave `SMALL` regions at
+  the repeat's reference copies.
+* **Insertions clipped from one side stay untyped.** Typing an insertion
+  needs a CIGAR insertion, a split read, or two molecules clipped on each
+  side. At a mobile-element insertion, most reads crossing one junction
+  may be anchored in the element, align with low MAPQ and not count. That
+  leaves the region `SV` but `.`.
+* **Small tandem duplications may be typed `INS`.** Without split reads
+  (with novoalign, for example), nothing shows that the inserted bases
+  copy the adjacent sequence.
 * **Nearby breakpoints share a region.** Breakpoints within
   `--cluster-distance` of each other fall in one region. The SV is typed but
   not linked.
