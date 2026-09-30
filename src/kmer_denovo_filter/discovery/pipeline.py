@@ -1575,24 +1575,32 @@ def _write_bedpe(links, bedpe_path):
 def _classify_regions(regions, region_annotations, sv_links):
     """Assign SV classification to each region.
 
-    - ``SV``: at least two molecules show one kind of evidence in
+    - ``SV``: at least two molecules show one kind of evidence: one of
       ``_SV_EVIDENCE`` (split alignments, discordant pairs, unmapped
       mates, soft clips at one breakpoint, CIGAR indels of 50 bp or
-      more), or the region is linked to another region
-    - ``SMALL``: none of that evidence and not linked
+      more), or links to one other region (over the pair's junctions)
+    - ``SMALL``: none of that evidence and no links
     - ``AMBIGUOUS``: otherwise (evidence from a single molecule)
 
     Updates region_annotations in place with a ``class`` key.
     """
-    linked_regions = set()
+    # Molecules joining each pair of regions, over the pair's junctions
+    pair_reads = collections.defaultdict(set)
     for link in sv_links:
-        linked_regions.add(link["region_a"])
-        linked_regions.add(link["region_b"])
+        pair_reads[link["region_a"], link["region_b"]].update(
+            link["supporting_reads"])
+    linking_reads = collections.Counter()
+    for pair, qnames in pair_reads.items():
+        for region in pair:
+            linking_reads[region] = max(linking_reads[region], len(qnames))
 
     for region_key in regions:
         ann = region_annotations.get(region_key, {})
-        strongest = max(ann.get(name, 0) for name in _SV_EVIDENCE)
-        if strongest >= 2 or region_key in linked_regions:
+        strongest = max(
+            [ann.get(name, 0) for name in _SV_EVIDENCE]
+            + [linking_reads[region_key]]
+        )
+        if strongest >= 2:
             ann["class"] = "SV"
         elif strongest == 0:
             ann["class"] = "SMALL"

@@ -2582,9 +2582,9 @@ _HTML_TEMPLATE = """\
   prior variant knowledge.  The distribution and characteristics of
   discovered regions provide independent confirmation of de novo signal.
   Regions are classed <em>SV</em> when at least two molecules show one
-  kind of structural-variant evidence or the region is linked to another,
-  <em>AMBIGUOUS</em> when only one molecule does, and <em>SMALL</em>
-  otherwise.
+  kind of structural-variant evidence, such as split reads or links to one
+  other region, <em>AMBIGUOUS</em> when only one molecule does, and
+  <em>SMALL</em> otherwise.
 </div>
 
 {% if disc_scatter_div %}

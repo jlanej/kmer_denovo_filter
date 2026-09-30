@@ -521,10 +521,10 @@ generate the file:
 
 Evidence columns count molecules (read names), each at most once per
 region. A region is `SV` when at least two molecules show one kind of
-evidence (split alignments, discordant pairs, unmapped mates, clips at one
-breakpoint, or indels of 50 bp or more), or when it is linked to another
-region in the BEDPE; `SMALL` when it has none; and `AMBIGUOUS` when only
-one molecule does. Clips mark a breakpoint without measuring the event, so
+evidence: split alignments, discordant pairs, unmapped mates, clips at one
+breakpoint, indels of 50 bp or more, or links to one other region in the
+BEDPE. It is `SMALL` when it has none, and `AMBIGUOUS` when only one
+molecule does. Clips mark a breakpoint without measuring the event, so
 an `SV` region can hold an insertion shorter than 50 bp. Only informative
 reads are counted. See [Structural Variant Calling](docs/sv_calling.md) for
 the details and worked examples.

@@ -39,9 +39,9 @@ informative reads: at least --min-distinct-kmers-per-read proband-unique k-mers
 regions: informative alignments within --cluster-distance (500 bp) of each other
   │  (--min-supporting-reads and --min-distinct-kmers are applied here)
   ▼
-evidence per region ──► class: SV / AMBIGUOUS / SMALL
+evidence per region, and links between regions (BEDPE)
   ▼
-links between regions (BEDPE) ──► SV type from breakpoint orientation
+class (SV / AMBIGUOUS / SMALL), and SV type from breakpoint orientation
 ```
 
 A k-mer that spans a junction holds bases from both sides of it, so it is
@@ -79,7 +79,7 @@ everything an SV caller would find at the locus.
 
 | Class | Rule |
 |---|---|
-| `SV` | At least two molecules show one kind of evidence (`split_reads`, `discordant_pairs`, `unmapped_mates`, `breakpoint_reads` or `large_indel_reads` ≥ 2), or the region is linked to another in the BEDPE |
+| `SV` | At least two molecules show one kind of evidence: `split_reads`, `discordant_pairs`, `unmapped_mates`, `breakpoint_reads` or `large_indel_reads` ≥ 2, or at least two molecules on the BEDPE lines joining the region to one other region |
 | `AMBIGUOUS` | Evidence from a single molecule only |
 | `SMALL` | No evidence: the reads align end to end, as for SNVs and small indels |
 
@@ -106,8 +106,13 @@ An SA or mate position within `--cluster-distance` of a region counts as in
 it. Every alignment used for linking needs a mapping quality of at least 20:
 the informative read, the SA entry, and the mate. The mate's MAPQ is checked
 only when the BAM records it in the `MQ` tag. `supporting_reads` counts
-the molecules that show the line's junction. A linked region is always
-`SV`.
+the molecules that show the line's junction.
+
+A link is evidence like any other. Two or more molecules joining the same
+two regions make both `SV`, counted over the pair's lines, so one molecule
+per junction of a balanced event is enough. A link made by a single
+molecule still appears in the BEDPE, but it is single-molecule evidence:
+on its own, it makes its regions `AMBIGUOUS`.
 
 BWA-MEM hard-clips supplementary alignments by default, so they hold only
 their aligned bases. With no junction k-mers they are not informative, and

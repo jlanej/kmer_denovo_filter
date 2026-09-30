@@ -1260,16 +1260,16 @@ class TestDiscoverySV:
             ("chr4", 100, 200): {"split_reads": 0, "discordant_pairs": 0,
                                  "max_clip_len": 0, "unmapped_mates": 2},
         }
-        # Region A is linked to region B
+        # Region A is linked to region B by two molecules
         sv_links = [
             {"region_a": ("chr1", 100, 200), "region_b": ("chr1", 500, 600),
-             "supporting_reads": {"r1"}, "sv_type_hint": "INTRA"},
+             "supporting_reads": {"r1", "r2"}, "sv_type_hint": "INTRA"},
         ]
         _classify_regions(regions, annotations, sv_links)
 
         # Region with >= 2 split reads → SV
         assert annotations[("chr1", 100, 200)]["class"] == "SV"
-        # Region linked via sv_links → SV (even with 0 split reads)
+        # Region linked by two molecules → SV (even with 0 split reads)
         assert annotations[("chr1", 500, 600)]["class"] == "SV"
         # Region with 1 split read but not linked → AMBIGUOUS
         assert annotations[("chr2", 100, 200)]["class"] == "AMBIGUOUS"
@@ -1277,6 +1277,23 @@ class TestDiscoverySV:
         assert annotations[("chr3", 100, 200)]["class"] == "SV"
         # Region with >= 2 unmapped mates → SV
         assert annotations[("chr4", 100, 200)]["class"] == "SV"
+
+    @pytest.mark.parametrize("junction_reads, expected", [
+        ([{"r1"}], "AMBIGUOUS"),
+        ([{"r1", "r2"}], "SV"),
+        ([{"r1"}, {"r2"}], "SV"),  # one molecule per junction
+    ])
+    def test_link_needs_two_molecules(self, junction_reads, expected):
+        """A link is evidence like any other: one molecule is AMBIGUOUS."""
+        regions = [("chr1", 100, 200), ("chr1", 500, 600)]
+        annotations = {r: {"split_reads": 0} for r in regions}
+        sv_links = [
+            {"region_a": regions[0], "region_b": regions[1],
+             "supporting_reads": reads, "sv_type_hint": "INV"}
+            for reads in junction_reads
+        ]
+        _classify_regions(regions, annotations, sv_links)
+        assert [annotations[r]["class"] for r in regions] == [expected] * 2
 
     def test_write_bedpe_format(self, tmpdir):
         """Unit test for _write_bedpe output format."""
@@ -1796,6 +1813,23 @@ class TestSVEvidence:
         assert annotations[self.A]["sv_type"] == "DEL"
         assert annotations[self.A]["class"] == "SV"
         assert annotations[self.B]["discordant_pairs"] == 2
+
+    @pytest.mark.parametrize("n_molecules, expected", [
+        (1, "AMBIGUOUS"), (2, "SV"),
+    ])
+    def test_sa_link_classes_both_regions(self, n_molecules, expected):
+        """B has no evidence of its own; SA tags from A link it."""
+        annotations, links = self._run({
+            ("b1", False): _sv_meta(("chr1", 20050)),
+            **{(f"s{i}", False): _sv_meta(
+                ("chr1", 1100 + i), clip_side="+",
+                sa="chr1,20051,+,90S60M,60,0;")
+               for i in range(n_molecules)},
+        })
+        assert len(links) == 1
+        assert annotations[self.B]["split_reads"] == 0
+        assert annotations[self.A]["class"] == expected
+        assert annotations[self.B]["class"] == expected
 
     @pytest.mark.parametrize("link_slack, linked", [(0, False), (500, True)])
     def test_mate_near_a_region_links_within_slack(self, link_slack, linked):
