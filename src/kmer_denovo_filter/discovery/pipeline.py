@@ -1046,7 +1046,8 @@ def _write_bed(regions, region_reads, region_kmers, bed_path,
         fh.write(
             "#chrom\tstart\tend\treads\tunique_kmers"
             "\tsplit_reads\tdiscordant_pairs"
-            "\tmax_clip_len\tunmapped_mates\tclass\n"
+            "\tmax_clip_len\tunmapped_mates\tclass"
+            "\tbreakpoint_reads\tlarge_indel_reads\n"
         )
         for chrom, start, end in regions:
             region_key = (chrom, start, end)
@@ -1058,10 +1059,13 @@ def _write_bed(regions, region_reads, region_kmers, bed_path,
             max_clip_len = ann.get("max_clip_len", 0)
             unmapped_mates = ann.get("unmapped_mates", 0)
             region_class = ann.get("class", "SMALL")
+            breakpoint_reads = ann.get("breakpoint_reads", 0)
+            large_indel_reads = ann.get("large_indel_reads", 0)
             fh.write(
                 f"{chrom}\t{start}\t{end}\t{n_reads}\t{n_kmers}"
                 f"\t{split_reads}\t{discordant_pairs}"
-                f"\t{max_clip_len}\t{unmapped_mates}\t{region_class}\n"
+                f"\t{max_clip_len}\t{unmapped_mates}\t{region_class}"
+                f"\t{breakpoint_reads}\t{large_indel_reads}\n"
             )
     logger.info("BED file written: %s (%d regions)", bed_path, len(regions))
 
@@ -1220,142 +1224,220 @@ def _write_read_coverage_bed(kmer_coverage, read_coverage, bed_path,
     )
 
 
-def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta):
+#: Minimum mapping quality for an alignment to link two regions: the
+#: informative read, its supplementary alignment (SA tag) and, when the
+#: MQ tag records it, its mate.
+_MIN_LINK_MAPQ = 20
+
+#: Soft clips starting within this many bp of one another mark one
+#: breakpoint.
+_SV_CLIP_TOLERANCE = 5
+
+#: Per-region evidence counts; two molecules of any one kind make an SV.
+_SV_EVIDENCE = (
+    "split_reads", "discordant_pairs", "unmapped_mates",
+    "breakpoint_reads", "large_indel_reads",
+)
+
+
+def _largest_clip_cluster(clips, tolerance=_SV_CLIP_TOLERANCE):
+    """Return the most molecules whose clips start within *tolerance* bp.
+
+    Args:
+        clips: List of (reference position, read name) pairs.
+    """
+    clips = sorted(clips)
+    in_window = collections.Counter()
+    best = lo = 0
+    for pos, qname in clips:
+        in_window[qname] += 1
+        while pos - clips[lo][0] > tolerance:
+            dropped = clips[lo][1]
+            in_window[dropped] -= 1
+            if not in_window[dropped]:
+                del in_window[dropped]
+            lo += 1
+        best = max(best, len(in_window))
+    return best
+
+
+def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
+                                     link_slack=0):
     """Annotate regions and link breakpoints using pre-collected metadata.
 
     Uses per-read SV metadata collected during the anchoring scan
     (Module 3), so no additional BAM I/O is needed.
 
+    Evidence is counted per molecule (read name), at most once per count
+    per region.  Pair-level evidence (split alignment, unmapped mate,
+    discordant pair) counts in every region where the molecule has an
+    informative alignment.  Soft clips, CIGAR indels of at least 50 bp
+    and ``max_clip_len`` count in the region of the alignment that shows
+    them; ``breakpoint_reads`` is the most molecules clipped at one
+    breakpoint, or 0 when that is fewer than two.  An unmapped
+    informative read counts as an unmapped mate in the region where it
+    is placed.
+
+    Two regions are linked by a molecule with informative alignments in
+    both, by a supplementary alignment (SA tag) of a read in one that
+    falls in the other, or by a discordant pair with one end in each.
+    Linking alignments need MAPQ >= ``_MIN_LINK_MAPQ``, and SA and mate
+    positions may lie up to *link_slack* bp outside the target region.
+
     Args:
         regions: List of (chrom, start, end) tuples.
         region_reads: Dict mapping region tuple to set of read names.
-        read_sv_meta: Dict mapping (query_name, is_supplementary) to
-            per-read SV metadata dict with keys: has_sa, sa_str,
-            is_paired, is_proper_pair, mate_is_unmapped, max_clip.
+        read_sv_meta: Dict mapping (query_name, is_supplementary) to the
+            per-read metadata recorded by ``_process_informative_read``.
+        link_slack: How far (bp) an SA or mate position may fall outside
+            a region and still link to it.
 
     Returns:
         (annotations, links) where:
-        - annotations: Dict mapping region tuple to annotation dict with
-          keys: split_reads, discordant_pairs, max_clip_len, unmapped_mates.
+        - annotations: Dict mapping region tuple to a dict with the counts
+          in ``_SV_EVIDENCE`` and ``max_clip_len``.
         - links: List of dicts with keys: region_a, region_b,
           supporting_reads, sv_type_hint.
     """
+    regions_by_chrom = collections.defaultdict(list)
+    for region in sorted(regions):
+        regions_by_chrom[region[0]].append(region)
+    starts_by_chrom = {
+        chrom: [r[1] for r in rlist]
+        for chrom, rlist in regions_by_chrom.items()
+    }
+
+    def region_at(chrom, pos, slack=0):
+        """The region containing *pos*, else the nearest within *slack* bp."""
+        rlist = regions_by_chrom.get(chrom)
+        if not rlist:
+            return None
+        idx = bisect.bisect_right(starts_by_chrom[chrom], pos) - 1
+        best, best_dist = None, slack + 1
+        if idx >= 0:
+            before = rlist[idx]
+            dist = 0 if pos < before[2] else pos - before[2] + 1
+            if dist < best_dist:
+                best, best_dist = before, dist
+        if idx + 1 < len(rlist):
+            after = rlist[idx + 1]
+            if after[1] - pos < best_dist:
+                best = after
+        return best
+
     # Build lookup from read name to regions it belongs to
     read_to_regions = {}
     for region_key in regions:
         for qname in region_reads.get(region_key, set()):
             read_to_regions.setdefault(qname, set()).add(region_key)
 
-    # Initialize annotations
     annotations = {
-        r: {"split_reads": 0, "discordant_pairs": 0,
-            "max_clip_len": 0, "unmapped_mates": 0}
+        r: {**{name: 0 for name in _SV_EVIDENCE}, "max_clip_len": 0}
         for r in regions
     }
 
-    if not read_to_regions:
-        return annotations, []
-
     # ── Annotation from metadata ──
-    # Track which (qname, region) pairs have already been counted for
-    # split_reads so each molecule is counted at most once per region,
-    # even when both primary and supplementary alignments are informative.
-    split_read_counted = set()
+    # Each molecule adds at most one to each count per region, even when
+    # both its primary and supplementary alignments are informative and
+    # carry the same flags; otherwise one molecule could reach the SV
+    # threshold of two on its own.
+    counted = set()  # (qname, region, count name)
 
-    for dedup_key, meta in read_sv_meta.items():
-        qname = dedup_key[0]
-        if qname not in read_to_regions:
+    def count(qname, region, name):
+        if (qname, region, name) not in counted:
+            counted.add((qname, region, name))
+            annotations[region][name] += 1
+
+    clips_by_region = collections.defaultdict(list)
+    for (qname, _is_supp), meta in read_sv_meta.items():
+        placed = meta.get("placed_unmapped")
+        if placed is not None:
+            region = region_at(*placed)
+            if region is not None:
+                count(qname, region, "unmapped_mates")
             continue
 
-        for region_key in read_to_regions[qname]:
-            ann = annotations[region_key]
+        evidence = []
+        if meta["has_sa"]:
+            evidence.append("split_reads")
+        if meta["is_paired"]:
+            if meta["mate_is_unmapped"]:
+                evidence.append("unmapped_mates")
+            elif not meta["is_proper_pair"]:
+                evidence.append("discordant_pairs")
+        for region in read_to_regions.get(qname, ()):
+            for name in evidence:
+                count(qname, region, name)
 
-            if meta["has_sa"]:
-                sr_key = (qname, region_key)
-                if sr_key not in split_read_counted:
-                    ann["split_reads"] += 1
-                    split_read_counted.add(sr_key)
-
-            if meta["is_paired"]:
-                if meta["mate_is_unmapped"]:
-                    ann["unmapped_mates"] += 1
-                elif not meta["is_proper_pair"]:
-                    ann["discordant_pairs"] += 1
-
-            if meta["max_clip"] > ann["max_clip_len"]:
-                ann["max_clip_len"] = meta["max_clip"]
-
-    # ── Linking via SA tags ──
-    # Build interval index per chromosome for O(log n) SA target lookup
-    region_by_chrom = {}
-    for r in regions:
-        region_by_chrom.setdefault(r[0], []).append(r)
-    chrom_starts = {}
-    chrom_regions_sorted = {}
-    for chrom, rlist in region_by_chrom.items():
-        rlist.sort(key=lambda x: x[1])
-        chrom_starts[chrom] = [r[1] for r in rlist]
-        chrom_regions_sorted[chrom] = rlist
-
-    sa_bridges = {}
-
-    for dedup_key, meta in read_sv_meta.items():
-        qname = dedup_key[0]
-        sa_str = meta.get("sa_str")
-        if not sa_str:
+        own = region_at(*meta["pos"]) if "pos" in meta else None
+        if own is None:
             continue
-        if qname not in read_to_regions:
+        ann = annotations[own]
+        ann["max_clip_len"] = max(ann["max_clip_len"], meta["max_clip"])
+        for pos in meta["clip_positions"]:
+            clips_by_region[own].append((pos, qname))
+        if meta["large_indel"]:
+            count(qname, own, "large_indel_reads")
+
+    # One long clip is often an adapter or a low-quality tail; a
+    # breakpoint needs at least two molecules clipped at it.
+    for region, clips in clips_by_region.items():
+        n_clipped = _largest_clip_cluster(clips)
+        if n_clipped >= 2:
+            annotations[region]["breakpoint_reads"] = n_clipped
+
+    # ── Linking ──
+    bridges = {}
+
+    def link(region_a, region_b, qname):
+        if region_a is None or region_b is None or region_a == region_b:
+            return
+        bridges.setdefault(
+            tuple(sorted((region_a, region_b))), set(),
+        ).add(qname)
+
+    molecule_regions = collections.defaultdict(set)
+    for (qname, _is_supp), meta in read_sv_meta.items():
+        if "pos" not in meta or meta["mapq"] < _MIN_LINK_MAPQ:
             continue
+        own = region_at(*meta["pos"])
+        if own is None:
+            continue
+        molecule_regions[qname].add(own)
 
-        primary_regions = read_to_regions[qname]
-
-        for sa_entry in sa_str.rstrip(";").split(";"):
+        for sa_entry in (meta["sa_str"] or "").rstrip(";").split(";"):
             parts = sa_entry.split(",")
-            if len(parts) < 3:
+            if len(parts) < 5:
                 continue
-            sa_chrom = parts[0]
             try:
                 sa_pos = int(parts[1]) - 1  # 1-based to 0-based
+                sa_mapq = int(parts[4])
             except ValueError:
                 continue
+            if sa_mapq >= _MIN_LINK_MAPQ:
+                link(own, region_at(parts[0], sa_pos, link_slack), qname)
 
-            if sa_chrom not in chrom_starts:
-                continue
-            starts = chrom_starts[sa_chrom]
-            sorted_regions = chrom_regions_sorted[sa_chrom]
-            idx = bisect.bisect_right(starts, sa_pos) - 1
-            if idx >= 0:
-                t_chrom, t_start, t_end = sorted_regions[idx]
-                if t_start <= sa_pos < t_end:
-                    target_region = (t_chrom, t_start, t_end)
-                    for p_region in primary_regions:
-                        if p_region != target_region:
-                            key = tuple(sorted(
-                                [p_region, target_region],
-                            ))
-                            sa_bridges.setdefault(
-                                key, set(),
-                            ).add(qname)
+        if meta["mate"] is not None:
+            mate_chrom, mate_pos, mate_mapq = meta["mate"]
+            if mate_mapq is None or mate_mapq >= _MIN_LINK_MAPQ:
+                link(own, region_at(mate_chrom, mate_pos, link_slack), qname)
 
-    # Also link regions sharing query_names across primary/supplementary
-    for qname, rset in read_to_regions.items():
-        if len(rset) >= 2:
-            rlist = sorted(rset)
-            for i in range(len(rlist)):
-                for j in range(i + 1, len(rlist)):
-                    key = (rlist[i], rlist[j])
-                    sa_bridges.setdefault(key, set()).add(qname)
+    # A molecule with informative alignments in two regions (e.g. both
+    # parts of a split read) links them.
+    for qname, rset in molecule_regions.items():
+        rlist = sorted(rset)
+        for i, region_a in enumerate(rlist):
+            for region_b in rlist[i + 1:]:
+                link(region_a, region_b, qname)
 
     # Build links list
     links = []
-    for region_a, region_b in sorted(sa_bridges):
-        qnames = sa_bridges[(region_a, region_b)]
-        sv_type = _infer_sv_type(region_a, region_b)
+    for region_a, region_b in sorted(bridges):
         links.append({
             "region_a": region_a,
             "region_b": region_b,
-            "supporting_reads": qnames,
-            "sv_type_hint": sv_type,
+            "supporting_reads": bridges[(region_a, region_b)],
+            "sv_type_hint": _infer_sv_type(region_a, region_b),
         })
 
     return annotations, links
@@ -1364,6 +1446,11 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta):
 def _write_bedpe(links, bedpe_path):
     """Write linked SV breakpoint pairs to a BEDPE file.
 
+    Uses the standard BEDPE layout, so tools such as bedtools can read it:
+    name (``SV_n``) and score (supporting reads) in columns 7–8, strands
+    in columns 9–10 (``.``, as breakpoint orientation is not inferred),
+    and the SV type hint as an extra column 11.
+
     Args:
         links: List of link dicts from ``_annotate_and_link_from_metadata()``.
         bedpe_path: Output BEDPE file path.
@@ -1371,7 +1458,7 @@ def _write_bedpe(links, bedpe_path):
     with open(bedpe_path, "w") as fh:
         fh.write(
             "#chrom1\tstart1\tend1\tchrom2\tstart2\tend2"
-            "\tsv_id\tsupporting_reads\tsv_type\n"
+            "\tsv_id\tsupporting_reads\tstrand1\tstrand2\tsv_type\n"
         )
         for idx, link in enumerate(links, 1):
             ra = link["region_a"]
@@ -1381,7 +1468,7 @@ def _write_bedpe(links, bedpe_path):
             fh.write(
                 f"{ra[0]}\t{ra[1]}\t{ra[2]}"
                 f"\t{rb[0]}\t{rb[1]}\t{rb[2]}"
-                f"\tSV_{idx}\t{n_support}\t{sv_type}\n"
+                f"\tSV_{idx}\t{n_support}\t.\t.\t{sv_type}\n"
             )
     logger.info("BEDPE file written: %s (%d links)", bedpe_path, len(links))
 
@@ -1389,11 +1476,12 @@ def _write_bedpe(links, bedpe_path):
 def _classify_regions(regions, region_annotations, sv_links):
     """Assign SV classification to each region.
 
-    - ``SV``: split_reads >= 2 OR discordant_pairs >= 2 OR
-      unmapped_mates >= 2 OR region is linked via sv_links
-    - ``SMALL``: split_reads == 0 AND discordant_pairs == 0 AND
-      unmapped_mates == 0 AND not linked
-    - ``AMBIGUOUS``: otherwise
+    - ``SV``: at least two molecules show one kind of evidence in
+      ``_SV_EVIDENCE`` (split alignments, discordant pairs, unmapped
+      mates, soft clips at one breakpoint, CIGAR indels of 50 bp or
+      more), or the region is linked to another region
+    - ``SMALL``: none of that evidence and not linked
+    - ``AMBIGUOUS``: otherwise (evidence from a single molecule)
 
     Updates region_annotations in place with a ``class`` key.
     """
@@ -1404,14 +1492,10 @@ def _classify_regions(regions, region_annotations, sv_links):
 
     for region_key in regions:
         ann = region_annotations.get(region_key, {})
-        split_reads = ann.get("split_reads", 0)
-        discordant_pairs = ann.get("discordant_pairs", 0)
-        unmapped_mates = ann.get("unmapped_mates", 0)
-        if (split_reads >= 2 or discordant_pairs >= 2
-                or unmapped_mates >= 2
-                or region_key in linked_regions):
+        strongest = max(ann.get(name, 0) for name in _SV_EVIDENCE)
+        if strongest >= 2 or region_key in linked_regions:
             ann["class"] = "SV"
-        elif split_reads == 0 and discordant_pairs == 0 and unmapped_mates == 0:
+        elif strongest == 0:
             ann["class"] = "SMALL"
         else:
             ann["class"] = "AMBIGUOUS"
@@ -1764,18 +1848,20 @@ def _write_discovery_summary(summary_path, regions, region_reads,
 
     if regions:
         lines.append("Per-Region Results")
-        lines.append("-" * 120)
+        lines.append("-" * 140)
         lines.append(
             f"  {'Region':<35s} {'Size':>8s} {'Reads':>6s}"
             f" {'Unique K-mers':>14s}"
             f" {'Split':>6s} {'Disc':>5s} {'MaxClip':>8s}"
-            f" {'UnmapMate':>10s} {'Class':>10s}"
+            f" {'UnmapMate':>10s} {'BkptClip':>9s} {'Indel50':>8s}"
+            f" {'Class':>10s}"
         )
         lines.append(
             f"  {'------':<35s} {'----':>8s} {'-----':>6s}"
             f" {'-------------':>14s}"
             f" {'-----':>6s} {'----':>5s} {'-------':>8s}"
-            f" {'---------':>10s} {'-----':>10s}"
+            f" {'---------':>10s} {'--------':>9s} {'-------':>8s}"
+            f" {'-----':>10s}"
         )
 
         for chrom, start, end in regions:
@@ -1793,6 +1879,8 @@ def _write_discovery_summary(summary_path, regions, region_reads,
                 f" {ann.get('discordant_pairs', 0):>5d}"
                 f" {ann.get('max_clip_len', 0):>8d}"
                 f" {ann.get('unmapped_mates', 0):>10d}"
+                f" {ann.get('breakpoint_reads', 0):>9d}"
+                f" {ann.get('large_indel_reads', 0):>8d}"
                 f" {ann.get('class', 'SMALL'):>10s}"
             )
 
@@ -2211,6 +2299,7 @@ def run_discovery_pipeline(args):
     logger.info("[Module 4] Annotating regions and linking breakpoints")
     region_annotations, sv_links = _annotate_and_link_from_metadata(
         regions, region_reads, read_sv_meta,
+        link_slack=args.cluster_distance,
     )
     _classify_regions(regions, region_annotations, sv_links)
 
@@ -2296,6 +2385,12 @@ def run_discovery_pipeline(args):
                 "unmapped_mates": region_annotations.get(
                     (chrom, start, end), {},
                 ).get("unmapped_mates", 0),
+                "breakpoint_reads": region_annotations.get(
+                    (chrom, start, end), {},
+                ).get("breakpoint_reads", 0),
+                "large_indel_reads": region_annotations.get(
+                    (chrom, start, end), {},
+                ).get("large_indel_reads", 0),
                 "class": region_annotations.get(
                     (chrom, start, end), {},
                 ).get("class", "SMALL"),

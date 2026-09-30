@@ -22,7 +22,7 @@ NO_SIGNAL  (20 variants)
   chr8:40037154 A>C  DKU=0  DKA=0
   chr8:70039608 C>T  DKU=0  DKA=0
   chr8:70042671 C>G  DKU=1  DKA=0
-  chr8:125785997 A>AGAGTTACAATGAGTGTTACTCTGAAGGAGGATGGACTTTAATG  DKU=29  DKA=21  +discovery=chr8:125785800-125786483  reads=34  unique_kmers=53  split_reads=0  class=SMALL
+  chr8:125785997 A>AGAGTTACAATGAGTGTTACTCTGAAGGAGGATGGACTTTAATG  DKU=29  DKA=21  +discovery=chr8:125785800-125786483  reads=34  unique_kmers=53  split_reads=0  class=SV
   chr10:50011697 T>C  DKU=1  DKA=1
   chr10:50012575 A>G  DKU=1  DKA=1
   chr10:50024332 C>T  DKU=0  DKA=0
@@ -45,10 +45,10 @@ DISCOVERY_ONLY  (13 regions)
   chr10:50023694-50024031  (337 bp)  reads=3  unique_kmers=13  split_reads=0  class=SMALL
   chr10:50024542-50024749  (207 bp)  reads=1  unique_kmers=10  split_reads=0  class=SMALL
   chr12:60008501-60008907  (406 bp)  reads=3  unique_kmers=18  split_reads=0  class=SMALL
-  chr17:53340221-53341164  (943 bp)  reads=18  unique_kmers=39  split_reads=0  class=AMBIGUOUS
+  chr17:53340221-53341164  (943 bp)  reads=18  unique_kmers=39  split_reads=0  class=SV
   chr19:15035921-15036215  (294 bp)  reads=3  unique_kmers=18  split_reads=0  class=AMBIGUOUS
-  chr5:97089090-97089510  (420 bp)  reads=22  unique_kmers=30  split_reads=0  class=SMALL
-  chr7:142785587-142786223  (636 bp)  reads=7  unique_kmers=66  split_reads=0  class=AMBIGUOUS
+  chr5:97089090-97089510  (420 bp)  reads=22  unique_kmers=30  split_reads=0  class=SV
+  chr7:142785587-142786223  (636 bp)  reads=7  unique_kmers=66  split_reads=0  class=SV
   chr7:142788518-142789264  (746 bp)  reads=3  unique_kmers=37  split_reads=0  class=AMBIGUOUS
   chr7:142792551-142792982  (431 bp)  reads=2  unique_kmers=9  split_reads=0  class=AMBIGUOUS
   chr7:142796829-142797423  (594 bp)  reads=14  unique_kmers=79  split_reads=0  class=SV

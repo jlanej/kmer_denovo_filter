@@ -249,7 +249,7 @@ k-mer parameters. Each command also has its own mode-specific arguments.
 | `--out-prefix` | *required* | Output prefix for discovery mode files |
 | `--ref-jf` | – | Precomputed Jellyfish reference index; defaults to `[ref-fasta].k[kmer-size].jf`, which is built if missing. An existing index must hold canonical k-mers (`jellyfish count -C`) of the `--kmer-size` length; this is checked from its header at start-up |
 | `--min-child-count` | 3 | Minimum k-mer occurrences in the child to be considered a candidate |
-| `--cluster-distance` | 500 | Maximum gap (bp) for merging adjacent regions |
+| `--cluster-distance` | 500 | Maximum gap (bp) for merging adjacent regions; also how far a split alignment or mate may land outside a region and still link to it in the BEDPE |
 | `--min-distinct-kmers-per-read` | k/4 | Minimum distinct proband-unique k-mers a read must carry to be retained. Applied before region-level and bedGraph filters (see [Filtering Flow](#discovery-mode-filtering-flow)) |
 | `--min-supporting-reads` | 1 | Minimum number of supporting reads per region |
 | `--min-distinct-kmers` | 1 | Minimum number of distinct proband-unique k-mers per region |
@@ -489,11 +489,21 @@ generate the file:
 | end | End coordinate (exclusive) |
 | read_count | Number of unique reads with proband-unique k-mers in this region |
 | kmer_count | Number of distinct proband-unique k-mers in this region |
-| split_reads | Number of split-read alignments (SA-tag evidence) in this region |
-| discordant_pairs | Number of discordant read pairs in this region |
-| max_clip_len | Maximum soft-clip length among reads in this region |
-| unmapped_mates | Number of reads whose mate is unmapped |
-| class | SV classification: `SV`, `AMBIGUOUS`, or `SMALL` |
+| split_reads | Molecules with a split alignment (SA tag) |
+| discordant_pairs | Molecules whose read pair is not properly paired |
+| max_clip_len | Longest soft clip among the region's informative reads |
+| unmapped_mates | Molecules with one end unmapped: an informative read whose mate is unmapped, or an unmapped informative read placed in this region |
+| class | SV classification: `SV`, `AMBIGUOUS`, or `SMALL` (see below) |
+| breakpoint_reads | Most molecules soft-clipped (by at least 20 bp) within 5 bp of one breakpoint; 0 unless at least two |
+| large_indel_reads | Molecules with a CIGAR insertion or deletion of at least 50 bp |
+
+Evidence columns count molecules (read names), each at most once per
+region. A region is `SV` when at least two molecules show one kind of
+evidence (split alignments, discordant pairs, unmapped mates, clips at one
+breakpoint, or indels of 50 bp or more), or when it is linked to another
+region in the BEDPE; `SMALL` when it has none; and `AMBIGUOUS` when only
+one molecule does. Clips mark a breakpoint without measuring the event, so
+an `SV` region can hold an insertion shorter than 50 bp.
 
 #### K-mer coverage bedGraph (`{prefix}.kmer_coverage.bedgraph`)
 
@@ -555,6 +565,8 @@ Machine-readable pipeline statistics:
       "discordant_pairs": 1,
       "max_clip_len": 50,
       "unmapped_mates": 0,
+      "breakpoint_reads": 0,
+      "large_indel_reads": 0,
       "class": "AMBIGUOUS"
     }
   ]
@@ -580,8 +592,12 @@ Human-readable overview including:
 #### SV breakpoints BEDPE (`{prefix}.sv.bedpe`)
 
 Tab-delimited [BEDPE](https://bedtools.readthedocs.io/en/latest/content/general-usage.html#bedpe-format)
-file [4] listing linked SV breakpoint pairs identified from split-read and
-discordant-pair evidence across discovery regions:
+file [4] listing pairs of discovery regions linked by the same molecules:
+split alignments (an SA tag, or both parts of a split read carrying
+proband-unique k-mers) or discordant pairs with one end in each region.
+Linking alignments need a mapping quality of at least 20 (for a mate, only
+when the BAM records it in the `MQ` tag), and a split alignment or mate
+within `--cluster-distance` of a region counts as in it:
 
 | Column | Description |
 |---|---|
@@ -593,7 +609,12 @@ discordant-pair evidence across discovery regions:
 | end2 | End of the second breakpoint region |
 | sv_id | Identifier for the SV link (e.g. `SV_1`) |
 | supporting_reads | Number of reads supporting the link |
+| strand1 | Always `.` (breakpoint orientation is not inferred) |
+| strand2 | Always `.` |
 | sv_type | SV type hint: `INTRA` (intra-chromosomal) or `BND` (inter-chromosomal) |
+
+The first ten columns follow the standard BEDPE layout, so the file can be
+used directly with tools such as `bedtools pairtobed`.
 
 When no linked breakpoints are found the file contains only the header line.
 
