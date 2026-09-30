@@ -1,0 +1,13 @@
+#filters: min_distinct_kmers=1 min_distinct_kmers_per_read=7 min_supporting_reads=1
+#chrom	start	end	reads	unique_kmers	split_reads	discordant_pairs	max_clip_len	unmapped_mates	class	breakpoint_reads	large_indel_reads	sv_type
+chr1	9860	10000	11	28	6	4	72	0	SV	8	0	DEL
+chr1	12000	12140	8	28	7	3	54	0	SV	7	0	DEL
+chr1	25000	25131	10	30	7	4	73	0	SV	9	0	DUP
+chr1	26358	26500	10	30	7	6	73	0	SV	8	0	DUP
+chr1	39870	40141	13	59	9	6	71	0	SV	12	0	INV
+chr1	41890	42133	11	59	9	5	74	0	SV	10	0	INV
+chr1	54860	55115	11	60	8	5	73	0	SV	9	0	BND
+chr2	4872	5124	10	31	0	0	0	0	SMALL	0	0	.
+chr2	9858	10132	23	85	0	0	72	0	SV	12	7	INS
+chr2	14861	15141	12	60	6	6	72	0	SV	10	0	BND
+chr2	21866	22078	10	211	0	1	114	7	SV	9	0	.

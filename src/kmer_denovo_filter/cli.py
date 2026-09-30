@@ -199,7 +199,9 @@ def parse_discovery_args(argv=None):
     )
     parser.add_argument(
         "--cluster-distance", type=int, default=500,
-        help="Maximum gap (bp) for merging adjacent regions (default: 500)",
+        help="Maximum gap (bp) for merging adjacent regions; also how far "
+             "a split alignment or mate may land outside a region and "
+             "still link to it in the BEDPE (default: 500)",
     )
     parser.add_argument(
         "--min-supporting-reads", type=int, default=1,
@@ -323,7 +325,8 @@ def parse_args(argv=None):
     parser.add_argument(
         "--cluster-distance", type=int, default=500,
         help="Maximum gap (bp) for merging adjacent regions in discovery "
-             "mode (default: 500)",
+             "mode; also how far a split alignment or mate may land "
+             "outside a region and still link to it (default: 500)",
     )
     parser.add_argument(
         "--min-supporting-reads", type=int, default=1,

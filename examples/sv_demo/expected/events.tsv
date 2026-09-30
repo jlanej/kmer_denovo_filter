@@ -1,0 +1,9 @@
+#chrom	start	end	type	note
+chr1	10000	12000	DEL	2 kb deletion
+chr1	25000	26500	DUP	1.5 kb tandem duplication
+chr1	40000	42000	INV	2 kb inversion
+chr1	55000	55000	BND	reciprocal translocation with chr2:15000
+chr2	5000	5001	SNV	single-base substitution
+chr2	10000	10000	INS	55 bp novel insertion
+chr2	15000	15000	BND	reciprocal translocation with chr1:55000
+chr2	22000	22000	INS	250 bp novel insertion

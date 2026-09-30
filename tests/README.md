@@ -6,6 +6,11 @@
 - **test_kmer_utils.py** – K-mer utility functions (canonicalization, extraction).
 - **vcf/test_pipeline.py** – VCF-mode pipeline integration tests using synthetic BAM/VCF data.
 - **discovery/test_pipeline.py** – Discovery-mode pipeline integration tests using synthetic BAM data.
+- **discovery/test_sv_demo.py** – End-to-end SV calling on the simulated trio
+  in [`examples/sv_demo`](../examples/sv_demo/). The trio has a deletion, a
+  tandem duplication, an inversion, a translocation, two insertions and an
+  SNV. The test checks each event's class, type and BEDPE link, and compares
+  the output with the committed expected files.
 - **helpers.py** – Shared test helper functions for creating synthetic BAM, VCF, and FASTA data.
 - **test_example_output.py** – Regression tests that fail when committed example
   output changes (metrics, summary, VCF annotations). Shows a unified diff on
@@ -23,7 +28,7 @@
   by multiple tests.
 
 ```bash
-pytest tests/test_cli.py tests/test_kmer_utils.py tests/vcf/test_pipeline.py tests/discovery/test_pipeline.py -v
+pytest tests/test_cli.py tests/test_kmer_utils.py tests/vcf/test_pipeline.py tests/discovery -v
 ```
 
 ## GIAB Integration Test
@@ -51,8 +56,9 @@ Up-to-date example output from the latest successful integration test on
 `main` is committed automatically to
 [`tests/example_output/`](example_output/) (VCF mode) and
 [`tests/example_output_discovery/`](example_output_discovery/) (discovery
-mode). These directories are refreshed by CI on every push to `main`, so
-they always reflect the current state of the tool.
+mode). CI refreshes the VCF-mode files and the discovery BED, metrics,
+summary and BEDPE on every push to `main`. The other discovery files are
+checked by the regression tests and updated by hand.
 
 #### VCF-mode output files
 
@@ -67,10 +73,13 @@ they always reflect the current state of the tool.
 
 | File | Description |
 |---|---|
-| `giab_discovery.bed` | Candidate regions with read/k-mer counts and SV annotations |
+| `giab_discovery.bed` | Candidate regions with read/k-mer counts, SV evidence, class and SV type |
 | `giab_discovery.metrics.json` | Per-region detail with SV classification |
-| `giab_discovery.summary.txt` | Human-readable discovery summary with candidate comparison |
-| `giab_discovery.sv.bedpe` | Linked breakpoint pairs (BEDPE format) |
+| `giab_discovery.summary.txt` | Human-readable discovery summary with candidate comparison and curated DNM evaluation |
+| `giab_discovery.sv.bedpe` | Linked breakpoint pairs with orientation and SV type (BEDPE format) |
+| `giab_discovery.kmer_coverage.bedgraph` | Proband-unique k-mer coverage |
+| `giab_discovery.read_coverage.bed` | Informative-read support per position |
+| `giab_discovery.comparison.txt` | Region comparison from `scripts/compare_regions.py` |
 
 ### Result Highlights
 
@@ -88,7 +97,7 @@ from the example output:
 - Metrics show **1,484 total child k-mers** extracted, of which **190**
   (≈13%) were absent from both parents.
 
-Discovery mode identifies **27 candidate regions** from the same data,
+Discovery mode identifies **21 candidate regions** from the same data,
 with **3 high-quality candidates** (DKA_DKT > 0.25, DKA > 10) captured
 at 100% rate.
 
@@ -113,22 +122,33 @@ from Sulovari et al. 2023 (PMC10006329).  5 of the 7 are detected:
 - The chr17 107 bp deletion is `SV` from both kinds of breakpoint evidence:
   three reads carry `107D` in their CIGAR, which also types the region
   `DEL`, and six are soft-clipped at one breakpoint.
-- The chr7 TRB locus 10.6 kb deletion is captured by 3 separate discovery
-  regions, the expected breakpoint pattern for a large deletion. Two
-  discordant pairs join its breakpoints, which is the one link in
-  `giab_discovery.sv.bedpe`: a forward read at the left breakpoint and a
-  reverse read at the right one give orientation `+ -`, a `DEL` (the test
-  BAMs are aligned with novoalign and carry no SA tags, so every link must
-  come from mates).
+- The chr7 TRB locus 10.6 kb deletion has its two breakpoints in separate
+  regions, both `SV` and typed `DEL`. Two discordant pairs join them, which
+  is the one link in `giab_discovery.sv.bedpe`. A forward read at the left
+  breakpoint and a reverse read at the right one give orientation `+ -`, a
+  `DEL`. The test BAMs are aligned with novoalign and carry no SA tags, so
+  every link must come from mates.
+- Two further chr7 regions lie inside the deleted interval, each with one
+  unmapped mate (`AMBIGUOUS`). The curated interval (pos + size) covers
+  those two regions and the left breakpoint: these are the 3 regions summed
+  in the table above. The right-breakpoint region starts 1 bp after the
+  interval ends, so it is not included.
 - The chr18 34 bp event (DKU=0, inherited in VCF mode) still shows 39
   proband-unique k-mers in discovery mode, illustrating that k-mer-based
   discovery can surface variants missed by VCF-guided annotation.
+
+[Structural Variant Calling](../docs/sv_calling.md#real-data-giab-hg002)
+walks through these calls.
 
 ### Keeping Output Up to Date
 
 The integration test workflow automatically commits updated output to
 `tests/example_output/` and `tests/example_output_discovery/` after every
-successful run on the `main` branch. This means the example output in this
-repository always matches the latest version of the tool. Workflow artifacts
-for individual runs are also available in the
+successful run on the `main` branch. This covers the VCF-mode files and the
+discovery BED, metrics, summary and BEDPE. The regression tests
+(`test_example_output*.py`, `tests/discovery/test_sv_demo.py`) fail when
+any other committed output no longer matches, including the SV demo's
+[`examples/sv_demo/expected/`](../examples/sv_demo/expected/). Those files
+are refreshed by hand. Workflow artifacts for individual runs are also
+available in the
 [Actions tab](../../actions/workflows/integration-test.yml).

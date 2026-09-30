@@ -87,7 +87,18 @@ outputs, and the `--kraken2*` flags.
    `--min-distinct-kmers`. The number of parallel workers is dynamically
    capped based on available system memory.
 
-6. **Output** – Write a BED file of candidate regions, k-mer coverage
+6. **Annotate structural variants** – The informative reads that cross an
+   SV junction align as split reads, discordant pairs, reads with an
+   unmapped mate, reads clipped at one breakpoint, or reads with a CIGAR
+   indel of at least 50 bp. From this evidence:
+   * each region is classed `SV`, `AMBIGUOUS` or `SMALL`;
+   * regions joined by the same molecules are linked as breakpoint pairs;
+   * each SV is typed `DEL`, `DUP`, `INV`, `BND` or `INS` from its
+     breakpoint orientation or CIGAR.
+
+   See [Structural Variant Calling](docs/sv_calling.md).
+
+7. **Output** – Write a BED file of candidate regions, k-mer coverage
    bedGraph, read coverage BED, informative-reads BAM, SV breakpoints
    BEDPE, a metrics JSON file, and a human-readable summary.
 
@@ -176,6 +187,13 @@ This produces seven output files (see [Discovery Mode Output](#discovery-mode-ou
 * `discovery_output.read_coverage.bed`
 * `discovery_output.metrics.json`
 * `discovery_output.summary.txt`
+
+Each region is annotated with structural-variant evidence, and the BEDPE
+links an SV's breakpoints and gives its type. See
+[Structural Variant Calling](docs/sv_calling.md) for how this works.
+[`examples/sv_demo`](examples/sv_demo/) has a simulated trio with a
+deletion, duplication, inversion, translocation and insertions that runs
+in seconds.
 
 To skip the reference indexing step on subsequent runs, pass a precomputed
 Jellyfish index:
@@ -473,7 +491,10 @@ apptainer exec kmer_denovo.sif \
 
 ### Discovery Mode Output
 
-Discovery mode always produces seven files based on `--out-prefix`:
+Discovery mode produces seven files named from `--out-prefix`, plus an
+HTML report with `--report`. If no proband-unique k-mers survive filtering,
+it stops early and writes only the BED, BEDPE, metrics JSON and summary,
+none of which list any regions.
 
 #### BED file (`{prefix}.bed`)
 
@@ -490,7 +511,7 @@ generate the file:
 | read_count | Number of unique reads with proband-unique k-mers in this region |
 | kmer_count | Number of distinct proband-unique k-mers in this region |
 | split_reads | Molecules with a split alignment (SA tag) |
-| discordant_pairs | Molecules whose read pair is not properly paired |
+| discordant_pairs | Molecules whose read pair is not properly paired (mate mapped) |
 | max_clip_len | Longest soft clip among the region's informative reads |
 | unmapped_mates | Molecules with one end unmapped: an informative read whose mate is unmapped, or an unmapped informative read placed in this region |
 | class | SV classification: `SV`, `AMBIGUOUS`, or `SMALL` (see below) |
@@ -504,7 +525,9 @@ evidence (split alignments, discordant pairs, unmapped mates, clips at one
 breakpoint, or indels of 50 bp or more), or when it is linked to another
 region in the BEDPE; `SMALL` when it has none; and `AMBIGUOUS` when only
 one molecule does. Clips mark a breakpoint without measuring the event, so
-an `SV` region can hold an insertion shorter than 50 bp.
+an `SV` region can hold an insertion shorter than 50 bp. Only informative
+reads are counted. See [Structural Variant Calling](docs/sv_calling.md) for
+the details and worked examples.
 
 #### K-mer coverage bedGraph (`{prefix}.kmer_coverage.bedgraph`)
 
@@ -587,7 +610,7 @@ Human-readable overview including:
 * K-mer filtering statistics (child candidates → non-reference → proband-unique)
 * Region counts and informative read totals
 * Region size statistics (mean, median, max)
-* Per-region results table with coordinates, size, read count, k-mer count, SV annotations, and classification
+* Per-region results table with coordinates, size, read count, k-mer count, SV annotations, classification and SV type
 * Candidate comparison results (when `--candidate-summary` is provided)
 * Detection of known *de novo* events (when `--dnm-regions` is provided)
 
@@ -621,9 +644,13 @@ used directly with tools such as `bedtools pairtobed`.
 Orientation comes from each supporting molecule: which side of each
 split-read segment is clipped (from the read's CIGAR and its SA tag), or the
 strands of a discordant pair, assuming a standard forward-reverse (FR)
-paired-end library. A link reports the majority type among its molecules and
-that type's majority orientation; the two junctions of an inversion (`+ +`
-and `- -`) give `INV` with `.` strands.
+paired-end library. A link reports the majority type among its molecules,
+and that type's majority orientation (`.` on a tie). A forward-reverse pair
+with both reads in one region gives no type, since it may span a deletion
+or an insertion. Both junctions of a balanced inversion (`+ +` and `- -`)
+or of a reciprocal translocation fall in the same two regions. They form
+one link, whose strands are those of the junction with more molecules. See
+[Breakpoint orientation and SV types](docs/sv_calling.md#breakpoint-orientation-and-sv-types).
 
 When no linked breakpoints are found the file contains only the header line.
 
@@ -656,8 +683,9 @@ Discovery mode applies filters at four levels, in this order:
    * `--min-distinct-kmers` — Minimum number of distinct proband-unique
      k-mers in a region (default 1).
 
-   These two filters control which regions appear in the BED file and
-   metrics JSON.
+   These two filters control which regions appear in the BED file,
+   metrics JSON and BEDPE. SV evidence is annotated, and breakpoints are
+   linked, only among the regions that pass them.
 
 4. **Position-level** (output):
    * `--min-bedgraph-reads` — Minimum number of distinct reads at a
@@ -696,6 +724,11 @@ provenance is self-documenting.
   contributes the count. Only k-mers that were found in at least one
   parent contribute to the statistics; k-mers absent from both parents
   are excluded from the average.
+
+* **Discovery-mode SV calls are candidates** – Their classes and types come
+  from how the junction-carrying reads align. They flag and type candidate
+  structural variants but do not genotype them or refine their breakpoints.
+  See [Limitations](docs/sv_calling.md#limitations).
 
 * **Symbolic alleles are skipped** – Variants whose first ALT is a
   symbolic allele (`<DEL>`, `<INS>`, breakend notation, `*`) are

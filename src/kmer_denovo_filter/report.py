@@ -1643,7 +1643,8 @@ def _make_discovery_region_scatter(regions, div_id="disc-scatter-plot"):
                 f"{r['chrom']}:{r['start']+1}-{r['end']}<br>"
                 f"Size: {r['size']}bp<br>"
                 f"MaxClip: {r.get('max_clip_len', 0)}<br>"
-                f"Class: {r.get('class', 'N/A')}"
+                f"Class: {r.get('class', 'N/A')}<br>"
+                f"SV type: {r.get('sv_type', '.')}"
                 for r in cls_regions
             ],
             hovertemplate="%{text}<extra></extra>",
@@ -2580,6 +2581,10 @@ _HTML_TEMPLATE = """\
   identifies genomic regions enriched for proband-unique k-mers without
   prior variant knowledge.  The distribution and characteristics of
   discovered regions provide independent confirmation of de novo signal.
+  Regions are classed <em>SV</em> when at least two molecules show one
+  kind of structural-variant evidence or the region is linked to another,
+  <em>AMBIGUOUS</em> when only one molecule does, and <em>SMALL</em>
+  otherwise.
 </div>
 
 {% if disc_scatter_div %}

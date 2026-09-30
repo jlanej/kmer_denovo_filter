@@ -38,7 +38,7 @@ jobs:
 
       - name: Run discovery-mode integration tests
         run: |
-          pytest tests/discovery/test_pipeline.py -v
+          pytest tests/discovery -v
 
       - name: Run focused indel DKA coverage tests
         run: |
