@@ -380,6 +380,7 @@
   },
   "dnm_evaluation": {
     "source": "sulovari2023_dnm_regions.tsv",
+    "slack_bp": 500,
     "total_loci": 7,
     "detected": 5,
     "detection_rate": 0.7142857142857143,
@@ -496,16 +497,17 @@
         "discovery_regions": [
           "chr7:142785588-142786223",
           "chr7:142788519-142789264",
-          "chr7:142792552-142792982"
+          "chr7:142792552-142792982",
+          "chr7:142796830-142797423"
         ],
-        "total_reads": 12,
-        "total_unique_kmers": 112,
-        "max_clip_len": 94,
-        "unmapped_mates": 6,
-        "discordant_pairs": 0,
+        "total_reads": 26,
+        "total_unique_kmers": 191,
+        "max_clip_len": 98,
+        "unmapped_mates": 10,
+        "discordant_pairs": 2,
         "split_reads": 0,
         "sv_class": "SV",
-        "kmer_signal": 0.01,
+        "kmer_signal": 0.0161,
         "assessment": "DETECTED"
       }
     ]

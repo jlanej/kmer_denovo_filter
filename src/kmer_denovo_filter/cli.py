@@ -195,11 +195,17 @@ def parse_discovery_args(argv=None):
              "against: a tab-separated file with columns chrom, 1-based "
              "pos, size in bp ('.' if unknown) and event type. Adds a "
              "per-event detection table to the metrics JSON, summary and "
-             "report. See examples/HG002_trio/sulovari2023_dnm_regions.tsv.",
+             "report; regions within --cluster-distance of an event count "
+             "toward it. See "
+             "examples/HG002_trio/sulovari2023_dnm_regions.tsv.",
     )
     parser.add_argument(
         "--cluster-distance", type=int, default=500,
-        help="Maximum gap (bp) for merging adjacent regions (default: 500)",
+        help="Maximum gap (bp) for merging adjacent regions; also how far "
+             "a split alignment or mate may land outside a region and "
+             "still link to it in the BEDPE, and how far a region may lie "
+             "from a --dnm-regions event and still count toward it "
+             "(default: 500)",
     )
     parser.add_argument(
         "--min-supporting-reads", type=int, default=1,
@@ -318,12 +324,16 @@ def parse_args(argv=None):
              "against in discovery mode: a tab-separated file with columns "
              "chrom, 1-based pos, size in bp ('.' if unknown) and event "
              "type. Adds a per-event detection table to the metrics JSON, "
-             "summary and report.",
+             "summary and report; regions within --cluster-distance of an "
+             "event count toward it.",
     )
     parser.add_argument(
         "--cluster-distance", type=int, default=500,
         help="Maximum gap (bp) for merging adjacent regions in discovery "
-             "mode (default: 500)",
+             "mode; also how far a split alignment or mate may land "
+             "outside a region and still link to it, and how far a region "
+             "may lie from a --dnm-regions event and still count toward it "
+             "(default: 500)",
     )
     parser.add_argument(
         "--min-supporting-reads", type=int, default=1,

@@ -1,0 +1,7 @@
+#chrom1	start1	end1	chrom2	start2	end2	sv_id	supporting_reads	strand1	strand2	sv_type
+chr1	9860	10000	chr1	12000	12140	SV_1	15	+	-	DEL
+chr1	25000	25131	chr1	26358	26500	SV_2	18	-	+	DUP
+chr1	39870	40141	chr1	41890	42133	SV_3	13	+	+	INV
+chr1	39870	40141	chr1	41890	42133	SV_4	7	-	-	INV
+chr1	54860	55115	chr2	14861	15141	SV_5	10	+	-	BND
+chr1	54860	55115	chr2	14861	15141	SV_6	8	-	+	BND

@@ -1260,16 +1260,16 @@ class TestDiscoverySV:
             ("chr4", 100, 200): {"split_reads": 0, "discordant_pairs": 0,
                                  "max_clip_len": 0, "unmapped_mates": 2},
         }
-        # Region A is linked to region B
+        # Region A is linked to region B by two molecules
         sv_links = [
             {"region_a": ("chr1", 100, 200), "region_b": ("chr1", 500, 600),
-             "supporting_reads": {"r1"}, "sv_type_hint": "INTRA"},
+             "supporting_reads": {"r1", "r2"}, "sv_type_hint": "INTRA"},
         ]
         _classify_regions(regions, annotations, sv_links)
 
         # Region with >= 2 split reads → SV
         assert annotations[("chr1", 100, 200)]["class"] == "SV"
-        # Region linked via sv_links → SV (even with 0 split reads)
+        # Region linked by two molecules → SV (even with 0 split reads)
         assert annotations[("chr1", 500, 600)]["class"] == "SV"
         # Region with 1 split read but not linked → AMBIGUOUS
         assert annotations[("chr2", 100, 200)]["class"] == "AMBIGUOUS"
@@ -1277,6 +1277,23 @@ class TestDiscoverySV:
         assert annotations[("chr3", 100, 200)]["class"] == "SV"
         # Region with >= 2 unmapped mates → SV
         assert annotations[("chr4", 100, 200)]["class"] == "SV"
+
+    @pytest.mark.parametrize("junction_reads, expected", [
+        ([{"r1"}], "AMBIGUOUS"),
+        ([{"r1", "r2"}], "SV"),
+        ([{"r1"}, {"r2"}], "SV"),  # one molecule per junction
+    ])
+    def test_link_needs_two_molecules(self, junction_reads, expected):
+        """A link is evidence like any other: one molecule is AMBIGUOUS."""
+        regions = [("chr1", 100, 200), ("chr1", 500, 600)]
+        annotations = {r: {"split_reads": 0} for r in regions}
+        sv_links = [
+            {"region_a": regions[0], "region_b": regions[1],
+             "supporting_reads": reads, "sv_type_hint": "INV"}
+            for reads in junction_reads
+        ]
+        _classify_regions(regions, annotations, sv_links)
+        assert [annotations[r]["class"] for r in regions] == [expected] * 2
 
     def test_write_bedpe_format(self, tmpdir):
         """Unit test for _write_bedpe output format."""
@@ -1797,6 +1814,23 @@ class TestSVEvidence:
         assert annotations[self.A]["class"] == "SV"
         assert annotations[self.B]["discordant_pairs"] == 2
 
+    @pytest.mark.parametrize("n_molecules, expected", [
+        (1, "AMBIGUOUS"), (2, "SV"),
+    ])
+    def test_sa_link_classes_both_regions(self, n_molecules, expected):
+        """B has no evidence of its own; SA tags from A link it."""
+        annotations, links = self._run({
+            ("b1", False): _sv_meta(("chr1", 20050)),
+            **{(f"s{i}", False): _sv_meta(
+                ("chr1", 1100 + i), clip_side="+",
+                sa="chr1,20051,+,90S60M,60,0;")
+               for i in range(n_molecules)},
+        })
+        assert len(links) == 1
+        assert annotations[self.B]["split_reads"] == 0
+        assert annotations[self.A]["class"] == expected
+        assert annotations[self.B]["class"] == expected
+
     @pytest.mark.parametrize("link_slack, linked", [(0, False), (500, True)])
     def test_mate_near_a_region_links_within_slack(self, link_slack, linked):
         _, links = self._run({
@@ -1946,14 +1980,44 @@ class TestSVTypes:
         ))
         assert links == [(self.A, self.B, None, "INTRA")]
 
-    def test_both_inversion_junctions_make_one_inv_link(self):
+    def test_both_inversion_junctions_are_reported(self):
         _, links = self._links(self._with_anchor(
             p1=_sv_meta(("chr1", 1100), proper=False,
                         mate=("chr1", 20100, None, False)),    # + +
             p2=_sv_meta(("chr1", 1110), proper=False, reverse=True,
                         mate=("chr1", 20110, None, True)),     # - -
         ))
-        assert links == [(self.A, self.B, None, "INV")]
+        assert links == [(self.A, self.B, ("+", "+"), "INV"),
+                         (self.A, self.B, ("-", "-"), "INV")]
+
+    def test_reciprocal_translocation_gives_one_link_per_junction(self):
+        # der(1): A (+) joined to C (-); der(2): C (+) joined to A (-)
+        _, links = _annotate_regions([self.A, self.B, self.C],
+                                     self._with_anchor(
+            d1=_sv_meta(("chr1", 1100), clip_side="+",
+                        sa="chr2,5101,+,90S60M,60,0;"),
+            d2=_sv_meta(("chr1", 1110), proper=False,
+                        mate=("chr2", 5150, None, True)),
+            d3=_sv_meta(("chr1", 1050), clip_side="-",
+                        sa="chr2,5001,+,60M90S,60,0;"),
+        ))
+        assert [(l["region_a"], l["region_b"], l["strands"],
+                 l["sv_type_hint"], l["supporting_reads"])
+                for l in links] == [
+            (self.A, self.C, ("+", "-"), "BND", {"d1", "d2"}),
+            (self.A, self.C, ("-", "+"), "BND", {"d3"}),
+        ]
+
+    def test_minority_type_is_outvoted(self):
+        _, links = _annotate_regions([self.A, self.B, self.C],
+                                     self._with_anchor(**{
+            f"del{i}": _sv_meta(("chr1", 1100 + i), proper=False,
+                                mate=("chr1", 20100, None, True))
+            for i in range(2)
+        }, dup=_sv_meta(("chr1", 1150), proper=False, reverse=True,
+                        mate=("chr1", 20150, None, False))))
+        assert [(l["strands"], l["sv_type_hint"], l["supporting_reads"])
+                for l in links] == [(("+", "-"), "DEL", {"del0", "del1"})]
 
     def test_deletion_within_one_region(self):
         """Both breakpoints in one region: no link, but a typed region."""
@@ -1961,6 +2025,27 @@ class TestSVTypes:
             ("chr1", 1050), clip_side="+", sa="chr1,1201,+,50S100M,60,0;")))
         assert links == []
         assert annotations[self.A]["sv_type"] == "DEL"
+
+    @pytest.mark.parametrize("read_reverse, mate_pos, sv_type", [
+        (False, 1250, "."),   # forward-reverse: too far apart, or too close
+        (False, 1120, "."),   # forward-reverse, overlapping
+        (True, 1050, "."),    # starting together
+        (True, 1250, "DUP"),  # reverse-forward: facing away
+    ])
+    def test_discordant_pair_within_one_region(self, read_reverse, mate_pos,
+                                               sv_type):
+        """A forward-reverse pair inside one region may span a deletion or
+        an insertion (e.g. one longer than the reads), so it is untyped."""
+        annotations, links = self._links(self._with_anchor(**{
+            f"p{i}": _sv_meta(("chr1", 1050), proper=False,
+                              reverse=read_reverse,
+                              mate=("chr1", mate_pos, None, not read_reverse))
+            for i in range(2)
+        }))
+        assert links == []
+        assert annotations[self.A]["discordant_pairs"] == 2
+        assert annotations[self.A]["class"] == "SV"
+        assert annotations[self.A]["sv_type"] == sv_type
 
     @pytest.mark.parametrize("kind", ["DEL", "INS"])
     def test_cigar_indel_types_its_region(self, kind):

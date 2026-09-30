@@ -1297,9 +1297,15 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
 
     Each joining molecule also gives the breakpoint orientation: from
     which side of each split-read segment is clipped, or from the read
-    strands of a discordant pair (FR libraries).  A link takes the
-    majority SV type among its molecules (DEL, DUP, INV; BND across
-    chromosomes; INTRA when unknown), and a region's ``sv_type`` is the
+    strands of a discordant pair (FR libraries).  A forward-reverse pair
+    with both ends in one region gives none, as its insert may be too
+    long (a deletion) or too short (an insertion).  The molecules joining
+    two regions vote for an SV type (DEL, DUP, INV; BND across
+    chromosomes), and each orientation of the majority type is one link:
+    a junction, with the molecules showing it.  Both junctions of a
+    balanced inversion or reciprocal translocation are thus reported.
+    With no majority, the regions get one link with unknown orientation
+    (INTRA, or BND across chromosomes).  A region's ``sv_type`` is the
     majority over its molecules, including CIGAR indels (DEL, INS) and
     joins within the region, or ``.`` when there is none.
 
@@ -1315,9 +1321,9 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
         (annotations, links) where:
         - annotations: Dict mapping region tuple to a dict with the counts
           in ``_SV_EVIDENCE``, ``max_clip_len`` and ``sv_type``.
-        - links: List of dicts with keys: region_a, region_b,
-          supporting_reads, strands (a (strand1, strand2) tuple or None),
-          sv_type_hint.
+        - links: List of dicts, one per junction, with keys: region_a,
+          region_b, supporting_reads (read names), strands (a (strand1,
+          strand2) tuple, or None when unknown), sv_type_hint.
     """
     regions_by_chrom = collections.defaultdict(list)
     for region in sorted(regions):
@@ -1419,14 +1425,20 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
     def breakend(chrom, start, end, side):
         return (chrom, end if side == "+" else start, side)
 
-    def join(end_a, region_a, end_b, region_b, qname):
+    def join(end_a, region_a, end_b, region_b, qname, pair=False):
         if region_a is None or region_b is None:
             return
-        if end_b[:2] < end_a[:2]:
+        # By position; on a tie, a "+" end comes first
+        if (end_b[:2], end_b[2] != "+") < (end_a[:2], end_a[2] != "+"):
             end_a, end_b = end_b, end_a
             region_a, region_b = region_b, region_a
         strands = (end_a[2], end_b[2]) if end_a[2] and end_b[2] else None
         sv_type = _infer_sv_type(region_a, region_b, strands)
+        if pair and sv_type == "DEL" and region_a == region_b:
+            # A forward-reverse pair within one region is either too far
+            # apart (a deletion) or too close (an insertion, e.g. one
+            # longer than the reads); the insert size alone can't say which
+            return
         if region_a != region_b:
             key = tuple(sorted((region_a, region_b)))
             bridges.setdefault(key, set()).add(qname)
@@ -1469,14 +1481,16 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
                  region_at(parts[0], sa_start, link_slack), qname)
 
         # Paired-end orientation (FR libraries): the breakpoint lies after
-        # a forward read and before a reverse one.
+        # a forward read and before a reverse one.  The two reads are
+        # ordered by where they start, so a forward read overlapping its
+        # reverse mate still reads as forward-reverse.
         if meta["mate"] is not None:
             mate_chrom, mate_pos, mate_mapq, mate_reverse = meta["mate"]
             if mate_mapq is None or mate_mapq >= _MIN_LINK_MAPQ:
-                read_side = "-" if meta["is_reverse"] else "+"
-                join(breakend(chrom, start, meta["end"], read_side), own,
+                join((chrom, start, "-" if meta["is_reverse"] else "+"), own,
                      (mate_chrom, mate_pos, "-" if mate_reverse else "+"),
-                     region_at(mate_chrom, mate_pos, link_slack), qname)
+                     region_at(mate_chrom, mate_pos, link_slack), qname,
+                     pair=True)
 
     # A molecule with informative alignments in two regions (e.g. both
     # parts of a split read) joins them.
@@ -1491,27 +1505,43 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
             _unique_majority(type_votes[region].values()) or "."
         )
 
-    # Build links list: the majority type among the supporting molecules,
-    # and its majority breakpoint orientation
+    # Build links, one per junction: each breakpoint orientation of the
+    # majority type among the molecules joining two regions.  Both
+    # junctions of a balanced inversion (+ +, - -) or reciprocal
+    # translocation join the same two regions, so each gets its own link;
+    # molecules of a minority type are outvoted.
     links = []
     for key in sorted(bridges):
-        votes = link_votes.get(key, {}).values()
-        sv_type = _unique_majority(t for t, _ in votes)
-        strands = sv_type and _unique_majority(s for t, s in votes
-                                               if t == sv_type)
-        links.append({
-            "region_a": key[0],
-            "region_b": key[1],
-            "supporting_reads": bridges[key],
-            "strands": strands or None,
-            "sv_type_hint": sv_type or _infer_sv_type(*key),
-        })
+        votes = link_votes.get(key, {})
+        sv_type = _unique_majority(t for t, _ in votes.values())
+        junctions = collections.defaultdict(set)
+        for qname, (vote_type, strands) in votes.items():
+            if vote_type == sv_type:
+                junctions[strands].add(qname)
+        if not junctions:
+            # No orientation known, or the molecules disagree on the type
+            links.append({
+                "region_a": key[0],
+                "region_b": key[1],
+                "supporting_reads": bridges[key],
+                "strands": None,
+                "sv_type_hint": _infer_sv_type(*key),
+            })
+        for strands, qnames in sorted(junctions.items(),
+                                      key=lambda j: (-len(j[1]), j[0])):
+            links.append({
+                "region_a": key[0],
+                "region_b": key[1],
+                "supporting_reads": qnames,
+                "strands": strands,
+                "sv_type_hint": sv_type,
+            })
 
     return annotations, links
 
 
 def _write_bedpe(links, bedpe_path):
-    """Write linked SV breakpoint pairs to a BEDPE file.
+    """Write linked SV breakpoint pairs to a BEDPE file, one per junction.
 
     Uses the standard BEDPE layout, so tools such as bedtools can read it:
     name (``SV_n``) and score (supporting reads) in columns 7–8, the
@@ -1545,24 +1575,32 @@ def _write_bedpe(links, bedpe_path):
 def _classify_regions(regions, region_annotations, sv_links):
     """Assign SV classification to each region.
 
-    - ``SV``: at least two molecules show one kind of evidence in
+    - ``SV``: at least two molecules show one kind of evidence: one of
       ``_SV_EVIDENCE`` (split alignments, discordant pairs, unmapped
       mates, soft clips at one breakpoint, CIGAR indels of 50 bp or
-      more), or the region is linked to another region
-    - ``SMALL``: none of that evidence and not linked
+      more), or links to one other region (over the pair's junctions)
+    - ``SMALL``: none of that evidence and no links
     - ``AMBIGUOUS``: otherwise (evidence from a single molecule)
 
     Updates region_annotations in place with a ``class`` key.
     """
-    linked_regions = set()
+    # Molecules joining each pair of regions, over the pair's junctions
+    pair_reads = collections.defaultdict(set)
     for link in sv_links:
-        linked_regions.add(link["region_a"])
-        linked_regions.add(link["region_b"])
+        pair_reads[link["region_a"], link["region_b"]].update(
+            link["supporting_reads"])
+    linking_reads = collections.Counter()
+    for pair, qnames in pair_reads.items():
+        for region in pair:
+            linking_reads[region] = max(linking_reads[region], len(qnames))
 
     for region_key in regions:
         ann = region_annotations.get(region_key, {})
-        strongest = max(ann.get(name, 0) for name in _SV_EVIDENCE)
-        if strongest >= 2 or region_key in linked_regions:
+        strongest = max(
+            [ann.get(name, 0) for name in _SV_EVIDENCE]
+            + [linking_reads[region_key]]
+        )
+        if strongest >= 2:
             ann["class"] = "SV"
         elif strongest == 0:
             ann["class"] = "SMALL"
@@ -1705,19 +1743,23 @@ def _load_dnm_regions(path):
     return regions
 
 
-def _evaluate_dnm_regions(discovery_regions, region_detail, dnm_regions):
+def _evaluate_dnm_regions(discovery_regions, region_detail, dnm_regions,
+                          slack=0):
     """Evaluate how well VCF-free discovery captures known DNM regions.
 
     For each known de novo event (from ``--dnm-regions``), determines
     whether it was nominated by the discovery pipeline and collects
-    quantitative k-mer and SV-signal evidence from the overlapping
-    discovery region(s).
+    quantitative k-mer and SV-signal evidence from the discovery
+    region(s) overlapping it or within *slack* bp of it.  The slack
+    matters for deletions: their breakpoint regions flank the deleted
+    interval rather than overlap it, and curated breakpoints can be off
+    by a few bases.
 
     The evaluation provides a simple genotype-like assessment per region:
 
-    - **DETECTED**: ≥1 discovery region overlaps the curated locus with
+    - **DETECTED**: ≥1 discovery region matches the curated locus with
       informative reads carrying proband-unique k-mers.
-    - **NOT_DETECTED**: No overlapping discovery region found.
+    - **NOT_DETECTED**: No matching discovery region found.
 
     For detected regions, a *k-mer signal score* summarises evidence
     strength as ``unique_kmers / region_size_bp``.  Higher density
@@ -1733,6 +1775,8 @@ def _evaluate_dnm_regions(discovery_regions, region_detail, dnm_regions):
             tuples, as returned by :func:`_load_dnm_regions`.  *pos* is
             1-based; each event covers *size* bp from *pos* (1 bp when
             the size is unknown).
+        slack: How far (bp) outside an event a region may lie and still
+            count toward it (the pipeline uses ``--cluster-distance``).
 
     Returns:
         List of dicts, one per known event, with keys:
@@ -1764,14 +1808,14 @@ def _evaluate_dnm_regions(discovery_regions, region_detail, dnm_regions):
         dnm_start = pos - 1
         dnm_end = dnm_start + (size if size else 1)  # point if no size
 
-        # Find overlapping discovery regions
+        # Find discovery regions overlapping the event or within slack
         matches = []
         for dr_key in discovery_regions:
             dr_chrom, dr_start, dr_end = dr_key
             if dr_chrom != chrom:
                 continue
-            # Overlap check (both 0-based half-open)
-            if dr_start < dnm_end and dnm_start < dr_end:
+            # Both 0-based half-open; a gap shorter than slack counts
+            if dr_start < dnm_end + slack and dnm_start - slack < dr_end:
                 matches.append(dr_key)
 
         detected = len(matches) > 0
@@ -1999,6 +2043,11 @@ def _write_discovery_summary(summary_path, regions, region_reads,
             f"  Detected by discovery:       {n_detected:>8}"
             f" / {n_total} ({pct:.1f}%)"
         )
+        slack = metrics.get("dnm_evaluation", {}).get("slack_bp")
+        if slack is not None:
+            lines.append(
+                f"  Regions counted within:      {slack:>8} bp of an event"
+            )
         lines.append("")
         lines.append(
             f"  {'Locus':<20s} {'Event':>25s} {'Size':>8s}"
@@ -2496,6 +2545,7 @@ def run_discovery_pipeline(args):
     if dnm_regions:
         dnm_evaluation = _evaluate_dnm_regions(
             regions, metrics["regions"], dnm_regions,
+            slack=args.cluster_distance,
         )
         n_dnm_detected = sum(1 for e in dnm_evaluation if e["detected"])
         logger.info(
@@ -2504,6 +2554,7 @@ def run_discovery_pipeline(args):
         )
         metrics["dnm_evaluation"] = {
             "source": os.path.basename(dnm_regions_path),
+            "slack_bp": args.cluster_distance,
             "total_loci": len(dnm_evaluation),
             "detected": n_dnm_detected,
             "detection_rate": n_dnm_detected / len(dnm_evaluation),

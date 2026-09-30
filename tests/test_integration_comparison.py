@@ -282,6 +282,30 @@ class TestEvaluateDNMRegions:
         results = _evaluate_dnm_regions(regions, detail, dnm_regions=dnm)
         assert results[0]["detected"] is False
 
+    @pytest.mark.parametrize("slack, expected", [
+        (0, []), (1, ["chr1:1-100", "chr1:501-600"]),
+    ])
+    def test_deletion_breakpoint_regions_count_within_slack(self, slack,
+                                                            expected):
+        """A deletion's breakpoint regions flank the deleted interval."""
+        dnm = [("chr1", 101, 400, "deletion")]  # deletes 0-based [100, 500)
+        regions = [("chr1", 0, 100), ("chr1", 500, 600)]
+        detail = [{"chrom": c, "start": s, "end": e, "reads": 4,
+                   "unique_kmers": 20, "class": "SV"}
+                  for c, s, e in regions]
+        results = _evaluate_dnm_regions(regions, detail, dnm, slack=slack)
+        assert results[0]["discovery_regions"] == expected
+        assert results[0]["detected"] is bool(expected)
+
+    @pytest.mark.parametrize("gap, detected", [(499, True), (500, False)])
+    def test_slack_bounds_the_gap(self, gap, detected):
+        dnm = [("chr1", 1001, None, "sv_like")]  # 0-based 1000
+        regions = [("chr1", 1001 + gap, 1100 + gap)]
+        detail = [{"chrom": "chr1", "start": 1001 + gap, "end": 1100 + gap,
+                   "reads": 4, "unique_kmers": 20, "class": "SV"}]
+        results = _evaluate_dnm_regions(regions, detail, dnm, slack=500)
+        assert results[0]["detected"] is detected
+
     def test_last_base_of_region_overlaps(self):
         """1-based 200 is the last base of the half-open region [50, 200)."""
         dnm = [("chr1", 200, None, "sv_like")]
@@ -531,6 +555,23 @@ class TestDNMRegionIntegration:
                     f"DNM region {dr_label} for {locus['locus']} "
                     f"not found in BED regions"
                 )
+
+    def test_chr7_deletion_counts_both_breakpoints(
+        self, generated_discovery_output,
+    ):
+        """The right breakpoint region starts 1 bp past the curated
+        interval; the --cluster-distance slack counts it."""
+        with open(generated_discovery_output["metrics"]) as fh:
+            metrics = json.load(fh)
+
+        assert metrics["dnm_evaluation"]["slack_bp"] == 500
+        loci_by_name = {
+            l["locus"]: l for l in metrics["dnm_evaluation"]["loci"]
+        }
+        assert loci_by_name["chr7:142786222"]["discovery_regions"] == [
+            "chr7:142785588-142786223", "chr7:142788519-142789264",
+            "chr7:142792552-142792982", "chr7:142796830-142797423",
+        ]
 
     def test_chr17_deletion_evidence(
         self, generated_discovery_output,

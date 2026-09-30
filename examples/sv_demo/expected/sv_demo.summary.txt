@@ -1,0 +1,38 @@
+============================================================
+  kmer-denovo  —  Discovery Mode Summary
+============================================================
+
+K-mer Filtering
+----------------------------------------
+  Child candidate k-mers:         90443
+  Non-reference k-mers:             575
+  Proband-unique k-mers:            572
+
+Region Counts
+----------------------------------------
+  Candidate regions:                 11
+  Total informative reads:          143
+    (unmapped informative):           14
+
+Region Statistics
+----------------------------------------
+  Reads/region   mean:   11.7   median:   11   max:   23
+  K-mers/region  mean:   61.9   median:   59   max:  211
+  Region size    mean:    213 bp   median:  243 bp   max:  280 bp
+
+Per-Region Results
+--------------------------------------------------------------------------------------------------------------------------------------------
+  Region                                  Size  Reads  Unique K-mers  Split  Disc  MaxClip  UnmapMate  BkptClip  Indel50      Class  Type
+  ------                                  ----  -----  -------------  -----  ----  -------  ---------  --------  -------      -----  ----
+  chr1:9861-10000                         140bp     11             28      6     4       72          0         8        0         SV   DEL
+  chr1:12001-12140                        140bp      8             28      7     3       54          0         7        0         SV   DEL
+  chr1:25001-25131                        131bp     10             30      7     4       73          0         9        0         SV   DUP
+  chr1:26359-26500                        142bp     10             30      7     6       73          0         8        0         SV   DUP
+  chr1:39871-40141                        271bp     13             59      9     6       71          0        12        0         SV   INV
+  chr1:41891-42133                        243bp     11             59      9     5       74          0        10        0         SV   INV
+  chr1:54861-55115                        255bp     11             60      8     5       73          0         9        0         SV   BND
+  chr2:4873-5124                          252bp     10             31      0     0        0          0         0        0      SMALL     .
+  chr2:9859-10132                         274bp     23             85      0     0       72          0        12        7         SV   INS
+  chr2:14862-15141                        280bp     12             60      6     6       72          0        10        0         SV   BND
+  chr2:21867-22078                        212bp     10            211      0     1      114          7         9        0         SV     .
+============================================================
