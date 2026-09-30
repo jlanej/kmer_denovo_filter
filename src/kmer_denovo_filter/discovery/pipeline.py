@@ -1257,30 +1257,32 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta):
         return annotations, []
 
     # ── Annotation from metadata ──
-    # Track which (qname, region) pairs have already been counted for
-    # split_reads so each molecule is counted at most once per region,
-    # even when both primary and supplementary alignments are informative.
-    split_read_counted = set()
+    # Each molecule adds at most one to each count per region, even when
+    # both its primary and supplementary alignments are informative and
+    # carry the same flags; otherwise one molecule could reach the SV
+    # threshold of two on its own.
+    counted = set()  # (qname, region, count name)
 
     for dedup_key, meta in read_sv_meta.items():
         qname = dedup_key[0]
         if qname not in read_to_regions:
             continue
 
+        evidence = []
+        if meta["has_sa"]:
+            evidence.append("split_reads")
+        if meta["is_paired"]:
+            if meta["mate_is_unmapped"]:
+                evidence.append("unmapped_mates")
+            elif not meta["is_proper_pair"]:
+                evidence.append("discordant_pairs")
+
         for region_key in read_to_regions[qname]:
             ann = annotations[region_key]
-
-            if meta["has_sa"]:
-                sr_key = (qname, region_key)
-                if sr_key not in split_read_counted:
-                    ann["split_reads"] += 1
-                    split_read_counted.add(sr_key)
-
-            if meta["is_paired"]:
-                if meta["mate_is_unmapped"]:
-                    ann["unmapped_mates"] += 1
-                elif not meta["is_proper_pair"]:
-                    ann["discordant_pairs"] += 1
+            for name in evidence:
+                if (qname, region_key, name) not in counted:
+                    counted.add((qname, region_key, name))
+                    ann[name] += 1
 
             if meta["max_clip"] > ann["max_clip_len"]:
                 ann["max_clip_len"] = meta["max_clip"]
@@ -1364,6 +1366,11 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta):
 def _write_bedpe(links, bedpe_path):
     """Write linked SV breakpoint pairs to a BEDPE file.
 
+    Uses the standard BEDPE layout, so tools such as bedtools can read it:
+    name (``SV_n``) and score (supporting reads) in columns 7–8, strands
+    in columns 9–10 (``.``, as breakpoint orientation is not inferred),
+    and the SV type hint as an extra column 11.
+
     Args:
         links: List of link dicts from ``_annotate_and_link_from_metadata()``.
         bedpe_path: Output BEDPE file path.
@@ -1371,7 +1378,7 @@ def _write_bedpe(links, bedpe_path):
     with open(bedpe_path, "w") as fh:
         fh.write(
             "#chrom1\tstart1\tend1\tchrom2\tstart2\tend2"
-            "\tsv_id\tsupporting_reads\tsv_type\n"
+            "\tsv_id\tsupporting_reads\tstrand1\tstrand2\tsv_type\n"
         )
         for idx, link in enumerate(links, 1):
             ra = link["region_a"]
@@ -1381,7 +1388,7 @@ def _write_bedpe(links, bedpe_path):
             fh.write(
                 f"{ra[0]}\t{ra[1]}\t{ra[2]}"
                 f"\t{rb[0]}\t{rb[1]}\t{rb[2]}"
-                f"\tSV_{idx}\t{n_support}\t{sv_type}\n"
+                f"\tSV_{idx}\t{n_support}\t.\t.\t{sv_type}\n"
             )
     logger.info("BEDPE file written: %s (%d links)", bedpe_path, len(links))
 

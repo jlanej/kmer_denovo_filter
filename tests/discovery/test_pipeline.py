@@ -22,6 +22,7 @@ from kmer_denovo_filter.core.jellyfish_wrappers import (
 from kmer_denovo_filter.kmer_utils import canonicalize
 from kmer_denovo_filter.pipeline import (
     _anchor_and_cluster,
+    _annotate_and_link_from_metadata,
     _classify_regions,
     _count_parent_jellyfish,
     _validate_inputs,
@@ -1277,16 +1278,48 @@ class TestDiscoverySV:
             lines = fh.readlines()
 
         assert lines[0].startswith("#chrom1")
-        parts1 = lines[1].strip().split("\t")
-        assert len(parts1) == 9
+        parts1 = lines[1].rstrip("\n").split("\t")
+        # Standard BEDPE: name, score, strand1, strand2, then extra columns
+        assert len(parts1) == 11
         assert parts1[0] == "chr1"
         assert parts1[6] == "SV_1"
         assert parts1[7] == "2"  # 2 supporting reads
-        assert parts1[8] == "INTRA"
+        assert parts1[8:10] == [".", "."]
+        assert parts1[10] == "INTRA"
 
-        parts2 = lines[2].strip().split("\t")
+        parts2 = lines[2].rstrip("\n").split("\t")
         assert parts2[3] == "chr2"
-        assert parts2[8] == "BND"
+        assert parts2[10] == "BND"
+
+    @pytest.mark.parametrize("mate_is_unmapped, count", [
+        (True, "unmapped_mates"),
+        (False, "discordant_pairs"),
+    ])
+    def test_one_molecule_counts_once(self, mate_is_unmapped, count):
+        """A split read whose primary and supplementary alignments are
+        both informative is still one molecule: one split read, one
+        unmapped mate or discordant pair, so not SV on its own."""
+        region = ("chr1", 1000, 1600)
+        flags = {
+            "has_sa": True, "is_paired": True,
+            "is_proper_pair": False, "mate_is_unmapped": mate_is_unmapped,
+        }
+        read_sv_meta = {
+            ("frag1", False): {
+                **flags, "sa_str": "chr1,1400,+,60S90M,60,0;",
+                "max_clip": 90,
+            },
+            ("frag1", True): {**flags, "sa_str": None, "max_clip": 60},
+        }
+
+        annotations, links = _annotate_and_link_from_metadata(
+            [region], {region: {"frag1"}}, read_sv_meta,
+        )
+        _classify_regions([region], annotations, links)
+
+        assert annotations[region]["split_reads"] == 1
+        assert annotations[region][count] == 1
+        assert annotations[region]["class"] == "AMBIGUOUS"
 
     def test_sv_bedpe_cli_argument(self, tmpdir):
         """--sv-bedpe argument should be accepted."""

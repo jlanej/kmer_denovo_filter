@@ -593,7 +593,12 @@ discordant-pair evidence across discovery regions:
 | end2 | End of the second breakpoint region |
 | sv_id | Identifier for the SV link (e.g. `SV_1`) |
 | supporting_reads | Number of reads supporting the link |
+| strand1 | Always `.` (breakpoint orientation is not inferred) |
+| strand2 | Always `.` |
 | sv_type | SV type hint: `INTRA` (intra-chromosomal) or `BND` (inter-chromosomal) |
+
+The first ten columns follow the standard BEDPE layout, so the file can be
+used directly with tools such as `bedtools pairtobed`.
 
 When no linked breakpoints are found the file contains only the header line.
 
