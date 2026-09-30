@@ -5,6 +5,7 @@ import concurrent.futures
 import json
 import os
 import random
+import subprocess
 import tempfile
 
 import pysam
@@ -14,7 +15,10 @@ import kmer_denovo_filter.pipeline as pipeline_mod
 import kmer_denovo_filter.discovery.pipeline as discovery_pipeline_mod
 import kmer_denovo_filter.core.bam_scanner as bam_scanner_mod
 from kmer_denovo_filter.cli import parse_args
-from kmer_denovo_filter.core.jellyfish_wrappers import _run_samtools_jellyfish
+from kmer_denovo_filter.core.jellyfish_wrappers import (
+    _ensure_ref_jf,
+    _run_samtools_jellyfish,
+)
 from kmer_denovo_filter.kmer_utils import canonicalize
 from kmer_denovo_filter.pipeline import (
     _anchor_and_cluster,
@@ -1638,6 +1642,76 @@ class TestJellyfishBatchScanMemory:
         assert jf_query.query_calls[1] == {"GGGGG"}
         assert jf_query.close_calls == 2
         assert len(seen_reads) == 3
+
+
+class TestReferenceIndexCheck:
+    """An existing reference index must match --kmer-size and be canonical."""
+
+    def _ref_fasta(self, tmp_path):
+        ref_fa = str(tmp_path / "ref.fa")
+        _create_ref_fasta(ref_fa, "chr1", 200)
+        return ref_fa
+
+    def _count(self, ref_fa, out, k, canonical=True):
+        cmd = ["jellyfish", "count", "-m", str(k), "-s", "1M", "-t", "1"]
+        if canonical:
+            cmd.append("-C")
+        subprocess.run(cmd + [ref_fa, "-o", out], check=True)
+        return out
+
+    def test_matching_index_is_reused(self, tmp_path):
+        ref_fa = self._ref_fasta(tmp_path)
+        jf = self._count(ref_fa, str(tmp_path / "ref.jf"), 5)
+        mtime = os.path.getmtime(jf)
+
+        assert _ensure_ref_jf(ref_fa, 5, 1, ref_jf=jf) == jf
+        assert os.path.getmtime(jf) == mtime
+
+    def test_index_with_another_k_is_rejected(self, tmp_path):
+        ref_fa = self._ref_fasta(tmp_path)
+        jf = self._count(ref_fa, str(tmp_path / "ref.jf"), 5)
+        with pytest.raises(
+            RuntimeError, match="holds 5-mers but --kmer-size is 7",
+        ):
+            _ensure_ref_jf(ref_fa, 7, 1, ref_jf=jf)
+
+    def test_non_canonical_index_is_rejected(self, tmp_path):
+        ref_fa = self._ref_fasta(tmp_path)
+        jf = self._count(ref_fa, str(tmp_path / "ref.jf"), 5, canonical=False)
+        with pytest.raises(RuntimeError, match="built without -C"):
+            _ensure_ref_jf(ref_fa, 5, 1, ref_jf=jf)
+
+    def test_non_jellyfish_file_is_rejected(self, tmp_path):
+        ref_fa = self._ref_fasta(tmp_path)
+        jf = tmp_path / "ref.jf"
+        jf.write_text("not an index\n")
+        with pytest.raises(RuntimeError, match="Cannot read Jellyfish index"):
+            _ensure_ref_jf(ref_fa, 5, 1, ref_jf=str(jf))
+
+    def test_new_index_is_renamed_into_place(self, tmp_path):
+        ref_fa = self._ref_fasta(tmp_path)
+
+        jf = _ensure_ref_jf(ref_fa, 5, 1)
+
+        assert jf == f"{ref_fa}.k5.jf"
+        assert os.path.isfile(jf)
+        assert not [p for p in os.listdir(tmp_path) if ".tmp" in p]
+        assert _ensure_ref_jf(ref_fa, 5, 1) == jf  # passes the check
+
+    def test_failed_build_leaves_no_index_behind(self, tmp_path, monkeypatch):
+        ref_fa = self._ref_fasta(tmp_path)
+
+        def _failing_count(cmd, **kwargs):
+            # A failing or killed build can leave partial output behind.
+            with open(cmd[cmd.index("-o") + 1], "w") as fh:
+                fh.write("partial")
+            return subprocess.CompletedProcess(cmd, 1, "", "out of memory")
+
+        monkeypatch.setattr(subprocess, "run", _failing_count)
+        with pytest.raises(RuntimeError, match="out of memory"):
+            _ensure_ref_jf(ref_fa, 5, 1)
+
+        assert sorted(os.listdir(tmp_path)) == ["ref.fa", "ref.fa.fai"]
 
 
 class TestAnchoringMergeOrder:
