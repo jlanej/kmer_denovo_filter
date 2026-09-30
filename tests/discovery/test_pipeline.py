@@ -1,8 +1,10 @@
 """Discovery-mode pipeline tests (split from tests/test_pipeline.py)."""
 
 import collections
+import concurrent.futures
 import json
 import os
+import random
 import tempfile
 
 import pysam
@@ -1636,6 +1638,81 @@ class TestJellyfishBatchScanMemory:
         assert jf_query.query_calls[1] == {"GGGGG"}
         assert jf_query.close_calls == 2
         assert len(seen_reads) == 3
+
+
+class TestAnchoringMergeOrder:
+    """Cross-contig de-duplication must not depend on worker timing."""
+
+    K = 11
+
+    def _build_inputs(self, tmp_path):
+        rng = random.Random(3)
+        seq_a = "".join(rng.choice("ACGT") for _ in range(60))
+        seq_b = "".join(rng.choice("ACGT") for _ in range(60))
+        child_bam = str(tmp_path / "child.bam")
+        # Both mates of one pair carry proband-unique k-mers, on different
+        # chromosomes (as when both reads span a translocation junction).
+        # They share the de-duplication key, so only one can be kept.
+        _create_bam_with_supplementary(
+            child_bam, None, ["chrA", "chrB"], [1000, 1000],
+            [
+                {"name": "pair1", "chrom_idx": 0, "pos": 100,
+                 "seq": seq_a, "flag": 0x1 | 0x40},
+                {"name": "pair1", "chrom_idx": 1, "pos": 500,
+                 "seq": seq_b, "flag": 0x1 | 0x80},
+            ],
+        )
+        kmers = {
+            canonicalize(seq[i:i + self.K])
+            for seq in (seq_a, seq_b) for i in range(20)
+        }
+        return child_bam, kmers
+
+    def test_mates_on_two_contigs_resolve_like_a_single_worker(
+        self, tmp_path, monkeypatch,
+    ):
+        child_bam, kmers = self._build_inputs(tmp_path)
+        expected = _anchor_and_cluster(
+            child_bam, None, kmers, self.K, threads=1,
+        )
+
+        submitted = []
+
+        class _InlineExecutor:
+            """Runs each task in-process as soon as it is submitted."""
+
+            def __init__(self, max_workers, initializer, initargs):
+                initializer(*initargs)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                bam_scanner_mod._reset_scan_worker()
+
+            def submit(self, fn, *args):
+                future = concurrent.futures.Future()
+                future.set_result(fn(*args))
+                submitted.append(future)
+                return future
+
+        def _last_submitted_first(pending, timeout=None, return_when=None):
+            future = max(pending, key=submitted.index)
+            return {future}, pending - {future}
+
+        # Two workers, finishing in reverse contig order: chrB before chrA.
+        monkeypatch.setattr(
+            concurrent.futures, "ProcessPoolExecutor", _InlineExecutor,
+        )
+        monkeypatch.setattr(concurrent.futures, "wait", _last_submitted_first)
+        result = _anchor_and_cluster(
+            child_bam, None, kmers, self.K, threads=2,
+        )
+
+        regions, region_reads = result[0], result[1]
+        assert regions == expected[0]
+        assert [chrom for chrom, _, _ in regions] == ["chrA"]
+        assert region_reads == expected[1]
 
 
 class TestInformativeBamFromAnchoring:
