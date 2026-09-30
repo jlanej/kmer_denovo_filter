@@ -27,6 +27,10 @@ The simulator needs only pysam. It writes each read's alignment from the
 read's known origin, following BWA-MEM's conventions, so no aligner is
 needed. `kmer-discovery` needs samtools and Jellyfish.
 
+The test also re-aligns the same reads with BWA-MEM when bwa is installed,
+and checks that every call holds. There, the 55 bp insertion arrives as
+split reads instead of a CIGAR insertion.
+
 The expected output is in [`expected/`](expected/):
 [`sv_demo.bed`](expected/sv_demo.bed),
 [`sv_demo.sv.bedpe`](expected/sv_demo.sv.bedpe) and
@@ -40,8 +44,8 @@ checks that a fresh run matches it. The results by event:
 | Tandem duplication | SV (both ends) | DUP | `- +` DUP |
 | Inversion | SV (both ends) | INV | `+ +` and `- -` INV (one line per junction) |
 | Translocation | SV (both ends) | BND | `+ -` and `- +` BND (one line per junction) |
-| 55 bp insertion | SV | INS (CIGAR) | – |
-| 250 bp insertion | SV | `.` (clips and unmapped mates only) | – |
+| 55 bp insertion | SV | INS (CIGAR insertion, or split reads with BWA-MEM) | – |
+| 250 bp insertion | SV | INS (reads clipped from both sides) | – |
 | SNV | SMALL | `.` | – |
 
 For how each call is made, see
