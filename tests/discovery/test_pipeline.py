@@ -110,11 +110,11 @@ class TestDiscoveryPipeline:
         with open(bed_path) as fh:
             bed_lines = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
         assert len(bed_lines) >= 1, "Expected at least one candidate region"
-        # BED lines should have 12 columns: chrom, start, end, reads, kmers,
+        # BED lines should have 13 columns: chrom, start, end, reads, kmers,
         # split_reads, discordant_pairs, max_clip_len, unmapped_mates, class,
-        # breakpoint_reads, large_indel_reads
+        # breakpoint_reads, large_indel_reads, sv_type
         parts = bed_lines[0].split("\t")
-        assert len(parts) == 12
+        assert len(parts) == 13
         assert int(parts[3]) >= 1  # at least 1 read
         assert int(parts[4]) >= 1  # at least 1 k-mer
 
@@ -1692,16 +1692,38 @@ class TestJellyfishBatchScanMemory:
         assert len(seen_reads) == 3
 
 
-def _sv_meta(pos, mapq=60, clips=(), large_indel=False, mate=None, sa=None,
-             proper=True, mate_unmapped=False, max_clip=0):
-    """Per-read SV metadata as recorded by _process_informative_read."""
+def _sv_meta(pos, mapq=60, clips=(), large_indel=None, mate=None, sa=None,
+             proper=True, mate_unmapped=False, max_clip=0, reverse=False,
+             clip_side=None):
+    """Per-read SV metadata as recorded by _process_informative_read.
+
+    *mate* is (chrom, pos, MQ or None, mate is reverse).
+    """
     return {
         "has_sa": sa is not None, "sa_str": sa, "is_paired": True,
         "is_proper_pair": proper, "mate_is_unmapped": mate_unmapped,
         "max_clip": max_clip, "mapq": mapq, "pos": pos,
+        "end": pos[1] + 150, "is_reverse": reverse, "clip_side": clip_side,
         "clip_positions": list(clips), "large_indel": large_indel,
         "mate": mate,
     }
+
+
+def _annotate_regions(regions, read_sv_meta, link_slack=0):
+    """Annotate, link and classify *regions* from per-read metadata."""
+    region_reads = collections.defaultdict(set)
+    for (qname, _is_supp), meta in read_sv_meta.items():
+        if "pos" not in meta:
+            continue
+        chrom, pos = meta["pos"]
+        for region in regions:
+            if region[0] == chrom and region[1] <= pos < region[2]:
+                region_reads[region].add(qname)
+    annotations, links = _annotate_and_link_from_metadata(
+        regions, region_reads, read_sv_meta, link_slack=link_slack,
+    )
+    _classify_regions(regions, annotations, links)
+    return annotations, links
 
 
 class TestSVEvidence:
@@ -1712,20 +1734,9 @@ class TestSVEvidence:
     C = ("chr2", 5000, 5300)
 
     def _run(self, read_sv_meta, link_slack=0):
-        regions = [self.A, self.B, self.C]
-        region_reads = collections.defaultdict(set)
-        for (qname, _is_supp), meta in read_sv_meta.items():
-            if "pos" not in meta:
-                continue
-            chrom, pos = meta["pos"]
-            for region in regions:
-                if region[0] == chrom and region[1] <= pos < region[2]:
-                    region_reads[region].add(qname)
-        annotations, links = _annotate_and_link_from_metadata(
-            regions, region_reads, read_sv_meta, link_slack=link_slack,
+        return _annotate_regions(
+            [self.A, self.B, self.C], read_sv_meta, link_slack,
         )
-        _classify_regions(regions, annotations, links)
-        return annotations, links
 
     def test_clips_at_one_breakpoint(self):
         annotations, _ = self._run({
@@ -1750,7 +1761,7 @@ class TestSVEvidence:
     ])
     def test_large_cigar_indels(self, n_reads, expected):
         annotations, _ = self._run({
-            (f"m{i}", False): _sv_meta(("chr1", 1100 + i), large_indel=True)
+            (f"m{i}", False): _sv_meta(("chr1", 1100 + i), large_indel="DEL")
             for i in range(n_reads)
         })
         assert annotations[self.A]["large_indel_reads"] == n_reads
@@ -1772,14 +1783,17 @@ class TestSVEvidence:
         annotations, links = self._run({
             ("a1", False): _sv_meta(("chr1", 1050)),
             ("p1", False): _sv_meta(("chr1", 20010), proper=False,
-                                    mate=("chr1", 1100, None)),
+                                    reverse=True,
+                                    mate=("chr1", 1100, None, False)),
             ("p2", False): _sv_meta(("chr1", 20020), proper=False,
-                                    mate=("chr1", 1150, None)),
+                                    reverse=True,
+                                    mate=("chr1", 1150, None, False)),
         })
         assert [(l["region_a"], l["region_b"], l["supporting_reads"],
-                 l["sv_type_hint"]) for l in links] == [
-            (self.A, self.B, {"p1", "p2"}, "INTRA"),
+                 l["strands"], l["sv_type_hint"]) for l in links] == [
+            (self.A, self.B, {"p1", "p2"}, ("+", "-"), "DEL"),
         ]
+        assert annotations[self.A]["sv_type"] == "DEL"
         assert annotations[self.A]["class"] == "SV"
         assert annotations[self.B]["discordant_pairs"] == 2
 
@@ -1788,7 +1802,7 @@ class TestSVEvidence:
         _, links = self._run({
             ("a1", False): _sv_meta(("chr1", 1050)),
             ("p1", False): _sv_meta(("chr1", 20010), proper=False,
-                                    mate=("chr1", 1500, None)),
+                                    mate=("chr1", 1500, None, False)),
         }, link_slack=link_slack)
         assert bool(links) is linked
 
@@ -1803,8 +1817,9 @@ class TestSVEvidence:
 
     @pytest.mark.parametrize("meta", [
         _sv_meta(("chr1", 20010), mapq=10, proper=False,
-                 mate=("chr1", 1100, None)),
-        _sv_meta(("chr1", 20010), proper=False, mate=("chr1", 1100, 5)),
+                 mate=("chr1", 1100, None, False)),
+        _sv_meta(("chr1", 20010), proper=False,
+                 mate=("chr1", 1100, 5, False)),
         _sv_meta(("chr1", 20010), sa="chr1,1101,+,50S100M,3,0;"),
     ], ids=["read MAPQ", "mate MQ", "SA MAPQ"])
     def test_low_mapping_quality_does_not_link(self, meta):
@@ -1854,11 +1869,113 @@ class TestSVEvidence:
         assert meta[("clipped", False)]["clip_positions"] == [1000, 1100]
         assert meta[("clipped", False)]["max_clip"] == 30
         assert meta[("short_clip", False)]["clip_positions"] == []
-        assert meta[("deletion", False)]["large_indel"] is True
-        assert meta[("clipped", False)]["large_indel"] is False
-        assert meta[("discordant", False)]["mate"] == ("chr2", 500, 37)
+        assert meta[("deletion", False)]["large_indel"] == "DEL"
+        assert meta[("clipped", False)]["large_indel"] is None
+        assert meta[("clipped", False)]["clip_side"] == "-"  # 30S > 25S
+        assert meta[("clipped", False)]["end"] == 1100
+        assert meta[("discordant", False)]["mate"] == ("chr2", 500, 37, False)
+        assert meta[("discordant", False)]["is_reverse"] is False
         assert meta[("clipped", False)]["mate"] is None  # proper pair
         assert meta[("placed", False)] == {"placed_unmapped": ("chr1", 1234)}
+
+
+class TestSVTypes:
+    """SV type and breakpoint orientation from split reads and pairs."""
+
+    A = ("chr1", 1000, 1300)
+    B = ("chr1", 20000, 20300)
+    C = ("chr2", 5000, 5300)
+
+    def _links(self, read_sv_meta):
+        annotations, links = _annotate_regions(
+            [self.A, self.B, self.C], read_sv_meta,
+        )
+        return annotations, [(l["region_a"], l["region_b"], l["strands"],
+                              l["sv_type_hint"]) for l in links]
+
+    def _with_anchor(self, **metas):
+        # Every region used needs an informative read of its own
+        return {("anchor_a", False): _sv_meta(("chr1", 1010)),
+                ("anchor_b", False): _sv_meta(("chr1", 20010)),
+                ("anchor_c", False): _sv_meta(("chr2", 5010)),
+                **{(name, False): meta for name, meta in metas.items()}}
+
+    def test_deletion_from_split_read(self):
+        # Left segment clipped on its right at A, right segment at B
+        annotations, links = self._links(self._with_anchor(s1=_sv_meta(
+            ("chr1", 1100), clip_side="+", sa="chr1,20051,+,90S60M,60,0;")))
+        assert links == [(self.A, self.B, ("+", "-"), "DEL")]
+        assert annotations[self.B]["sv_type"] == "DEL"
+
+    def test_tandem_duplication_from_split_read(self):
+        # The read runs off the end of the duplication (B) into its start (A)
+        _, links = self._links(self._with_anchor(s1=_sv_meta(
+            ("chr1", 20100), clip_side="+", sa="chr1,1101,+,90S60M,60,0;")))
+        assert links == [(self.A, self.B, ("-", "+"), "DUP")]
+
+    def test_inversion_from_split_read(self):
+        # The second segment aligns to the reverse strand near B
+        _, links = self._links(self._with_anchor(s1=_sv_meta(
+            ("chr1", 1100), clip_side="+", sa="chr1,20051,-,60M90S,60,0;")))
+        assert links == [(self.A, self.B, ("+", "+"), "INV")]
+
+    @pytest.mark.parametrize("read_reverse, mate_reverse, strands, sv_type", [
+        (False, True, ("+", "-"), "DEL"),
+        (True, False, ("-", "+"), "DUP"),
+        (False, False, ("+", "+"), "INV"),
+        (True, True, ("-", "-"), "INV"),
+    ])
+    def test_orientation_from_discordant_pair(self, read_reverse,
+                                              mate_reverse, strands, sv_type):
+        _, links = self._links(self._with_anchor(p1=_sv_meta(
+            ("chr1", 1100), proper=False, reverse=read_reverse,
+            mate=("chr1", 20100, None, mate_reverse))))
+        assert links == [(self.A, self.B, strands, sv_type)]
+
+    def test_translocation_keeps_orientation(self):
+        _, links = self._links(self._with_anchor(s1=_sv_meta(
+            ("chr1", 1100), clip_side="+", sa="chr2,5101,+,90S60M,60,0;")))
+        assert links == [(self.A, self.C, ("+", "-"), "BND")]
+
+    def test_conflicting_orientations_leave_the_type_open(self):
+        _, links = self._links(self._with_anchor(
+            p1=_sv_meta(("chr1", 1100), proper=False,
+                        mate=("chr1", 20100, None, True)),     # DEL
+            p2=_sv_meta(("chr1", 1110), proper=False, reverse=True,
+                        mate=("chr1", 20110, None, False)),    # DUP
+        ))
+        assert links == [(self.A, self.B, None, "INTRA")]
+
+    def test_both_inversion_junctions_make_one_inv_link(self):
+        _, links = self._links(self._with_anchor(
+            p1=_sv_meta(("chr1", 1100), proper=False,
+                        mate=("chr1", 20100, None, False)),    # + +
+            p2=_sv_meta(("chr1", 1110), proper=False, reverse=True,
+                        mate=("chr1", 20110, None, True)),     # - -
+        ))
+        assert links == [(self.A, self.B, None, "INV")]
+
+    def test_deletion_within_one_region(self):
+        """Both breakpoints in one region: no link, but a typed region."""
+        annotations, links = self._links(self._with_anchor(s1=_sv_meta(
+            ("chr1", 1050), clip_side="+", sa="chr1,1201,+,50S100M,60,0;")))
+        assert links == []
+        assert annotations[self.A]["sv_type"] == "DEL"
+
+    @pytest.mark.parametrize("kind", ["DEL", "INS"])
+    def test_cigar_indel_types_its_region(self, kind):
+        annotations, _ = self._links(self._with_anchor(
+            m1=_sv_meta(("chr1", 1100), large_indel=kind)))
+        assert annotations[self.A]["sv_type"] == kind
+        assert annotations[self.B]["sv_type"] == "."
+
+    @pytest.mark.parametrize("cigar, side", [
+        ("30H120M", "-"), ("120M30H", "+"), ("10S120M20S", "+"),
+        ("20S120M20S", None), ("150M", None),
+    ])
+    def test_clip_side(self, cigar, side):
+        assert bam_scanner_mod._clip_side(
+            bam_scanner_mod._parse_cigar(cigar)) == side
 
 
 class TestReferenceIndexCheck:

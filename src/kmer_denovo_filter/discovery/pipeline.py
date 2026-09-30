@@ -16,8 +16,10 @@ import time
 import pysam
 
 from kmer_denovo_filter.core.bam_scanner import (
+    _clip_side,
     _collect_read_alignment_metadata,
     _init_scan_worker,
+    _parse_cigar,
     _reset_scan_worker,
     _scan_contig_for_hits,
 )
@@ -1047,7 +1049,7 @@ def _write_bed(regions, region_reads, region_kmers, bed_path,
             "#chrom\tstart\tend\treads\tunique_kmers"
             "\tsplit_reads\tdiscordant_pairs"
             "\tmax_clip_len\tunmapped_mates\tclass"
-            "\tbreakpoint_reads\tlarge_indel_reads\n"
+            "\tbreakpoint_reads\tlarge_indel_reads\tsv_type\n"
         )
         for chrom, start, end in regions:
             region_key = (chrom, start, end)
@@ -1061,11 +1063,12 @@ def _write_bed(regions, region_reads, region_kmers, bed_path,
             region_class = ann.get("class", "SMALL")
             breakpoint_reads = ann.get("breakpoint_reads", 0)
             large_indel_reads = ann.get("large_indel_reads", 0)
+            sv_type = ann.get("sv_type", ".")
             fh.write(
                 f"{chrom}\t{start}\t{end}\t{n_reads}\t{n_kmers}"
                 f"\t{split_reads}\t{discordant_pairs}"
                 f"\t{max_clip_len}\t{unmapped_mates}\t{region_class}"
-                f"\t{breakpoint_reads}\t{large_indel_reads}\n"
+                f"\t{breakpoint_reads}\t{large_indel_reads}\t{sv_type}\n"
             )
     logger.info("BED file written: %s (%d regions)", bed_path, len(regions))
 
@@ -1240,6 +1243,14 @@ _SV_EVIDENCE = (
 )
 
 
+def _unique_majority(values):
+    """Return the most common value, or None if absent or tied."""
+    ranked = collections.Counter(values).most_common(2)
+    if not ranked or (len(ranked) == 2 and ranked[0][1] == ranked[1][1]):
+        return None
+    return ranked[0][0]
+
+
 def _largest_clip_cluster(clips, tolerance=_SV_CLIP_TOLERANCE):
     """Return the most molecules whose clips start within *tolerance* bp.
 
@@ -1284,6 +1295,14 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
     Linking alignments need MAPQ >= ``_MIN_LINK_MAPQ``, and SA and mate
     positions may lie up to *link_slack* bp outside the target region.
 
+    Each joining molecule also gives the breakpoint orientation: from
+    which side of each split-read segment is clipped, or from the read
+    strands of a discordant pair (FR libraries).  A link takes the
+    majority SV type among its molecules (DEL, DUP, INV; BND across
+    chromosomes; INTRA when unknown), and a region's ``sv_type`` is the
+    majority over its molecules, including CIGAR indels (DEL, INS) and
+    joins within the region, or ``.`` when there is none.
+
     Args:
         regions: List of (chrom, start, end) tuples.
         region_reads: Dict mapping region tuple to set of read names.
@@ -1295,9 +1314,10 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
     Returns:
         (annotations, links) where:
         - annotations: Dict mapping region tuple to a dict with the counts
-          in ``_SV_EVIDENCE`` and ``max_clip_len``.
+          in ``_SV_EVIDENCE``, ``max_clip_len`` and ``sv_type``.
         - links: List of dicts with keys: region_a, region_b,
-          supporting_reads, sv_type_hint.
+          supporting_reads, strands (a (strand1, strand2) tuple or None),
+          sv_type_hint.
     """
     regions_by_chrom = collections.defaultdict(list)
     for region in sorted(regions):
@@ -1349,6 +1369,7 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
             annotations[region][name] += 1
 
     clips_by_region = collections.defaultdict(list)
+    type_votes = collections.defaultdict(dict)  # region -> {qname: SV type}
     for (qname, _is_supp), meta in read_sv_meta.items():
         placed = meta.get("placed_unmapped")
         if placed is not None:
@@ -1378,6 +1399,7 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
             clips_by_region[own].append((pos, qname))
         if meta["large_indel"]:
             count(qname, own, "large_indel_reads")
+            type_votes[own].setdefault(qname, meta["large_indel"])
 
     # One long clip is often an adapter or a low-quality tail; a
     # breakpoint needs at least two molecules clipped at it.
@@ -1386,58 +1408,103 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
         if n_clipped >= 2:
             annotations[region]["breakpoint_reads"] = n_clipped
 
-    # ── Linking ──
+    # ── Linking and SV type ──
+    # Each molecule joining two breakends (in two regions, or both in one)
+    # supports the link between their regions and votes for an SV type
+    # from the breakpoint orientation.  A breakend is (chrom, position,
+    # side): the breakpoint follows a "+" alignment and precedes a "-" one.
     bridges = {}
+    link_votes = collections.defaultdict(dict)  # link -> {qname: (type, strands)}
 
-    def link(region_a, region_b, qname):
-        if region_a is None or region_b is None or region_a == region_b:
+    def breakend(chrom, start, end, side):
+        return (chrom, end if side == "+" else start, side)
+
+    def join(end_a, region_a, end_b, region_b, qname):
+        if region_a is None or region_b is None:
             return
-        bridges.setdefault(
-            tuple(sorted((region_a, region_b))), set(),
-        ).add(qname)
+        if end_b[:2] < end_a[:2]:
+            end_a, end_b = end_b, end_a
+            region_a, region_b = region_b, region_a
+        strands = (end_a[2], end_b[2]) if end_a[2] and end_b[2] else None
+        sv_type = _infer_sv_type(region_a, region_b, strands)
+        if region_a != region_b:
+            key = tuple(sorted((region_a, region_b)))
+            bridges.setdefault(key, set()).add(qname)
+            if strands:
+                if key[0] != region_a:
+                    strands = strands[::-1]
+                link_votes[key].setdefault(qname, (sv_type, strands))
+        if sv_type != "INTRA":
+            for region in (region_a, region_b):
+                type_votes[region].setdefault(qname, sv_type)
 
-    molecule_regions = collections.defaultdict(set)
+    molecule_ends = collections.defaultdict(list)
     for (qname, _is_supp), meta in read_sv_meta.items():
         if "pos" not in meta or meta["mapq"] < _MIN_LINK_MAPQ:
             continue
-        own = region_at(*meta["pos"])
+        chrom, start = meta["pos"]
+        own = region_at(chrom, start)
         if own is None:
             continue
-        molecule_regions[qname].add(own)
+        own_end = breakend(chrom, start, meta["end"], meta["clip_side"])
+        molecule_ends[qname].append((own_end, own))
 
         for sa_entry in (meta["sa_str"] or "").rstrip(";").split(";"):
             parts = sa_entry.split(",")
             if len(parts) < 5:
                 continue
             try:
-                sa_pos = int(parts[1]) - 1  # 1-based to 0-based
+                sa_start = int(parts[1]) - 1  # 1-based to 0-based
                 sa_mapq = int(parts[4])
             except ValueError:
                 continue
-            if sa_mapq >= _MIN_LINK_MAPQ:
-                link(own, region_at(parts[0], sa_pos, link_slack), qname)
+            if sa_mapq < _MIN_LINK_MAPQ:
+                continue
+            sa_cigar = _parse_cigar(parts[3])
+            sa_end = sa_start + sum(
+                length for op, length in sa_cigar if op in (0, 2, 3, 7, 8)
+            )
+            join(own_end, own,
+                 breakend(parts[0], sa_start, sa_end, _clip_side(sa_cigar)),
+                 region_at(parts[0], sa_start, link_slack), qname)
 
+        # Paired-end orientation (FR libraries): the breakpoint lies after
+        # a forward read and before a reverse one.
         if meta["mate"] is not None:
-            mate_chrom, mate_pos, mate_mapq = meta["mate"]
+            mate_chrom, mate_pos, mate_mapq, mate_reverse = meta["mate"]
             if mate_mapq is None or mate_mapq >= _MIN_LINK_MAPQ:
-                link(own, region_at(mate_chrom, mate_pos, link_slack), qname)
+                read_side = "-" if meta["is_reverse"] else "+"
+                join(breakend(chrom, start, meta["end"], read_side), own,
+                     (mate_chrom, mate_pos, "-" if mate_reverse else "+"),
+                     region_at(mate_chrom, mate_pos, link_slack), qname)
 
     # A molecule with informative alignments in two regions (e.g. both
-    # parts of a split read) links them.
-    for qname, rset in molecule_regions.items():
-        rlist = sorted(rset)
-        for i, region_a in enumerate(rlist):
-            for region_b in rlist[i + 1:]:
-                link(region_a, region_b, qname)
+    # parts of a split read) joins them.
+    for qname, ends in molecule_ends.items():
+        for i, (end_a, region_a) in enumerate(ends):
+            for end_b, region_b in ends[i + 1:]:
+                if region_a != region_b:
+                    join(end_a, region_a, end_b, region_b, qname)
 
-    # Build links list
+    for region in regions:
+        annotations[region]["sv_type"] = (
+            _unique_majority(type_votes[region].values()) or "."
+        )
+
+    # Build links list: the majority type among the supporting molecules,
+    # and its majority breakpoint orientation
     links = []
-    for region_a, region_b in sorted(bridges):
+    for key in sorted(bridges):
+        votes = link_votes.get(key, {}).values()
+        sv_type = _unique_majority(t for t, _ in votes)
+        strands = sv_type and _unique_majority(s for t, s in votes
+                                               if t == sv_type)
         links.append({
-            "region_a": region_a,
-            "region_b": region_b,
-            "supporting_reads": bridges[(region_a, region_b)],
-            "sv_type_hint": _infer_sv_type(region_a, region_b),
+            "region_a": key[0],
+            "region_b": key[1],
+            "supporting_reads": bridges[key],
+            "strands": strands or None,
+            "sv_type_hint": sv_type or _infer_sv_type(*key),
         })
 
     return annotations, links
@@ -1447,9 +1514,9 @@ def _write_bedpe(links, bedpe_path):
     """Write linked SV breakpoint pairs to a BEDPE file.
 
     Uses the standard BEDPE layout, so tools such as bedtools can read it:
-    name (``SV_n``) and score (supporting reads) in columns 7–8, strands
-    in columns 9–10 (``.``, as breakpoint orientation is not inferred),
-    and the SV type hint as an extra column 11.
+    name (``SV_n``) and score (supporting reads) in columns 7–8, the
+    breakpoint orientation in columns 9–10 (``.`` when unknown), and the
+    SV type as an extra column 11.
 
     Args:
         links: List of link dicts from ``_annotate_and_link_from_metadata()``.
@@ -1464,11 +1531,13 @@ def _write_bedpe(links, bedpe_path):
             ra = link["region_a"]
             rb = link["region_b"]
             n_support = len(link["supporting_reads"])
+            strand1, strand2 = link.get("strands") or (".", ".")
             sv_type = link["sv_type_hint"]
             fh.write(
                 f"{ra[0]}\t{ra[1]}\t{ra[2]}"
                 f"\t{rb[0]}\t{rb[1]}\t{rb[2]}"
-                f"\tSV_{idx}\t{n_support}\t.\t.\t{sv_type}\n"
+                f"\tSV_{idx}\t{n_support}\t{strand1}\t{strand2}"
+                f"\t{sv_type}\n"
             )
     logger.info("BEDPE file written: %s (%d links)", bedpe_path, len(links))
 
@@ -1854,14 +1923,14 @@ def _write_discovery_summary(summary_path, regions, region_reads,
             f" {'Unique K-mers':>14s}"
             f" {'Split':>6s} {'Disc':>5s} {'MaxClip':>8s}"
             f" {'UnmapMate':>10s} {'BkptClip':>9s} {'Indel50':>8s}"
-            f" {'Class':>10s}"
+            f" {'Class':>10s} {'Type':>5s}"
         )
         lines.append(
             f"  {'------':<35s} {'----':>8s} {'-----':>6s}"
             f" {'-------------':>14s}"
             f" {'-----':>6s} {'----':>5s} {'-------':>8s}"
             f" {'---------':>10s} {'--------':>9s} {'-------':>8s}"
-            f" {'-----':>10s}"
+            f" {'-----':>10s} {'----':>5s}"
         )
 
         for chrom, start, end in regions:
@@ -1882,6 +1951,7 @@ def _write_discovery_summary(summary_path, regions, region_reads,
                 f" {ann.get('breakpoint_reads', 0):>9d}"
                 f" {ann.get('large_indel_reads', 0):>8d}"
                 f" {ann.get('class', 'SMALL'):>10s}"
+                f" {ann.get('sv_type', '.'):>5s}"
             )
 
     if candidate_comparison:
@@ -2391,6 +2461,9 @@ def run_discovery_pipeline(args):
                 "large_indel_reads": region_annotations.get(
                     (chrom, start, end), {},
                 ).get("large_indel_reads", 0),
+                "sv_type": region_annotations.get(
+                    (chrom, start, end), {},
+                ).get("sv_type", "."),
                 "class": region_annotations.get(
                     (chrom, start, end), {},
                 ).get("class", "SMALL"),

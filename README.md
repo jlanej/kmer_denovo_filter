@@ -496,6 +496,7 @@ generate the file:
 | class | SV classification: `SV`, `AMBIGUOUS`, or `SMALL` (see below) |
 | breakpoint_reads | Most molecules soft-clipped (by at least 20 bp) within 5 bp of one breakpoint; 0 unless at least two |
 | large_indel_reads | Molecules with a CIGAR insertion or deletion of at least 50 bp |
+| sv_type | Majority SV type among the region's molecules: `DEL`, `DUP` or `INV` from breakpoint orientation (see the BEDPE), `INS` or `DEL` from CIGAR indels, `BND` for a link to another chromosome, or `.` when undetermined or tied |
 
 Evidence columns count molecules (read names), each at most once per
 region. A region is `SV` when at least two molecules show one kind of
@@ -567,6 +568,7 @@ Machine-readable pipeline statistics:
       "unmapped_mates": 0,
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
+      "sv_type": ".",
       "class": "AMBIGUOUS"
     }
   ]
@@ -609,12 +611,19 @@ within `--cluster-distance` of a region counts as in it:
 | end2 | End of the second breakpoint region |
 | sv_id | Identifier for the SV link (e.g. `SV_1`) |
 | supporting_reads | Number of reads supporting the link |
-| strand1 | Always `.` (breakpoint orientation is not inferred) |
-| strand2 | Always `.` |
-| sv_type | SV type hint: `INTRA` (intra-chromosomal) or `BND` (inter-chromosomal) |
+| strand1 | Breakpoint orientation at the first region: `+` when the joined sequence lies left of the breakpoint, `-` when it lies right of it, `.` when unknown |
+| strand2 | Breakpoint orientation at the second region, as for strand1 |
+| sv_type | `DEL` (strands `+ -`), `DUP` (`- +`), `INV` (`+ +` or `- -`), `BND` between chromosomes, or `INTRA` when the orientation is unknown or the molecules disagree |
 
 The first ten columns follow the standard BEDPE layout, so the file can be
 used directly with tools such as `bedtools pairtobed`.
+
+Orientation comes from each supporting molecule: which side of each
+split-read segment is clipped (from the read's CIGAR and its SA tag), or the
+strands of a discordant pair, assuming a standard forward-reverse (FR)
+paired-end library. A link reports the majority type among its molecules and
+that type's majority orientation; the two junctions of an inversion (`+ +`
+and `- -`) give `INV` with `.` strands.
 
 When no linked breakpoints are found the file contains only the header line.
 
