@@ -1297,7 +1297,9 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
 
     Each joining molecule also gives the breakpoint orientation: from
     which side of each split-read segment is clipped, or from the read
-    strands of a discordant pair (FR libraries).  A link takes the
+    strands of a discordant pair (FR libraries).  A forward-reverse pair
+    with both ends in one region gives none, as its insert may be too
+    long (a deletion) or too short (an insertion).  A link takes the
     majority SV type among its molecules (DEL, DUP, INV; BND across
     chromosomes; INTRA when unknown), and a region's ``sv_type`` is the
     majority over its molecules, including CIGAR indels (DEL, INS) and
@@ -1419,14 +1421,20 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
     def breakend(chrom, start, end, side):
         return (chrom, end if side == "+" else start, side)
 
-    def join(end_a, region_a, end_b, region_b, qname):
+    def join(end_a, region_a, end_b, region_b, qname, pair=False):
         if region_a is None or region_b is None:
             return
-        if end_b[:2] < end_a[:2]:
+        # By position; on a tie, a "+" end comes first
+        if (end_b[:2], end_b[2] != "+") < (end_a[:2], end_a[2] != "+"):
             end_a, end_b = end_b, end_a
             region_a, region_b = region_b, region_a
         strands = (end_a[2], end_b[2]) if end_a[2] and end_b[2] else None
         sv_type = _infer_sv_type(region_a, region_b, strands)
+        if pair and sv_type == "DEL" and region_a == region_b:
+            # A forward-reverse pair within one region is either too far
+            # apart (a deletion) or too close (an insertion, e.g. one
+            # longer than the reads); the insert size alone can't say which
+            return
         if region_a != region_b:
             key = tuple(sorted((region_a, region_b)))
             bridges.setdefault(key, set()).add(qname)
@@ -1469,14 +1477,16 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
                  region_at(parts[0], sa_start, link_slack), qname)
 
         # Paired-end orientation (FR libraries): the breakpoint lies after
-        # a forward read and before a reverse one.
+        # a forward read and before a reverse one.  The two reads are
+        # ordered by where they start, so a forward read overlapping its
+        # reverse mate still reads as forward-reverse.
         if meta["mate"] is not None:
             mate_chrom, mate_pos, mate_mapq, mate_reverse = meta["mate"]
             if mate_mapq is None or mate_mapq >= _MIN_LINK_MAPQ:
-                read_side = "-" if meta["is_reverse"] else "+"
-                join(breakend(chrom, start, meta["end"], read_side), own,
+                join((chrom, start, "-" if meta["is_reverse"] else "+"), own,
                      (mate_chrom, mate_pos, "-" if mate_reverse else "+"),
-                     region_at(mate_chrom, mate_pos, link_slack), qname)
+                     region_at(mate_chrom, mate_pos, link_slack), qname,
+                     pair=True)
 
     # A molecule with informative alignments in two regions (e.g. both
     # parts of a split read) joins them.

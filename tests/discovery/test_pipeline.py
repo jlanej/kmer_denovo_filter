@@ -1962,6 +1962,27 @@ class TestSVTypes:
         assert links == []
         assert annotations[self.A]["sv_type"] == "DEL"
 
+    @pytest.mark.parametrize("read_reverse, mate_pos, sv_type", [
+        (False, 1250, "."),   # forward-reverse: too far apart, or too close
+        (False, 1120, "."),   # forward-reverse, overlapping
+        (True, 1050, "."),    # starting together
+        (True, 1250, "DUP"),  # reverse-forward: facing away
+    ])
+    def test_discordant_pair_within_one_region(self, read_reverse, mate_pos,
+                                               sv_type):
+        """A forward-reverse pair inside one region may span a deletion or
+        an insertion (e.g. one longer than the reads), so it is untyped."""
+        annotations, links = self._links(self._with_anchor(**{
+            f"p{i}": _sv_meta(("chr1", 1050), proper=False,
+                              reverse=read_reverse,
+                              mate=("chr1", mate_pos, None, not read_reverse))
+            for i in range(2)
+        }))
+        assert links == []
+        assert annotations[self.A]["discordant_pairs"] == 2
+        assert annotations[self.A]["class"] == "SV"
+        assert annotations[self.A]["sv_type"] == sv_type
+
     @pytest.mark.parametrize("kind", ["DEL", "INS"])
     def test_cigar_indel_types_its_region(self, kind):
         annotations, _ = self._links(self._with_anchor(
