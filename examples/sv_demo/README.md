@@ -38,8 +38,8 @@ checks that a fresh run matches it. The results by event:
 |---|---|---|---|
 | Deletion | SV (both ends) | DEL | `+ -` DEL |
 | Tandem duplication | SV (both ends) | DUP | `- +` DUP |
-| Inversion | SV (both ends) | INV | `+ +` INV |
-| Translocation | SV (both ends) | BND | `+ -` BND |
+| Inversion | SV (both ends) | INV | `+ +` and `- -` INV (one line per junction) |
+| Translocation | SV (both ends) | BND | `+ -` and `- +` BND (one line per junction) |
 | 55 bp insertion | SV | INS (CIGAR) | – |
 | 250 bp insertion | SV | `.` (clips and unmapped mates only) | – |
 | SNV | SMALL | `.` | – |

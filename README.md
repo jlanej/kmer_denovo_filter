@@ -619,12 +619,13 @@ Human-readable overview including:
 #### SV breakpoints BEDPE (`{prefix}.sv.bedpe`)
 
 Tab-delimited [BEDPE](https://bedtools.readthedocs.io/en/latest/content/general-usage.html#bedpe-format)
-file [4] listing pairs of discovery regions linked by the same molecules:
-split alignments (an SA tag, or both parts of a split read carrying
-proband-unique k-mers) or discordant pairs with one end in each region.
-Linking alignments need a mapping quality of at least 20 (for a mate, only
-when the BAM records it in the `MQ` tag), and a split alignment or mate
-within `--cluster-distance` of a region counts as in it:
+file [4] with one line per junction: a pair of discovery regions joined by
+the same molecules, and the orientation of the join. A molecule joins two
+regions by a split alignment (an SA tag, or both parts of a split read
+carrying proband-unique k-mers) or a discordant pair with one end in each
+region. Linking alignments need a mapping quality of at least 20 (for a
+mate, only when the BAM records it in the `MQ` tag), and a split alignment
+or mate within `--cluster-distance` of a region counts as in it:
 
 | Column | Description |
 |---|---|
@@ -634,8 +635,8 @@ within `--cluster-distance` of a region counts as in it:
 | chrom2 | Chromosome of the second breakpoint region |
 | start2 | 0-based start of the second breakpoint region |
 | end2 | End of the second breakpoint region |
-| sv_id | Identifier for the SV link (e.g. `SV_1`) |
-| supporting_reads | Number of reads supporting the link |
+| sv_id | Identifier for the junction (e.g. `SV_1`) |
+| supporting_reads | Molecules (read names) showing this junction; on a line with `.` strands, all molecules joining the two regions |
 | strand1 | Breakpoint orientation at the first region: `+` when the joined sequence lies left of the breakpoint, `-` when it lies right of it, `.` when unknown |
 | strand2 | Breakpoint orientation at the second region, as for strand1 |
 | sv_type | `DEL` (strands `+ -`), `DUP` (`- +`), `INV` (`+ +` or `- -`), `BND` between chromosomes, or `INTRA` when the orientation is unknown or the molecules disagree |
@@ -646,12 +647,14 @@ used directly with tools such as `bedtools pairtobed`.
 Orientation comes from each supporting molecule: which side of each
 split-read segment is clipped (from the read's CIGAR and its SA tag), or the
 strands of a discordant pair, assuming a standard forward-reverse (FR)
-paired-end library. A link reports the majority type among its molecules,
-and that type's majority orientation (`.` on a tie). A forward-reverse pair
-with both reads in one region gives no type, since it may span a deletion
-or an insertion. Both junctions of a balanced inversion (`+ +` and `- -`)
-or of a reciprocal translocation fall in the same two regions. They form
-one link, whose strands are those of the junction with more molecules. See
+paired-end library. The molecules joining two regions vote for an SV type,
+and each orientation of the majority type gets its own line. A balanced
+inversion (`+ +` and `- -`) or a reciprocal translocation therefore has
+two lines with the same coordinates, one per junction. Molecules of a
+minority type are outvoted. When no type wins, the two regions get one line
+with `.` strands (`INTRA`, or `BND` between chromosomes). A forward-reverse
+pair with both reads in one region gives no type, since it may span a
+deletion or an insertion. See
 [Breakpoint orientation and SV types](docs/sv_calling.md#breakpoint-orientation-and-sv-types).
 
 When no linked breakpoints are found the file contains only the header line.

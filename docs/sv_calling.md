@@ -90,8 +90,9 @@ indel shorter than 50 bp, like the 43 bp events in the
 
 ## Linking breakpoints
 
-Two regions are linked when a molecule joins them. Each link is one line of
-`{prefix}.sv.bedpe`. A molecule can join two regions in three ways:
+Two regions are linked when a molecule joins them. Each junction between
+them is one line of `{prefix}.sv.bedpe` (see [Voting](#voting)). A molecule
+can join two regions in three ways:
 
 * **SA tag.** A supplementary alignment listed in the SA tag of an
   informative primary alignment lies in the other region.
@@ -105,7 +106,8 @@ An SA or mate position within `--cluster-distance` of a region counts as in
 it. Every alignment used for linking needs a mapping quality of at least 20:
 the informative read, the SA entry, and the mate. The mate's MAPQ is checked
 only when the BAM records it in the `MQ` tag. `supporting_reads` counts
-molecules. A linked region is always `SV`.
+the molecules that show the line's junction. A linked region is always
+`SV`.
 
 BWA-MEM hard-clips supplementary alignments by default, so they hold only
 their aligned bases. With no junction k-mers they are not informative, and
@@ -194,13 +196,15 @@ both sides, and reads entirely inside it are unmapped. That gives
 
 ### Voting
 
-Each molecule votes once for a link, and once for each region it touches:
+Each molecule votes once for each pair of regions it joins, and once for
+each region it touches:
 
-* **Link type (BEDPE column 11).** This is the majority type among the
-  link's molecules whose orientation is known. With no majority it is
-  `INTRA` on one chromosome and
-  `BND` across two. The strands (columns 9–10) are the majority orientation
-  among the molecules of that type, or `.` when tied.
+* **Junctions (BEDPE lines).** The molecules joining two regions vote for an
+  SV type, and each orientation of the majority type is one line. That line
+  is a junction, and it counts the molecules that show it. Molecules of a
+  minority type are outvoted. With no majority (no orientation known, or a
+  tie), the two regions get one line with `.` strands: `INTRA` on one
+  chromosome, `BND` across two.
 * **Region type (BED column 13).** This is the majority over the region's
   molecules. Votes come from its links, from junctions that lie wholly
   inside the region (such as a deletion shorter than `--cluster-distance`),
@@ -211,9 +215,10 @@ Each molecule votes once for a link, and once for each region it touches:
   insert is too long (a deletion) or too short (an insertion, such as one
   longer than the reads), and the pair alone cannot say which.
 * **Balanced events.** Both junctions of a balanced inversion or a
-  reciprocal translocation fall in the same two regions, so they form one
-  link. Its strands are those of the junction with more molecules, or `.`
-  on a tie.
+  reciprocal translocation join the same two regions. Each gets its own
+  line, so the event shows as two lines with the same coordinates and
+  opposite orientations. A single line of type `INV` or `BND` means only one
+  junction was seen, as for an unbalanced translocation.
 
 ## Demo: a simulated trio
 
@@ -296,8 +301,10 @@ and one at each insertion. The table uses 1-based coordinates. BkptClip is
 #chrom1  start1  end1   chrom2  start2  end2   sv_id  supporting_reads  strand1  strand2  sv_type
 chr1     9860    10000  chr1    12000   12140  SV_1   15                +        -        DEL
 chr1     25000   25131  chr1    26358   26500  SV_2   18                -        +        DUP
-chr1     39870   40141  chr1    41890   42133  SV_3   20                +        +        INV
-chr1     54860   55115  chr2    14861   15141  SV_4   18                +        -        BND
+chr1     39870   40141  chr1    41890   42133  SV_3   13                +        +        INV
+chr1     39870   40141  chr1    41890   42133  SV_4   7                 -        -        INV
+chr1     54860   55115  chr2    14861   15141  SV_5   10                +        -        BND
+chr1     54860   55115  chr2    14861   15141  SV_6   8                 -        +        BND
 ```
 
 How each event is called:
@@ -314,11 +321,11 @@ How each event is called:
 * **Inversion.** Junction 1 joins 40,000 to 42,000, giving `+ +`. There the
   second part of each split read aligns to the reverse strand and is
   clipped on its right. Junction 2 joins 40,001 to 42,001, giving `- -`.
-  Both junctions fall in the same two regions, so SV_3 is one `INV` link.
-  It shows `+ +` because junction 1 has more molecules.
-* **Translocation.** der(1) joins chr1:55,000 to chr2:15,001 (`+ -`), and
-  der(2) joins chr2:15,000 to chr1:55,001, which reads `- +` with chr1
-  first. That makes one `BND` link, SV_4, showing der(1)'s orientation.
+  Both junctions join the same two regions: SV_3 is junction 1 (13
+  molecules) and SV_4 is junction 2 (7 molecules).
+* **Translocation.** der(1) joins chr1:55,000 to chr2:15,001: `+ -`, SV_5,
+  10 molecules. der(2) joins chr2:15,000 to chr1:55,001, which reads `- +`
+  with chr1 first: SV_6, 8 molecules.
 * **SNV.** Its reads align end to end, so the region is `SMALL`.
 * **55 bp insertion.** Seven molecules span it with a CIGAR insertion,
   which types the region `INS`. Twelve molecules are clipped at the
@@ -391,9 +398,6 @@ The three patterns:
 * **Some insertions are untyped.** Insertions that the aligner leaves out of
   the CIGAR give `SV` with type `.`. This includes insertions longer than
   the reads, such as mobile-element insertions.
-* **Balanced events give one link.** An inversion or a reciprocal
-  translocation shows one link, with the strands of its better-supported
-  junction.
 * **Nearby breakpoints share a region.** Breakpoints within
   `--cluster-distance` of each other fall in one region. The SV is typed but
   not linked.
@@ -414,5 +418,8 @@ The three patterns:
   `&& $13 != "."`.
 * **Compare with other calls.** Use `bedtools pairtobed` or
   `bedtools pairtopair`. The BEDPE's first ten columns follow the standard
-  layout. For balanced events, keep in mind that the strands describe one
-  junction.
+  layout, and each line is one junction.
+* **Check known events.** `--dnm-regions` reports, for each listed event,
+  the regions that overlap it or lie within `--cluster-distance` of it. A
+  deletion's two breakpoint regions both count, although they flank the
+  deleted interval rather than overlap it.

@@ -1299,9 +1299,13 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
     which side of each split-read segment is clipped, or from the read
     strands of a discordant pair (FR libraries).  A forward-reverse pair
     with both ends in one region gives none, as its insert may be too
-    long (a deletion) or too short (an insertion).  A link takes the
-    majority SV type among its molecules (DEL, DUP, INV; BND across
-    chromosomes; INTRA when unknown), and a region's ``sv_type`` is the
+    long (a deletion) or too short (an insertion).  The molecules joining
+    two regions vote for an SV type (DEL, DUP, INV; BND across
+    chromosomes), and each orientation of the majority type is one link:
+    a junction, with the molecules showing it.  Both junctions of a
+    balanced inversion or reciprocal translocation are thus reported.
+    With no majority, the regions get one link with unknown orientation
+    (INTRA, or BND across chromosomes).  A region's ``sv_type`` is the
     majority over its molecules, including CIGAR indels (DEL, INS) and
     joins within the region, or ``.`` when there is none.
 
@@ -1317,9 +1321,9 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
         (annotations, links) where:
         - annotations: Dict mapping region tuple to a dict with the counts
           in ``_SV_EVIDENCE``, ``max_clip_len`` and ``sv_type``.
-        - links: List of dicts with keys: region_a, region_b,
-          supporting_reads, strands (a (strand1, strand2) tuple or None),
-          sv_type_hint.
+        - links: List of dicts, one per junction, with keys: region_a,
+          region_b, supporting_reads (read names), strands (a (strand1,
+          strand2) tuple, or None when unknown), sv_type_hint.
     """
     regions_by_chrom = collections.defaultdict(list)
     for region in sorted(regions):
@@ -1501,27 +1505,43 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
             _unique_majority(type_votes[region].values()) or "."
         )
 
-    # Build links list: the majority type among the supporting molecules,
-    # and its majority breakpoint orientation
+    # Build links, one per junction: each breakpoint orientation of the
+    # majority type among the molecules joining two regions.  Both
+    # junctions of a balanced inversion (+ +, - -) or reciprocal
+    # translocation join the same two regions, so each gets its own link;
+    # molecules of a minority type are outvoted.
     links = []
     for key in sorted(bridges):
-        votes = link_votes.get(key, {}).values()
-        sv_type = _unique_majority(t for t, _ in votes)
-        strands = sv_type and _unique_majority(s for t, s in votes
-                                               if t == sv_type)
-        links.append({
-            "region_a": key[0],
-            "region_b": key[1],
-            "supporting_reads": bridges[key],
-            "strands": strands or None,
-            "sv_type_hint": sv_type or _infer_sv_type(*key),
-        })
+        votes = link_votes.get(key, {})
+        sv_type = _unique_majority(t for t, _ in votes.values())
+        junctions = collections.defaultdict(set)
+        for qname, (vote_type, strands) in votes.items():
+            if vote_type == sv_type:
+                junctions[strands].add(qname)
+        if not junctions:
+            # No orientation known, or the molecules disagree on the type
+            links.append({
+                "region_a": key[0],
+                "region_b": key[1],
+                "supporting_reads": bridges[key],
+                "strands": None,
+                "sv_type_hint": _infer_sv_type(*key),
+            })
+        for strands, qnames in sorted(junctions.items(),
+                                      key=lambda j: (-len(j[1]), j[0])):
+            links.append({
+                "region_a": key[0],
+                "region_b": key[1],
+                "supporting_reads": qnames,
+                "strands": strands,
+                "sv_type_hint": sv_type,
+            })
 
     return annotations, links
 
 
 def _write_bedpe(links, bedpe_path):
-    """Write linked SV breakpoint pairs to a BEDPE file.
+    """Write linked SV breakpoint pairs to a BEDPE file, one per junction.
 
     Uses the standard BEDPE layout, so tools such as bedtools can read it:
     name (``SV_n``) and score (supporting reads) in columns 7–8, the

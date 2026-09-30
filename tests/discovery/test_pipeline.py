@@ -1946,14 +1946,44 @@ class TestSVTypes:
         ))
         assert links == [(self.A, self.B, None, "INTRA")]
 
-    def test_both_inversion_junctions_make_one_inv_link(self):
+    def test_both_inversion_junctions_are_reported(self):
         _, links = self._links(self._with_anchor(
             p1=_sv_meta(("chr1", 1100), proper=False,
                         mate=("chr1", 20100, None, False)),    # + +
             p2=_sv_meta(("chr1", 1110), proper=False, reverse=True,
                         mate=("chr1", 20110, None, True)),     # - -
         ))
-        assert links == [(self.A, self.B, None, "INV")]
+        assert links == [(self.A, self.B, ("+", "+"), "INV"),
+                         (self.A, self.B, ("-", "-"), "INV")]
+
+    def test_reciprocal_translocation_gives_one_link_per_junction(self):
+        # der(1): A (+) joined to C (-); der(2): C (+) joined to A (-)
+        _, links = _annotate_regions([self.A, self.B, self.C],
+                                     self._with_anchor(
+            d1=_sv_meta(("chr1", 1100), clip_side="+",
+                        sa="chr2,5101,+,90S60M,60,0;"),
+            d2=_sv_meta(("chr1", 1110), proper=False,
+                        mate=("chr2", 5150, None, True)),
+            d3=_sv_meta(("chr1", 1050), clip_side="-",
+                        sa="chr2,5001,+,60M90S,60,0;"),
+        ))
+        assert [(l["region_a"], l["region_b"], l["strands"],
+                 l["sv_type_hint"], l["supporting_reads"])
+                for l in links] == [
+            (self.A, self.C, ("+", "-"), "BND", {"d1", "d2"}),
+            (self.A, self.C, ("-", "+"), "BND", {"d3"}),
+        ]
+
+    def test_minority_type_is_outvoted(self):
+        _, links = _annotate_regions([self.A, self.B, self.C],
+                                     self._with_anchor(**{
+            f"del{i}": _sv_meta(("chr1", 1100 + i), proper=False,
+                                mate=("chr1", 20100, None, True))
+            for i in range(2)
+        }, dup=_sv_meta(("chr1", 1150), proper=False, reverse=True,
+                        mate=("chr1", 20150, None, False))))
+        assert [(l["strands"], l["sv_type_hint"], l["supporting_reads"])
+                for l in links] == [(("+", "-"), "DEL", {"del0", "del1"})]
 
     def test_deletion_within_one_region(self):
         """Both breakpoints in one region: no link, but a typed region."""

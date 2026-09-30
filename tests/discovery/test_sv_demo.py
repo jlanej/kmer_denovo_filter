@@ -44,16 +44,15 @@ EXPECTED_REGIONS = [
     ("chr2", 22_000, "SV", "."),      # 250 bp insertion: clips only
 ]
 
-#: Linked breakpoints: (position in region 1, in region 2, type, strands)
+#: Junctions: (position in region 1, in region 2, sv_type, strands)
 EXPECTED_LINKS = [
-    (("chr1", 9_999), ("chr1", 12_000), "DEL", {("+", "-")}),
-    (("chr1", 25_000), ("chr1", 26_499), "DUP", {("-", "+")}),
-    # One link for both junctions of a balanced event: the strands are
-    # those of the junction with more molecules
-    (("chr1", 40_000), ("chr1", 42_000), "INV",
-     {("+", "+"), ("-", "-"), (".", ".")}),
-    (("chr1", 55_000), ("chr2", 15_000), "BND",
-     {("+", "-"), ("-", "+"), (".", ".")}),
+    (("chr1", 9_999), ("chr1", 12_000), "DEL", ("+", "-")),
+    (("chr1", 25_000), ("chr1", 26_499), "DUP", ("-", "+")),
+    # Both junctions of the balanced inversion and translocation
+    (("chr1", 40_000), ("chr1", 42_000), "INV", ("+", "+")),
+    (("chr1", 40_000), ("chr1", 42_000), "INV", ("-", "-")),
+    (("chr1", 55_000), ("chr2", 15_000), "BND", ("+", "-")),
+    (("chr1", 55_000), ("chr2", 15_000), "BND", ("-", "+")),
 ]
 
 
@@ -122,17 +121,17 @@ def test_each_event_is_classified_and_typed(sv_demo):
         assert region[3:] == (cls, sv_type), f"{chrom}:{pos}"
 
 
-def test_breakpoints_are_linked_with_their_type(sv_demo):
+def test_each_junction_is_linked_with_its_type(sv_demo):
     regions = [(r[0], int(r[1]), int(r[2]))
                for r in _rows(sv_demo / "sv_demo.bed")]
-    links = {
-        ((r[0], int(r[1]), int(r[2])), (r[3], int(r[4]), int(r[5]))):
-            (r[10], (r[8], r[9]))
+    links = sorted(
+        ((r[0], int(r[1]), int(r[2])), (r[3], int(r[4]), int(r[5])),
+         r[10], (r[8], r[9]))
         for r in _rows(sv_demo / "sv_demo.sv.bedpe")
-    }
-    assert len(links) == len(EXPECTED_LINKS)
-    for end1, end2, sv_type, strands in EXPECTED_LINKS:
-        key = (_containing(regions, *end1), _containing(regions, *end2))
-        assert key in links, f"no link between {end1} and {end2}"
-        assert links[key][0] == sv_type
-        assert links[key][1] in strands
+    )
+    expected = sorted(
+        (_containing(regions, *end1), _containing(regions, *end2),
+         sv_type, strands)
+        for end1, end2, sv_type, strands in EXPECTED_LINKS
+    )
+    assert links == expected
