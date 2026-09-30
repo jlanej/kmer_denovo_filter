@@ -403,7 +403,7 @@ class TestPipelineIntegration:
 
             def __init__(
                 self, _db_path, *, confidence=0.0, threads=1,
-                memory_mapping=False,
+                memory_mapping=False, strict=True,
             ):
                 assert confidence == 0.0
                 assert threads == 1

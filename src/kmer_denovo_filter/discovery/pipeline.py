@@ -582,7 +582,8 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     and low-MAPQ reads — so that no proband-unique k-mers are missed at
     this stage.  The scan runs one task per contig plus one for unplaced
     unmapped reads, in a process pool when more than one worker is
-    available and in-process otherwise.
+    available and in-process otherwise.  Results are combined in task
+    order, so the output does not depend on which worker finishes first.
 
     Supports two scanning backends:
 
@@ -757,43 +758,62 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     unmapped_informative = 0
     total_reads_scanned = 0
     completed_contigs = 0
+    informative_received = 0  # before cross-contig dedup; for progress logs
+    # Hits and SV metadata of finished tasks that are waiting for an
+    # earlier task to finish, keyed by task index (see _merge_result).
+    held = {}
+    next_to_fold = 0
     last_progress_log = time.monotonic()
     progress_interval = 300  # seconds (5 minutes)
 
-    def _merge_result(contig, result):
-        """Fold one task's scan results into the running totals."""
+    def _merge_result(index, result):
+        """Fold one task's scan results into the running totals.
+
+        Coverage and counts are added straight away.  Hits and SV metadata
+        are de-duplicated across contigs by (read name, is_supplementary),
+        where the first contig to report a key wins — e.g. when both mates
+        of a pair are informative on different chromosomes.  Folding them
+        strictly in task order keeps that choice independent of which
+        worker finishes first, and identical to a single-worker run.
+        """
         nonlocal unmapped_informative, total_reads_scanned
-        nonlocal completed_contigs
+        nonlocal completed_contigs, informative_received, next_to_fold
         (hits, seen, unmapped, scanned,
          sv_meta, worker_cov, worker_read_cov) = result
         total_reads_scanned += scanned
         unmapped_informative += unmapped
         completed_contigs += 1
-        for hit in hits:
-            # hit: (ref_name, start, end, qname, kmers, is_supp)
-            dedup_key = (hit[3], hit[5])  # (qname, is_supplementary)
-            if dedup_key not in reads_seen:
-                reads_seen.add(dedup_key)
-                read_hits.append(hit)
-        # Merge SV metadata (only for keys not already seen)
-        for key, meta in sv_meta.items():
-            if key not in read_sv_meta:
-                read_sv_meta[key] = meta
+        informative_received += len(hits) + unmapped
         # Merge k-mer coverage (update is faster than += for Counters)
         for chrom, cov in worker_cov.items():
             kmer_coverage[chrom].update(cov)
         # Merge read coverage
         for chrom, cov in worker_read_cov.items():
             read_coverage[chrom].update(cov)
-        # Track all seen keys for cross-contig dedup
-        reads_seen.update(seen)
+
+        held[index] = (hits, seen, sv_meta)
+        while next_to_fold in held:
+            task_hits, task_seen, task_meta = held.pop(next_to_fold)
+            next_to_fold += 1
+            for hit in task_hits:
+                # hit: (ref_name, start, end, qname, kmers, is_supp)
+                dedup_key = (hit[3], hit[5])  # (qname, is_supplementary)
+                if dedup_key not in reads_seen:
+                    reads_seen.add(dedup_key)
+                    read_hits.append(hit)
+            # Merge SV metadata (only for keys not already seen)
+            for key, meta in task_meta.items():
+                if key not in read_sv_meta:
+                    read_sv_meta[key] = meta
+            # Track all seen keys for cross-contig dedup
+            reads_seen.update(task_seen)
 
         # Log individual contig completion for large contigs
         if scanned >= 1_000_000:
             logger.info(
                 "  [Anchoring] Contig %s complete: %d reads "
                 "scanned, %d informative hits (%s elapsed)",
-                contig or "(unmapped)", scanned,
+                tasks[index][2] or "(unmapped)", scanned,
                 len(hits) + unmapped,
                 _format_elapsed(time.monotonic() - anchor_start),
             )
@@ -813,7 +833,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                 completed_contigs, len(tasks),
                 100 * completed_contigs / len(tasks),
                 total_reads_scanned,
-                len(read_hits) + unmapped_informative,
+                informative_received,
                 _format_elapsed(now - anchor_start),
             )
             _log_memory("during anchoring")
@@ -828,8 +848,8 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                 initargs=init_args,
             ) as executor:
                 futures = {
-                    executor.submit(_scan_contig_for_hits, *t): t[2]
-                    for t in tasks
+                    executor.submit(_scan_contig_for_hits, *t): i
+                    for i, t in enumerate(tasks)
                 }
 
                 # Use wait() with timeout for time-based progress
@@ -850,7 +870,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                             "(%s elapsed)",
                             completed_contigs, len(tasks),
                             total_reads_scanned,
-                            len(read_hits) + unmapped_informative,
+                            informative_received,
                             _format_elapsed(
                                 time.monotonic() - anchor_start,
                             ),
@@ -861,22 +881,23 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                         continue
 
                     for future in done:
-                        contig = futures[future]
+                        index = futures[future]
                         try:
                             result = future.result()
                         except Exception:
                             logger.error(
-                                "Worker failed for contig=%s", contig,
+                                "Worker failed for contig=%s",
+                                tasks[index][2],
                             )
                             raise
-                        _merge_result(contig, result)
+                        _merge_result(index, result)
                     _log_progress()
         else:
             # A single worker: run the same per-contig scan in-process.
             _init_scan_worker(*init_args)
             try:
-                for task in tasks:
-                    _merge_result(task[2], _scan_contig_for_hits(*task))
+                for index, task in enumerate(tasks):
+                    _merge_result(index, _scan_contig_for_hits(*task))
                     _log_progress()
             finally:
                 _reset_scan_worker()
