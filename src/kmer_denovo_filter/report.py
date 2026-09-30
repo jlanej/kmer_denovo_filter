@@ -1708,6 +1708,8 @@ def _make_sv_evidence_chart(regions, div_id="sv-evidence-plot"):
                   if r.get("split_reads", 0) > 0
                   or r.get("discordant_pairs", 0) > 0
                   or r.get("unmapped_mates", 0) > 0
+                  or r.get("breakpoint_reads", 0) > 0
+                  or r.get("large_indel_reads", 0) > 0
                   or r.get("max_clip_len", 0) > 50]
     if not sv_regions:
         return None
@@ -1719,6 +1721,8 @@ def _make_sv_evidence_chart(regions, div_id="sv-evidence-plot"):
         ("split_reads", "Split Reads", "#4C78A8"),
         ("discordant_pairs", "Discordant Pairs", "#E45756"),
         ("unmapped_mates", "Unmapped Mates", "#F58518"),
+        ("breakpoint_reads", "Clipped at One Breakpoint", "#54A24B"),
+        ("large_indel_reads", "Indels of 50 bp or More", "#B279A2"),
     ]:
         fig.add_trace(go.Bar(
             x=labels, y=[r.get(field, 0) for r in sv_regions],

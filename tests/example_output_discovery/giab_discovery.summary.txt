@@ -21,30 +21,30 @@ Region Statistics
   Region size    mean:    474 bp   median:  431 bp   max:  943 bp
 
 Per-Region Results
-------------------------------------------------------------------------------------------------------------------------
-  Region                                  Size  Reads  Unique K-mers  Split  Disc  MaxClip  UnmapMate      Class
-  ------                                  ----  -----  -------------  -----  ----  -------  ---------      -----
-  chr10:50012180-50012428                 249bp      1             19      0     0        0          0      SMALL
-  chr10:50023695-50024031                 337bp      3             13      0     0        4          0      SMALL
-  chr10:50024543-50024749                 207bp      1             10      0     0       44          0      SMALL
-  chr11:54999700-55000452                 753bp      4             36      0     0        7          0      SMALL
-  chr11:55003557-55004234                 678bp     26             50      0     0       54          0      SMALL
-  chr11:55006832-55007423                 592bp      5             53      0     0        0          0      SMALL
-  chr11:55008334-55008814                 481bp     23             62      0     0       14          0      SMALL
-  chr12:60008502-60008907                 406bp      3             18      0     0        1          0      SMALL
-  chr17:53340222-53341164                 943bp     18             39      0     0      108          1  AMBIGUOUS
-  chr18:30028534-30028794                 261bp      3             11      0     0        1          0      SMALL
-  chr18:62804895-62805439                 545bp      7             39      0     0       27          0      SMALL
-  chr19:15035922-15036215                 294bp      3             18      0     0       52          1  AMBIGUOUS
-  chr22:25046133-25046424                 292bp      3              7      0     0        0          0      SMALL
-  chr5:97089091-97089510                  420bp     22             30      0     0       50          0      SMALL
-  chr7:142785588-142786223                636bp      7             66      0     0       94          1  AMBIGUOUS
-  chr7:142788519-142789264                746bp      3             37      0     0       59          1  AMBIGUOUS
-  chr7:142792552-142792982                431bp      2              9      0     0        0          1  AMBIGUOUS
-  chr7:142796830-142797423                594bp     14             79      0     2       98          0         SV
-  chr8:40002916-40003116                  201bp      1             12      0     0       46          0      SMALL
-  chr8:70042838-70043032                  195bp      1             21      0     0       55          0      SMALL
-  chr8:125785801-125786483                683bp     34             53      0     0       54          0      SMALL
+--------------------------------------------------------------------------------------------------------------------------------------------
+  Region                                  Size  Reads  Unique K-mers  Split  Disc  MaxClip  UnmapMate  BkptClip  Indel50      Class
+  ------                                  ----  -----  -------------  -----  ----  -------  ---------  --------  -------      -----
+  chr10:50012180-50012428                 249bp      1             19      0     0        0          0         0        0      SMALL
+  chr10:50023695-50024031                 337bp      3             13      0     0        4          0         0        0      SMALL
+  chr10:50024543-50024749                 207bp      1             10      0     0       44          0         0        0      SMALL
+  chr11:54999700-55000452                 753bp      4             36      0     0        7          0         0        0      SMALL
+  chr11:55003557-55004234                 678bp     26             50      0     0       54          0         0        0      SMALL
+  chr11:55006832-55007423                 592bp      5             53      0     0        0          0         0        0      SMALL
+  chr11:55008334-55008814                 481bp     23             62      0     0       14          0         0        0      SMALL
+  chr12:60008502-60008907                 406bp      3             18      0     0        1          0         0        0      SMALL
+  chr17:53340222-53341164                 943bp     18             39      0     0      108          1         6        3         SV
+  chr18:30028534-30028794                 261bp      3             11      0     0        1          0         0        0      SMALL
+  chr18:62804895-62805439                 545bp      7             39      0     0       27          0         0        0      SMALL
+  chr19:15035922-15036215                 294bp      3             18      0     0       52          1         0        0  AMBIGUOUS
+  chr22:25046133-25046424                 292bp      3              7      0     0        0          0         0        0      SMALL
+  chr5:97089091-97089510                  420bp     22             30      0     0       50          0         3        0         SV
+  chr7:142785588-142786223                636bp      7             66      0     0       94          4         0        0         SV
+  chr7:142788519-142789264                746bp      3             37      0     0       59          1         0        0  AMBIGUOUS
+  chr7:142792552-142792982                431bp      2              9      0     0        0          1         0        0  AMBIGUOUS
+  chr7:142796830-142797423                594bp     14             79      0     2       98          4         7        0         SV
+  chr8:40002916-40003116                  201bp      1             12      0     0       46          0         0        0      SMALL
+  chr8:70042838-70043032                  195bp      1             21      0     0       55          0         0        0      SMALL
+  chr8:125785801-125786483                683bp     34             53      0     0       54          0         5        0         SV
 Candidate Comparison (DKA_DKT > 0.25, DKA > 10)
 --------------------------------------------------------------------------------
   High-quality candidates:            3
@@ -63,12 +63,12 @@ Curated DNM Region Evaluation (sulovari2023_dnm_regions.tsv)
 
   Locus                                    Event     Size  Reads  Kmers  Signal  MaxClip      Class         Status
   -----                                    -----     ----  -----  -----  ------  -------      -----         ------
-  chr17:53340465                        deletion    107bp     18     39  0.0414      108  AMBIGUOUS       DETECTED
+  chr17:53340465                        deletion    107bp     18     39  0.0414      108         SV       DETECTED
   chr14:23280711        microsatellite_expansion        –      0      0  0.0000        0       NONE   NOT_DETECTED
   chr3:85552367                          sv_like     64bp      0      0  0.0000        0       NONE   NOT_DETECTED
-  chr5:97089276                          sv_like     43bp     22     30  0.0714       50      SMALL       DETECTED
-  chr8:125785998                         sv_like     43bp     34     53  0.0776       54      SMALL       DETECTED
+  chr5:97089276                          sv_like     43bp     22     30  0.0714       50         SV       DETECTED
+  chr8:125785998                         sv_like     43bp     34     53  0.0776       54         SV       DETECTED
   chr18:62805217                         sv_like     34bp      7     39  0.0716       27      SMALL       DETECTED
-  chr7:142786222                        deletion  10607bp     12    112  0.0100       94  AMBIGUOUS       DETECTED
+  chr7:142786222                        deletion  10607bp     12    112  0.0100       94         SV       DETECTED
 
 ============================================================

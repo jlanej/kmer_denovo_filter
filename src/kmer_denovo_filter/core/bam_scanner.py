@@ -246,6 +246,10 @@ _worker_min_distinct_kmers_per_read = 1
 # but temporarily hold more read objects in memory.
 _JF_READ_BATCH_SIZE = 5000
 
+# Structural-variant evidence recorded for each informative read.
+_SV_MIN_INDEL = 50  # bp: CIGAR insertions/deletions at least this long
+_SV_MIN_CLIP = 20   # bp: soft clips at least this long mark a breakpoint
+
 
 def _init_scan_worker(proband_data, kmer_size,
                       min_distinct_kmers_per_read=1):
@@ -330,6 +334,10 @@ def _process_informative_read(read, unique_in_read, kmer_hit_indices,
     When *bam_out* is given (an :class:`_InformativeReadWriter`), the read
     is also written to it, whether mapped or not.
 
+    An unmapped read placed next to its mapped mate is recorded in
+    *read_sv_meta* only by that position (``placed_unmapped``): evidence of
+    unmappable sequence at the locus.
+
     Returns 1 if the read is unmapped-informative, 0 otherwise.
     Mutates *reads_seen*, *read_hits*, *read_sv_meta*, *kmer_coverage*,
     and *read_coverage* in place.
@@ -342,6 +350,10 @@ def _process_informative_read(read, unique_in_read, kmer_hit_indices,
     if bam_out is not None:
         bam_out.write(read)
     if read.is_unmapped:
+        if read.reference_id >= 0:
+            read_sv_meta[dedup_key] = {
+                "placed_unmapped": (read.reference_name, read.reference_start),
+            }
         return 1
 
     read_hits.append((
@@ -365,11 +377,22 @@ def _process_informative_read(read, unique_in_read, kmer_hit_indices,
         read_coverage[chrom][pos] += 1
 
     # Collect SV metadata for this informative read
-    max_clip = 0
-    if read.cigartuples:
-        for op, length in read.cigartuples:
-            if op == 4 and length > max_clip:  # soft clip
-                max_clip = length
+    sc_left, sc_right = _extract_softclips(read.cigartuples)
+    # Where long soft clips start: candidate breakpoints
+    clip_positions = []
+    if sc_left >= _SV_MIN_CLIP:
+        clip_positions.append(read.reference_start)
+    if sc_right >= _SV_MIN_CLIP:
+        clip_positions.append(read.reference_end)
+    # A discordant pair's mate position can link two breakpoint regions;
+    # its mapping quality is known only when the MQ tag is present.
+    mate = None
+    if (read.is_paired and not read.mate_is_unmapped
+            and not read.is_proper_pair):
+        mate = (
+            read.next_reference_name, read.next_reference_start,
+            read.get_tag("MQ") if read.has_tag("MQ") else None,
+        )
     read_sv_meta[dedup_key] = {
         "has_sa": read.has_tag("SA"),
         "sa_str": read.get_tag("SA") if (
@@ -380,7 +403,15 @@ def _process_informative_read(read, unique_in_read, kmer_hit_indices,
         "mate_is_unmapped": (
             read.mate_is_unmapped if read.is_paired else False
         ),
-        "max_clip": max_clip,
+        "max_clip": max(sc_left, sc_right),
+        "mapq": read.mapping_quality,
+        "pos": (chrom, read.reference_start),
+        "clip_positions": clip_positions,
+        "large_indel": any(
+            op in (1, 2) and length >= _SV_MIN_INDEL  # CIGAR I / D
+            for op, length in read.cigartuples or ()
+        ),
+        "mate": mate,
     }
     return 0
 

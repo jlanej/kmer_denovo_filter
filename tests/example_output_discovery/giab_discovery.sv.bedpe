@@ -1,1 +1,2 @@
 #chrom1	start1	end1	chrom2	start2	end2	sv_id	supporting_reads	strand1	strand2	sv_type
+chr7	142785587	142786223	chr7	142796829	142797423	SV_1	2	.	.	INTRA

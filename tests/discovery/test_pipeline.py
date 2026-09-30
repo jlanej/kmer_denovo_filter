@@ -110,10 +110,11 @@ class TestDiscoveryPipeline:
         with open(bed_path) as fh:
             bed_lines = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
         assert len(bed_lines) >= 1, "Expected at least one candidate region"
-        # BED lines should have 10 columns: chrom, start, end, reads, kmers,
-        # split_reads, discordant_pairs, max_clip_len, unmapped_mates, class
+        # BED lines should have 12 columns: chrom, start, end, reads, kmers,
+        # split_reads, discordant_pairs, max_clip_len, unmapped_mates, class,
+        # breakpoint_reads, large_indel_reads
         parts = bed_lines[0].split("\t")
-        assert len(parts) == 10
+        assert len(parts) == 12
         assert int(parts[3]) >= 1  # at least 1 read
         assert int(parts[4]) >= 1  # at least 1 k-mer
 
@@ -1141,9 +1142,12 @@ class TestDiscoverySV:
                  "flag": 0x800},
                 {"name": "sv_read2", "pos": 130, "seq": child_seq2,
                  "flag": 0x800},
-                # Primary reads with mutation 2
+                # Primary reads with mutation 2.  Child k-mers are counted
+                # from primary alignments only, so three are needed to
+                # reach --min-child-count and form the second region.
                 {"name": "read5", "pos": 130, "seq": child_seq2, "flag": 0},
                 {"name": "read6", "pos": 130, "seq": child_seq2, "flag": 0},
+                {"name": "read7", "pos": 130, "seq": child_seq2, "flag": 0},
             ],
         )
 
@@ -1180,6 +1184,17 @@ class TestDiscoverySV:
         for region in metrics["regions"]:
             if region["split_reads"] >= 2:
                 assert region["class"] == "SV"
+
+        # The SA tags link the two mutation regions in the BEDPE
+        with open(f"{out_prefix}.sv.bedpe") as fh:
+            links = [l.rstrip("\n").split("\t") for l in fh
+                     if not l.startswith("#")]
+        assert len(links) == 1
+        chrom1, start1, _, chrom2, start2, _, _, support, *_, sv_type = links[0]
+        assert (chrom1, chrom2) == (chrom, chrom)
+        assert int(start1) <= 30 and int(start2) <= 130 < int(links[0][5])
+        assert support == "2"  # sv_read1 and sv_read2
+        assert sv_type == "INTRA"
 
     def test_bedpe_written(self, tmpdir):
         """BEDPE output file should always be written."""
@@ -1675,6 +1690,175 @@ class TestJellyfishBatchScanMemory:
         assert jf_query.query_calls[1] == {"GGGGG"}
         assert jf_query.close_calls == 2
         assert len(seen_reads) == 3
+
+
+def _sv_meta(pos, mapq=60, clips=(), large_indel=False, mate=None, sa=None,
+             proper=True, mate_unmapped=False, max_clip=0):
+    """Per-read SV metadata as recorded by _process_informative_read."""
+    return {
+        "has_sa": sa is not None, "sa_str": sa, "is_paired": True,
+        "is_proper_pair": proper, "mate_is_unmapped": mate_unmapped,
+        "max_clip": max_clip, "mapq": mapq, "pos": pos,
+        "clip_positions": list(clips), "large_indel": large_indel,
+        "mate": mate,
+    }
+
+
+class TestSVEvidence:
+    """Breakpoint evidence, classification and linking of regions."""
+
+    A = ("chr1", 1000, 1300)
+    B = ("chr1", 20000, 20300)
+    C = ("chr2", 5000, 5300)
+
+    def _run(self, read_sv_meta, link_slack=0):
+        regions = [self.A, self.B, self.C]
+        region_reads = collections.defaultdict(set)
+        for (qname, _is_supp), meta in read_sv_meta.items():
+            if "pos" not in meta:
+                continue
+            chrom, pos = meta["pos"]
+            for region in regions:
+                if region[0] == chrom and region[1] <= pos < region[2]:
+                    region_reads[region].add(qname)
+        annotations, links = _annotate_and_link_from_metadata(
+            regions, region_reads, read_sv_meta, link_slack=link_slack,
+        )
+        _classify_regions(regions, annotations, links)
+        return annotations, links
+
+    def test_clips_at_one_breakpoint(self):
+        annotations, _ = self._run({
+            ("m1", False): _sv_meta(("chr1", 1100), clips=[1200]),
+            ("m2", False): _sv_meta(("chr1", 1150), clips=[1203]),
+            ("m3", False): _sv_meta(("chr1", 1010), clips=[1060]),
+        })
+        assert annotations[self.A]["breakpoint_reads"] == 2
+        assert annotations[self.A]["class"] == "SV"
+
+    def test_single_clipped_read_is_not_a_breakpoint(self):
+        annotations, _ = self._run({
+            ("m1", False): _sv_meta(("chr1", 1100), clips=[1200],
+                                    max_clip=45),
+        })
+        assert annotations[self.A]["breakpoint_reads"] == 0
+        assert annotations[self.A]["max_clip_len"] == 45
+        assert annotations[self.A]["class"] == "SMALL"
+
+    @pytest.mark.parametrize("n_reads, expected", [
+        (1, "AMBIGUOUS"), (2, "SV"),
+    ])
+    def test_large_cigar_indels(self, n_reads, expected):
+        annotations, _ = self._run({
+            (f"m{i}", False): _sv_meta(("chr1", 1100 + i), large_indel=True)
+            for i in range(n_reads)
+        })
+        assert annotations[self.A]["large_indel_reads"] == n_reads
+        assert annotations[self.A]["class"] == expected
+
+    def test_unmapped_reads_count_where_placed(self):
+        annotations, _ = self._run({
+            ("m1", False): _sv_meta(("chr1", 1050)),
+            ("u1", False): {"placed_unmapped": ("chr1", 1100)},
+            ("u2", False): {"placed_unmapped": ("chr1", 1250)},
+            ("u3", False): {"placed_unmapped": ("chr1", 9000)},  # no region
+        })
+        assert annotations[self.A]["unmapped_mates"] == 2
+        assert annotations[self.A]["class"] == "SV"
+
+    def test_discordant_mates_link_two_breakpoints(self):
+        """Pairs with one end at each breakpoint of a deletion link them,
+        without SA tags (e.g. novoalign)."""
+        annotations, links = self._run({
+            ("a1", False): _sv_meta(("chr1", 1050)),
+            ("p1", False): _sv_meta(("chr1", 20010), proper=False,
+                                    mate=("chr1", 1100, None)),
+            ("p2", False): _sv_meta(("chr1", 20020), proper=False,
+                                    mate=("chr1", 1150, None)),
+        })
+        assert [(l["region_a"], l["region_b"], l["supporting_reads"],
+                 l["sv_type_hint"]) for l in links] == [
+            (self.A, self.B, {"p1", "p2"}, "INTRA"),
+        ]
+        assert annotations[self.A]["class"] == "SV"
+        assert annotations[self.B]["discordant_pairs"] == 2
+
+    @pytest.mark.parametrize("link_slack, linked", [(0, False), (500, True)])
+    def test_mate_near_a_region_links_within_slack(self, link_slack, linked):
+        _, links = self._run({
+            ("a1", False): _sv_meta(("chr1", 1050)),
+            ("p1", False): _sv_meta(("chr1", 20010), proper=False,
+                                    mate=("chr1", 1500, None)),
+        }, link_slack=link_slack)
+        assert bool(links) is linked
+
+    def test_sa_tag_to_another_chromosome_is_bnd(self):
+        _, links = self._run({
+            ("s1", False): _sv_meta(("chr1", 1100),
+                                    sa="chr2,5101,-,60S90M,60,2;"),
+            ("c1", False): _sv_meta(("chr2", 5050)),
+        })
+        assert [(l["region_a"], l["region_b"], l["sv_type_hint"])
+                for l in links] == [(self.A, self.C, "BND")]
+
+    @pytest.mark.parametrize("meta", [
+        _sv_meta(("chr1", 20010), mapq=10, proper=False,
+                 mate=("chr1", 1100, None)),
+        _sv_meta(("chr1", 20010), proper=False, mate=("chr1", 1100, 5)),
+        _sv_meta(("chr1", 20010), sa="chr1,1101,+,50S100M,3,0;"),
+    ], ids=["read MAPQ", "mate MQ", "SA MAPQ"])
+    def test_low_mapping_quality_does_not_link(self, meta):
+        _, links = self._run({
+            ("a1", False): _sv_meta(("chr1", 1050)),
+            ("r1", False): meta,
+        })
+        assert links == []
+
+    def test_scanner_records_breakpoint_evidence(self):
+        header = pysam.AlignmentHeader.from_references(
+            ["chr1", "chr2"], [100000, 100000],
+        )
+
+        def segment(name, cigar, flag=0x1 | 0x2 | 0x40, pos=1000):
+            seg = pysam.AlignedSegment(header)
+            seg.query_name = name
+            seg.flag = flag
+            seg.reference_id = 0
+            seg.reference_start = pos
+            seg.mapping_quality = 60
+            if cigar:
+                seg.cigarstring = cigar
+            length = seg.infer_query_length() if cigar else 100
+            seg.query_sequence = "A" * length
+            return seg
+
+        clipped = segment("clipped", "30S100M25S")
+        short_clip = segment("short_clip", "19S131M")
+        deletion = segment("deletion", "60M70D60M")
+        discordant = segment("discordant", "150M", flag=0x1 | 0x40)
+        discordant.next_reference_id = 1
+        discordant.next_reference_start = 500
+        discordant.set_tag("MQ", 37)
+        placed = segment("placed", None, flag=0x1 | 0x4 | 0x80, pos=1234)
+
+        meta = {}
+        state = (set(), [], meta, collections.defaultdict(collections.Counter),
+                 collections.defaultdict(collections.Counter))
+        for read in (clipped, short_clip, deletion, discordant, placed):
+            reads_seen, read_hits, sv_meta, kmer_cov, read_cov = state
+            bam_scanner_mod._process_informative_read(
+                read, {"AAAAA"}, set(), 5, reads_seen, read_hits,
+                sv_meta, kmer_cov, read_cov,
+            )
+
+        assert meta[("clipped", False)]["clip_positions"] == [1000, 1100]
+        assert meta[("clipped", False)]["max_clip"] == 30
+        assert meta[("short_clip", False)]["clip_positions"] == []
+        assert meta[("deletion", False)]["large_indel"] is True
+        assert meta[("clipped", False)]["large_indel"] is False
+        assert meta[("discordant", False)]["mate"] == ("chr2", 500, 37)
+        assert meta[("clipped", False)]["mate"] is None  # proper pair
+        assert meta[("placed", False)] == {"placed_unmapped": ("chr1", 1234)}
 
 
 class TestReferenceIndexCheck:

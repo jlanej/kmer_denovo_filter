@@ -24,6 +24,8 @@
       "discordant_pairs": 0,
       "max_clip_len": 0,
       "unmapped_mates": 0,
+      "breakpoint_reads": 0,
+      "large_indel_reads": 0,
       "class": "SMALL"
     },
     {
@@ -37,6 +39,8 @@
       "discordant_pairs": 0,
       "max_clip_len": 4,
       "unmapped_mates": 0,
+      "breakpoint_reads": 0,
+      "large_indel_reads": 0,
       "class": "SMALL"
     },
     {
@@ -50,6 +54,8 @@
       "discordant_pairs": 0,
       "max_clip_len": 44,
       "unmapped_mates": 0,
+      "breakpoint_reads": 0,
+      "large_indel_reads": 0,
       "class": "SMALL"
     },
     {
@@ -63,6 +69,8 @@
       "discordant_pairs": 0,
       "max_clip_len": 7,
       "unmapped_mates": 0,
+      "breakpoint_reads": 0,
+      "large_indel_reads": 0,
       "class": "SMALL"
     },
     {
@@ -76,6 +84,8 @@
       "discordant_pairs": 0,
       "max_clip_len": 54,
       "unmapped_mates": 0,
+      "breakpoint_reads": 0,
+      "large_indel_reads": 0,
       "class": "SMALL"
     },
     {
@@ -89,6 +99,8 @@
       "discordant_pairs": 0,
       "max_clip_len": 0,
       "unmapped_mates": 0,
+      "breakpoint_reads": 0,
+      "large_indel_reads": 0,
       "class": "SMALL"
     },
     {
@@ -102,6 +114,8 @@
       "discordant_pairs": 0,
       "max_clip_len": 14,
       "unmapped_mates": 0,
+      "breakpoint_reads": 0,
+      "large_indel_reads": 0,
       "class": "SMALL"
     },
     {
@@ -115,6 +129,8 @@
       "discordant_pairs": 0,
       "max_clip_len": 1,
       "unmapped_mates": 0,
+      "breakpoint_reads": 0,
+      "large_indel_reads": 0,
       "class": "SMALL"
     },
     {
@@ -128,7 +144,9 @@
       "discordant_pairs": 0,
       "max_clip_len": 108,
       "unmapped_mates": 1,
-      "class": "AMBIGUOUS"
+      "breakpoint_reads": 6,
+      "large_indel_reads": 3,
+      "class": "SV"
     },
     {
       "chrom": "chr18",
@@ -141,6 +159,8 @@
       "discordant_pairs": 0,
       "max_clip_len": 1,
       "unmapped_mates": 0,
+      "breakpoint_reads": 0,
+      "large_indel_reads": 0,
       "class": "SMALL"
     },
     {
@@ -154,6 +174,8 @@
       "discordant_pairs": 0,
       "max_clip_len": 27,
       "unmapped_mates": 0,
+      "breakpoint_reads": 0,
+      "large_indel_reads": 0,
       "class": "SMALL"
     },
     {
@@ -167,6 +189,8 @@
       "discordant_pairs": 0,
       "max_clip_len": 52,
       "unmapped_mates": 1,
+      "breakpoint_reads": 0,
+      "large_indel_reads": 0,
       "class": "AMBIGUOUS"
     },
     {
@@ -180,6 +204,8 @@
       "discordant_pairs": 0,
       "max_clip_len": 0,
       "unmapped_mates": 0,
+      "breakpoint_reads": 0,
+      "large_indel_reads": 0,
       "class": "SMALL"
     },
     {
@@ -193,7 +219,9 @@
       "discordant_pairs": 0,
       "max_clip_len": 50,
       "unmapped_mates": 0,
-      "class": "SMALL"
+      "breakpoint_reads": 3,
+      "large_indel_reads": 0,
+      "class": "SV"
     },
     {
       "chrom": "chr7",
@@ -205,8 +233,10 @@
       "split_reads": 0,
       "discordant_pairs": 0,
       "max_clip_len": 94,
-      "unmapped_mates": 1,
-      "class": "AMBIGUOUS"
+      "unmapped_mates": 4,
+      "breakpoint_reads": 0,
+      "large_indel_reads": 0,
+      "class": "SV"
     },
     {
       "chrom": "chr7",
@@ -219,6 +249,8 @@
       "discordant_pairs": 0,
       "max_clip_len": 59,
       "unmapped_mates": 1,
+      "breakpoint_reads": 0,
+      "large_indel_reads": 0,
       "class": "AMBIGUOUS"
     },
     {
@@ -232,6 +264,8 @@
       "discordant_pairs": 0,
       "max_clip_len": 0,
       "unmapped_mates": 1,
+      "breakpoint_reads": 0,
+      "large_indel_reads": 0,
       "class": "AMBIGUOUS"
     },
     {
@@ -244,7 +278,9 @@
       "split_reads": 0,
       "discordant_pairs": 2,
       "max_clip_len": 98,
-      "unmapped_mates": 0,
+      "unmapped_mates": 4,
+      "breakpoint_reads": 7,
+      "large_indel_reads": 0,
       "class": "SV"
     },
     {
@@ -258,6 +294,8 @@
       "discordant_pairs": 0,
       "max_clip_len": 46,
       "unmapped_mates": 0,
+      "breakpoint_reads": 0,
+      "large_indel_reads": 0,
       "class": "SMALL"
     },
     {
@@ -271,6 +309,8 @@
       "discordant_pairs": 0,
       "max_clip_len": 55,
       "unmapped_mates": 0,
+      "breakpoint_reads": 0,
+      "large_indel_reads": 0,
       "class": "SMALL"
     },
     {
@@ -284,7 +324,9 @@
       "discordant_pairs": 0,
       "max_clip_len": 54,
       "unmapped_mates": 0,
-      "class": "SMALL"
+      "breakpoint_reads": 5,
+      "large_indel_reads": 0,
+      "class": "SV"
     }
   ],
   "candidate_comparison": {
@@ -335,7 +377,7 @@
         "unmapped_mates": 1,
         "discordant_pairs": 0,
         "split_reads": 0,
-        "sv_class": "AMBIGUOUS",
+        "sv_class": "SV",
         "kmer_signal": 0.0414,
         "assessment": "DETECTED"
       },
@@ -385,7 +427,7 @@
         "unmapped_mates": 0,
         "discordant_pairs": 0,
         "split_reads": 0,
-        "sv_class": "SMALL",
+        "sv_class": "SV",
         "kmer_signal": 0.0714,
         "assessment": "DETECTED"
       },
@@ -403,7 +445,7 @@
         "unmapped_mates": 0,
         "discordant_pairs": 0,
         "split_reads": 0,
-        "sv_class": "SMALL",
+        "sv_class": "SV",
         "kmer_signal": 0.0776,
         "assessment": "DETECTED"
       },
@@ -438,10 +480,10 @@
         "total_reads": 12,
         "total_unique_kmers": 112,
         "max_clip_len": 94,
-        "unmapped_mates": 3,
+        "unmapped_mates": 6,
         "discordant_pairs": 0,
         "split_reads": 0,
-        "sv_class": "AMBIGUOUS",
+        "sv_class": "SV",
         "kmer_signal": 0.01,
         "assessment": "DETECTED"
       }

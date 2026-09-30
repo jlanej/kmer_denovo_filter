@@ -101,19 +101,23 @@ from Sulovari et al. 2023 (PMC10006329).  5 of the 7 are detected:
 
 | Locus | Event | Size | Reads | K-mers | Signal | MaxClip | Class | Status |
 |---|---|---|---|---|---|---|---|---|
-| chr17:53340465 | Deletion | 107 bp | 18 | 39 | 0.0414 | 108 | AMBIGUOUS | DETECTED |
+| chr17:53340465 | Deletion | 107 bp | 18 | 39 | 0.0414 | 108 | SV | DETECTED |
 | chr14:23280711 | Microsatellite expansion | – | – | – | – | – | – | NOT_DETECTED |
 | chr3:85552367 | SV-like event | 64 bp | – | – | – | – | – | NOT_DETECTED |
-| chr5:97089276 | SV-like event | 43 bp | 22 | 30 | 0.0714 | 50 | SMALL | DETECTED |
-| chr8:125785998 | SV-like event | 43 bp | 34 | 53 | 0.0776 | 54 | SMALL | DETECTED |
+| chr5:97089276 | SV-like event | 43 bp | 22 | 30 | 0.0714 | 50 | SV | DETECTED |
+| chr8:125785998 | SV-like event | 43 bp | 34 | 53 | 0.0776 | 54 | SV | DETECTED |
 | chr18:62805217 | SV-like event | 34 bp | 7 | 39 | 0.0716 | 27 | SMALL | DETECTED |
-| chr7:142786222 | Deletion (TRB) | 10,607 bp | 12 | 112 | 0.0100 | 94 | AMBIGUOUS | DETECTED |
+| chr7:142786222 | Deletion (TRB) | 10,607 bp | 12 | 112 | 0.0100 | 94 | SV | DETECTED |
 
 **Observations:**
-- The chr17 107 bp deletion has a 108 bp max clip length, matching the
-  expected event size, so breakpoint-spanning reads are present.
+- The chr17 107 bp deletion is `SV` from both kinds of breakpoint evidence:
+  three reads carry `107D` in their CIGAR and six are soft-clipped at one
+  breakpoint.
 - The chr7 TRB locus 10.6 kb deletion is captured by 3 separate discovery
-  regions, the expected breakpoint pattern for a large deletion.
+  regions, the expected breakpoint pattern for a large deletion. Two
+  discordant pairs join its breakpoints, which is the one link in
+  `giab_discovery.sv.bedpe` (the test BAMs are aligned with novoalign and
+  carry no SA tags, so every link must come from mates).
 - The chr18 34 bp event (DKU=0, inherited in VCF mode) still shows 39
   proband-unique k-mers in discovery mode, illustrating that k-mer-based
   discovery can surface variants missed by VCF-guided annotation.
