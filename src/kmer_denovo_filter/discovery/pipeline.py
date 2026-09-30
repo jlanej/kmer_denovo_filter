@@ -20,6 +20,7 @@ from kmer_denovo_filter.core.bam_scanner import (
     _collect_read_alignment_metadata,
     _init_scan_worker,
     _parse_cigar,
+    _query_span,
     _reset_scan_worker,
     _scan_contig_for_hits,
 )
@@ -1227,14 +1228,19 @@ def _write_read_coverage_bed(kmer_coverage, read_coverage, bed_path,
     )
 
 
-#: Minimum mapping quality for an alignment to link two regions: the
-#: informative read, its supplementary alignment (SA tag) and, when the
-#: MQ tag records it, its mate.
+#: Minimum mapping quality for an alignment to count as SV evidence or to
+#: link two regions: the informative read, its supplementary alignment
+#: (SA tag) and, when the MQ tag records it, its mate.
 _MIN_LINK_MAPQ = 20
 
 #: Soft clips starting within this many bp of one another mark one
 #: breakpoint.
 _SV_CLIP_TOLERANCE = 5
+
+#: Reads clipped on their right may end up to this many bp after reads
+#: clipped on their left start and still flank one insertion: a
+#: target-site duplication, or bases matching the insertion by chance.
+_INS_MAX_OVERLAP = 50
 
 #: Per-region evidence counts; two molecules of any one kind make an SV.
 _SV_EVIDENCE = (
@@ -1256,11 +1262,15 @@ def _largest_clip_cluster(clips, tolerance=_SV_CLIP_TOLERANCE):
 
     Args:
         clips: List of (reference position, read name) pairs.
+
+    Returns:
+        (molecules, position): the count, and the median clip position of
+        that cluster (None without clips).
     """
     clips = sorted(clips)
     in_window = collections.Counter()
-    best = lo = 0
-    for pos, qname in clips:
+    best, best_pos, lo = 0, None, 0
+    for hi, (pos, qname) in enumerate(clips):
         in_window[qname] += 1
         while pos - clips[lo][0] > tolerance:
             dropped = clips[lo][1]
@@ -1268,26 +1278,64 @@ def _largest_clip_cluster(clips, tolerance=_SV_CLIP_TOLERANCE):
             if not in_window[dropped]:
                 del in_window[dropped]
             lo += 1
-        best = max(best, len(in_window))
-    return best
+        if len(in_window) > best:
+            best, best_pos = len(in_window), clips[(lo + hi) // 2][0]
+    return best, best_pos
 
 
-def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
-                                     link_slack=0):
+def _clipped_insertion(clips):
+    """Whether reads are clipped from both sides at one point.
+
+    Reads reaching into an insertion from its left are clipped on their
+    right ("+") where it starts, and reads from its right on their left
+    ("-") at the same point, or earlier by a target-site duplication.
+    Needs two molecules on each side.
+
+    Args:
+        clips: List of (reference position, side, read name).
+    """
+    n_right, right = _largest_clip_cluster(
+        [(pos, qname) for pos, side, qname in clips if side == "+"])
+    n_left, left = _largest_clip_cluster(
+        [(pos, qname) for pos, side, qname in clips if side == "-"])
+    return (n_right >= 2 and n_left >= 2
+            and -_SV_CLIP_TOLERANCE <= right - left <= _INS_MAX_OVERLAP)
+
+
+def _split_is_insertion(part_a, part_b):
+    """Whether two collinear parts of a split read flank an insertion.
+
+    Each part is (reference start, reference end, read start, read end),
+    in reference orientation; *part_a* is clipped on its right and
+    *part_b* on its left.  More read than reference lies between them for
+    an insertion; more reference for a deletion; and for a tandem
+    duplication, part_b starts on the reference before part_a ends, by
+    more than the read between them.
+    """
+    ref_gap = part_b[0] - part_a[1]
+    read_gap = part_b[2] - part_a[3]
+    return read_gap > abs(ref_gap)
+
+
+def _annotate_and_link_from_metadata(regions, read_sv_meta, link_slack=0):
     """Annotate regions and link breakpoints using pre-collected metadata.
 
     Uses per-read SV metadata collected during the anchoring scan
     (Module 3), so no additional BAM I/O is needed.
 
     Evidence is counted per molecule (read name), at most once per count
-    per region.  Pair-level evidence (split alignment, unmapped mate,
-    discordant pair) counts in every region where the molecule has an
-    informative alignment.  Soft clips, CIGAR indels of at least 50 bp
-    and ``max_clip_len`` count in the region of the alignment that shows
-    them; ``breakpoint_reads`` is the most molecules clipped at one
-    breakpoint, or 0 when that is fewer than two.  An unmapped
-    informative read counts as an unmapped mate in the region where it
-    is placed.
+    per region, and only from alignments with MAPQ >= ``_MIN_LINK_MAPQ``:
+    reads of sequence missing from the reference that resembles a repeat
+    (a new mobile-element copy, say) align to the repeat's reference
+    copies with low MAPQ, and would pile up false evidence there.
+    Pair-level evidence (split alignment, unmapped mate, discordant pair)
+    counts in every region where the molecule has such an informative
+    alignment.  Soft clips and CIGAR indels of at least 50 bp count in
+    the region of the alignment that shows them; ``breakpoint_reads`` is
+    the most molecules clipped at one breakpoint, or 0 when that is fewer
+    than two.  An unmapped informative read counts as an unmapped mate
+    in the region where it is placed (unless the MQ tag gives its mate a
+    low MAPQ).  ``max_clip_len`` is the longest clip of any alignment.
 
     Two regions are linked by a molecule with informative alignments in
     both, by a supplementary alignment (SA tag) of a read in one that
@@ -1305,13 +1353,16 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
     a junction, with the molecules showing it.  Both junctions of a
     balanced inversion or reciprocal translocation are thus reported.
     With no majority, the regions get one link with unknown orientation
-    (INTRA, or BND across chromosomes).  A region's ``sv_type`` is the
-    majority over its molecules, including CIGAR indels (DEL, INS) and
-    joins within the region, or ``.`` when there is none.
+    (INTRA, or BND across chromosomes).  A split read whose parts are
+    collinear is an insertion (INS) rather than a deletion or tandem
+    duplication when more of the read than of the reference lies between
+    them.  A region's ``sv_type`` is the majority over its molecules,
+    including CIGAR indels (DEL, INS) and joins within the region; with
+    no votes, INS when reads are clipped from both sides at one point,
+    otherwise ``.``.
 
     Args:
         regions: List of (chrom, start, end) tuples.
-        region_reads: Dict mapping region tuple to set of read names.
         read_sv_meta: Dict mapping (query_name, is_supplementary) to the
             per-read metadata recorded by ``_process_informative_read``.
         link_slack: How far (bp) an SA or mate position may fall outside
@@ -1351,11 +1402,14 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
                 best = after
         return best
 
-    # Build lookup from read name to regions it belongs to
-    read_to_regions = {}
-    for region_key in regions:
-        for qname in region_reads.get(region_key, set()):
-            read_to_regions.setdefault(qname, set()).add(region_key)
+    # The regions where each molecule has a confidently placed
+    # informative alignment; only there does it count as evidence
+    placed = collections.defaultdict(set)
+    for (qname, _is_supp), meta in read_sv_meta.items():
+        if "pos" in meta and meta["mapq"] >= _MIN_LINK_MAPQ:
+            region = region_at(*meta["pos"])
+            if region is not None:
+                placed[qname].add(region)
 
     annotations = {
         r: {**{name: 0 for name in _SV_EVIDENCE}, "max_clip_len": 0}
@@ -1374,14 +1428,22 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
             counted.add((qname, region, name))
             annotations[region][name] += 1
 
-    clips_by_region = collections.defaultdict(list)
+    clips_by_region = collections.defaultdict(list)  # (pos, side, qname)
     type_votes = collections.defaultdict(dict)  # region -> {qname: SV type}
     for (qname, _is_supp), meta in read_sv_meta.items():
-        placed = meta.get("placed_unmapped")
-        if placed is not None:
-            region = region_at(*placed)
-            if region is not None:
+        if "placed_unmapped" in meta:
+            region = region_at(*meta["placed_unmapped"])
+            mate_mapq = meta.get("mate_mapq")
+            if region is not None and (mate_mapq is None
+                                       or mate_mapq >= _MIN_LINK_MAPQ):
                 count(qname, region, "unmapped_mates")
+            continue
+
+        own = region_at(*meta["pos"]) if "pos" in meta else None
+        if own is not None:
+            ann = annotations[own]
+            ann["max_clip_len"] = max(ann["max_clip_len"], meta["max_clip"])
+        if meta["mapq"] < _MIN_LINK_MAPQ:
             continue
 
         evidence = []
@@ -1392,17 +1454,14 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
                 evidence.append("unmapped_mates")
             elif not meta["is_proper_pair"]:
                 evidence.append("discordant_pairs")
-        for region in read_to_regions.get(qname, ()):
+        for region in placed.get(qname, ()):
             for name in evidence:
                 count(qname, region, name)
 
-        own = region_at(*meta["pos"]) if "pos" in meta else None
         if own is None:
             continue
-        ann = annotations[own]
-        ann["max_clip_len"] = max(ann["max_clip_len"], meta["max_clip"])
-        for pos in meta["clip_positions"]:
-            clips_by_region[own].append((pos, qname))
+        for pos, side in meta["clips"]:
+            clips_by_region[own].append((pos, side, qname))
         if meta["large_indel"]:
             count(qname, own, "large_indel_reads")
             type_votes[own].setdefault(qname, meta["large_indel"])
@@ -1410,7 +1469,8 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
     # One long clip is often an adapter or a low-quality tail; a
     # breakpoint needs at least two molecules clipped at it.
     for region, clips in clips_by_region.items():
-        n_clipped = _largest_clip_cluster(clips)
+        n_clipped, _pos = _largest_clip_cluster(
+            [(pos, qname) for pos, _side, qname in clips])
         if n_clipped >= 2:
             annotations[region]["breakpoint_reads"] = n_clipped
 
@@ -1425,7 +1485,8 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
     def breakend(chrom, start, end, side):
         return (chrom, end if side == "+" else start, side)
 
-    def join(end_a, region_a, end_b, region_b, qname, pair=False):
+    def join(end_a, region_a, end_b, region_b, qname, pair=False,
+             insertion=False):
         if region_a is None or region_b is None:
             return
         # By position; on a tie, a "+" end comes first
@@ -1433,7 +1494,8 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
             end_a, end_b = end_b, end_a
             region_a, region_b = region_b, region_a
         strands = (end_a[2], end_b[2]) if end_a[2] and end_b[2] else None
-        sv_type = _infer_sv_type(region_a, region_b, strands)
+        sv_type = "INS" if insertion else _infer_sv_type(
+            region_a, region_b, strands)
         if pair and sv_type == "DEL" and region_a == region_b:
             # A forward-reverse pair within one region is either too far
             # apart (a deletion) or too close (an insertion, e.g. one
@@ -1476,9 +1538,23 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
             sa_end = sa_start + sum(
                 length for op, length in sa_cigar if op in (0, 2, 3, 7, 8)
             )
+            sa_side = _clip_side(sa_cigar)
+            # Collinear parts (one chromosome and strand, one clipped on
+            # each side) flank a deletion, a tandem duplication or an
+            # insertion; the read between them tells which
+            insertion = False
+            if parts[0] == chrom and (parts[2] == "-") == meta["is_reverse"]:
+                own_part = (start, meta["end"], *meta["qspan"])
+                sa_part = (sa_start, sa_end, *_query_span(sa_cigar))
+                sides = (meta["clip_side"], sa_side)
+                if sides == ("+", "-"):
+                    insertion = _split_is_insertion(own_part, sa_part)
+                elif sides == ("-", "+"):
+                    insertion = _split_is_insertion(sa_part, own_part)
             join(own_end, own,
-                 breakend(parts[0], sa_start, sa_end, _clip_side(sa_cigar)),
-                 region_at(parts[0], sa_start, link_slack), qname)
+                 breakend(parts[0], sa_start, sa_end, sa_side),
+                 region_at(parts[0], sa_start, link_slack), qname,
+                 insertion=insertion)
 
         # Paired-end orientation (FR libraries): the breakpoint lies after
         # a forward read and before a reverse one.  The two reads are
@@ -1501,9 +1577,13 @@ def _annotate_and_link_from_metadata(regions, region_reads, read_sv_meta,
                     join(end_a, region_a, end_b, region_b, qname)
 
     for region in regions:
-        annotations[region]["sv_type"] = (
-            _unique_majority(type_votes[region].values()) or "."
-        )
+        votes = type_votes[region].values()
+        sv_type = _unique_majority(votes)
+        if not votes and _clipped_insertion(clips_by_region[region]):
+            # No alignment says where the clipped sequence belongs: new
+            # sequence, such as a mobile element or one longer than a read
+            sv_type = "INS"
+        annotations[region]["sv_type"] = sv_type or "."
 
     # Build links, one per junction: each breakpoint orientation of the
     # majority type among the molecules joining two regions.  Both
@@ -2417,8 +2497,7 @@ def run_discovery_pipeline(args):
     # SV annotation and linking (from metadata — no extra BAM scan)
     logger.info("[Module 4] Annotating regions and linking breakpoints")
     region_annotations, sv_links = _annotate_and_link_from_metadata(
-        regions, region_reads, read_sv_meta,
-        link_slack=args.cluster_distance,
+        regions, read_sv_meta, link_slack=args.cluster_distance,
     )
     _classify_regions(regions, region_annotations, sv_links)
 

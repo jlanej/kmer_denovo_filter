@@ -129,6 +129,23 @@ def _parse_cigar(cigar):
     ]
 
 
+def _query_span(cigartuples):
+    """Return (start, end) of the aligned read bases, in reference order.
+
+    Leading soft and hard clips come before *start*; matches, mismatches
+    and insertions consume the read.  CIGARs are in reference
+    orientation, so this indexes the read as stored for its strand.
+    """
+    start = 0
+    for op, length in cigartuples or ():
+        if op not in (4, 5):
+            break
+        start += length
+    aligned = sum(length for op, length in cigartuples or ()
+                  if op in (0, 1, 7, 8))
+    return start, start + aligned
+
+
 def _clip_side(cigartuples):
     """Return which end of an alignment faces a breakpoint.
 
@@ -382,7 +399,8 @@ def _process_informative_read(read, unique_in_read, kmer_hit_indices,
     is also written to it, whether mapped or not.
 
     An unmapped read placed next to its mapped mate is recorded in
-    *read_sv_meta* only by that position (``placed_unmapped``): evidence of
+    *read_sv_meta* only by that position (``placed_unmapped``), and its
+    mate's mapping quality when the MQ tag gives it: evidence of
     unmappable sequence at the locus.
 
     Returns 1 if the read is unmapped-informative, 0 otherwise.
@@ -400,6 +418,8 @@ def _process_informative_read(read, unique_in_read, kmer_hit_indices,
         if read.reference_id >= 0:
             read_sv_meta[dedup_key] = {
                 "placed_unmapped": (read.reference_name, read.reference_start),
+                "mate_mapq": (read.get_tag("MQ") if read.has_tag("MQ")
+                              else None),
             }
         return 1
 
@@ -425,12 +445,13 @@ def _process_informative_read(read, unique_in_read, kmer_hit_indices,
 
     # Collect SV metadata for this informative read
     sc_left, sc_right = _extract_softclips(read.cigartuples)
-    # Where long soft clips start: candidate breakpoints
-    clip_positions = []
+    # Where long soft clips start, candidate breakpoints, and on which side
+    # of the alignment: "-" before its start, "+" after its end
+    clips = []
     if sc_left >= _SV_MIN_CLIP:
-        clip_positions.append(read.reference_start)
+        clips.append((read.reference_start, "-"))
     if sc_right >= _SV_MIN_CLIP:
-        clip_positions.append(read.reference_end)
+        clips.append((read.reference_end, "+"))
     # A discordant pair's mate position and strand can link two breakpoint
     # regions; its mapping quality is known only when the MQ tag is present.
     mate = None
@@ -462,7 +483,8 @@ def _process_informative_read(read, unique_in_read, kmer_hit_indices,
         "end": read.reference_end,
         "is_reverse": read.is_reverse,
         "clip_side": _clip_side(read.cigartuples),
-        "clip_positions": clip_positions,
+        "qspan": _query_span(read.cigartuples),
+        "clips": clips,
         "large_indel": large_indel,  # "DEL", "INS" or None
         "mate": mate,
     }
