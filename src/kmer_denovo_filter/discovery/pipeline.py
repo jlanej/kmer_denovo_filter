@@ -49,6 +49,7 @@ from kmer_denovo_filter.utils import (
     _collect_kmer_ref_positions,
     _estimate_fasta_sequence_count,
     _estimate_jf_hash_size,
+    size_child_count,
     _find_jf_files,
     _format_elapsed,
     _format_file_size,
@@ -65,9 +66,28 @@ logger = logging.getLogger(__name__)
 # ── Discovery-mode helpers ────────────────────────────────────────
 
 
+def _child_count_command(child_jf, kmer_size, threads, hash_entries, bloom_elements, lower_count):
+    """``jellyfish count`` for the child, reading the FASTA stream on stdin: canonical k-mers, the hash size given,
+    ``--disk`` (a full table is dumped and merged, never doubled in memory), the Bloom filter when *bloom_elements*
+    is positive, and ``-L`` so that only k-mers at or above *lower_count* are written to the index."""
+    cmd = [
+        "jellyfish", "count",
+        "-m", str(kmer_size),
+        "-s", str(hash_entries),
+        "-t", str(threads),
+        "-C",
+        "--disk",
+    ]
+    if bloom_elements:
+        cmd.extend(["--bf-size", str(bloom_elements)])
+    cmd.extend(["-L", str(lower_count), "-o", child_jf, "/dev/fd/0"])
+    return cmd
+
+
 def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
                                    min_child_count, threads, tmpdir,
-                                   jf_hash_size=None):
+                                   jf_hash_size=None, memory_gb=None,
+                                   bloom_filter=True):
     """Module 1: Extract all child k-mers and filter by minimum count.
 
     Child k-mers are counted with ``jellyfish count -C`` (canonical mode)
@@ -75,12 +95,23 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
     ensures that ``jellyfish query`` during reference subtraction compares
     k-mers in the same canonical orientation.
 
-    The hash size for Jellyfish is estimated dynamically from the BAM
-    file size (unless overridden via *jf_hash_size*) to avoid hash
-    overflow that can produce multi-hundred-GB monolithic index files.
+    The count is bounded in memory (``jellyfish_wrappers.size_child_count``):
+    ``--disk`` stops jellyfish from doubling a full table in RAM (the old
+    behaviour: a 4G table for a 70x child doubled to 8G, 16G and died
+    asking for 32G, 264 GB with the copy in flight) - a full table is dumped
+    to ``child.jf_N`` files that jellyfish merges into ``child.jf`` at the end;
+    the hash size comes from *memory_gb* (the ``--memory`` budget) and from
+    what the input needs, never from the file size alone; and, with
+    *bloom_filter* (the default when *min_child_count* is 2 or more), a Bloom
+    filter in front of the table keeps the k-mers seen once - most of a
+    WGS child's distinct k-mers are sequencing errors seen once - out of
+    the hash.  The filter admits a k-mer from its second occurrence, so every
+    count in the hash is one less than the truth: the dump's lower bound is
+    ``min_child_count - 1``.  *jf_hash_size* (a string such as '4G') overrides
+    the hash size.
 
-    When Jellyfish produces multiple chunk files (hash overflow), they
-    are merged in a streaming fashion before dumping.
+    When Jellyfish leaves multiple chunk files (``--no-merge``, an older
+    jellyfish), they are merged in a streaming fashion before dumping.
 
     The ``jellyfish dump`` output is streamed line-by-line so the full
     dump text is never held in memory.  Each Jellyfish chunk file is
@@ -94,13 +125,25 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
     """
     child_jf = os.path.join(tmpdir, "child.jf")
 
-    # Step 1: Count all child k-mers
-    if jf_hash_size is None:
-        jf_hash_size = _estimate_jf_hash_size(child_bam, kmer_size, default="1G")
+    # Step 1: Count all child k-mers, within the memory budget
+    use_bf = bool(bloom_filter) and min_child_count >= 2
+    if bloom_filter and not use_bf:
+        logger.info(
+            "Bloom filter off: --min-child-count %d keeps k-mers seen once, which the filter would drop",
+            min_child_count,
+        )
+    sizing = size_child_count(child_bam, kmer_size, memory_gb=memory_gb, bloom_filter=use_bf, jf_hash_size=jf_hash_size)
+    jf_hash_size = str(sizing["hash_entries"])
+    dump_lower = min_child_count - 1 if use_bf else min_child_count
     logger.info(
-        "Extracting child k-mers from BAM (k=%d, jf hash size=%s)…",
-        kmer_size, jf_hash_size,
+        "Extracting child k-mers from BAM (k=%d; %s; --disk: a full table is dumped and merged, never doubled in memory)…",
+        kmer_size, sizing["note"],
     )
+    if use_bf:
+        logger.info(
+            "  Bloom filter: a k-mer enters the hash from its second occurrence, so the hash counts are one less than "
+            "the truth; k-mers with count >= %d are dumped with -L %d", min_child_count, dump_lower,
+        )
     samtools_threads = max(1, threads // 4)
     samtools_cmd = [
         "samtools", "fasta", "-F", "0xD00",
@@ -110,15 +153,7 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
     if ref_fasta:
         samtools_cmd.extend(["--reference", ref_fasta])
 
-    jellyfish_cmd = [
-        "jellyfish", "count",
-        "-m", str(kmer_size),
-        "-s", jf_hash_size,
-        "-t", str(threads),
-        "-C",
-        "-o", child_jf,
-        "/dev/fd/0",
-    ]
+    jellyfish_cmd = _child_count_command(child_jf, kmer_size, threads, jf_hash_size, sizing["bloom_elements"] if use_bf else 0, dump_lower)
 
     def _log_progress(elapsed, p_samtools, p_jellyfish):
         jf_files = _find_jf_files(child_jf)
@@ -134,7 +169,7 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
             n_chunks = 0
         logger.info(
             "  … child k-mer counting (%s elapsed, jf index: %s, "
-            "chunks: %d)",
+            "files: %d - more than one: the table filled and was dumped; jellyfish merges them at the end)",
             _format_elapsed(elapsed), jf_size, n_chunks,
         )
         _log_memory("child k-mer counting")
@@ -174,16 +209,17 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
         return child_candidates_fa, 0
 
     # Step 2: Dump k-mers with count >= min_child_count (streamed to
-    # avoid holding the full dump text in memory).
+    # avoid holding the full dump text in memory).  With the Bloom filter the
+    # hash holds count - 1, so the bound is one lower (see use_bf above).
     logger.info(
-        "Dumping child k-mers with count >= %d from %s (%s)…",
-        min_child_count, child_jf_final,
+        "Dumping child k-mers with count >= %d (-L %d%s) from %s (%s)…",
+        min_child_count, dump_lower, " with the Bloom filter's offset" if use_bf else "", child_jf_final,
         _format_file_size(child_jf_final),
     )
     dump_start = time.monotonic()
     dump_cmd = [
         "jellyfish", "dump", "-c",
-        "-L", str(min_child_count),
+        "-L", str(dump_lower),
         child_jf_final,
     ]
     child_candidates_fa = os.path.join(tmpdir, "child_candidates.fa")
@@ -2242,7 +2278,9 @@ def run_discovery_pipeline(args):
     logger.info("  k-mer size:        %d", args.kmer_size)
     logger.info("  Min child count:   %d", args.min_child_count)
     logger.info("  Min distinct kmers/read: %d", min_dk_per_read)
-    logger.info("  JF hash size:      %s", jf_hash_size or "(auto)")
+    logger.info("  JF hash size:      %s", jf_hash_size or "(from the memory budget and the input)")
+    logger.info("  Child count:       --disk (no in-memory doubling); Bloom filter %s",
+                "off (--no-child-bloom-filter)" if getattr(args, "no_child_bloom_filter", False) else "on (k-mers seen once never enter the hash)")
     logger.info("  Threads:           %d", args.threads)
     logger.info(
         "  Memory limit:      %s",
@@ -2303,7 +2341,8 @@ def run_discovery_pipeline(args):
         child_candidates_fa, n_candidates = _extract_child_kmers_discovery(
             args.child, args.ref_fasta, args.kmer_size,
             args.min_child_count, args.threads, tmpdir,
-            jf_hash_size=jf_hash_size,
+            jf_hash_size=jf_hash_size, memory_gb=memory_limit_gb,
+            bloom_filter=not getattr(args, "no_child_bloom_filter", False),
         )
 
         if n_candidates == 0:

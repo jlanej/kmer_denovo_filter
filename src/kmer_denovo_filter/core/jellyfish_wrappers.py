@@ -71,41 +71,159 @@ def _find_jf_files(base_path):
     return files
 
 
-def _estimate_jf_hash_size(bam_path, kmer_size, default="1G"):
-    """Estimate a reasonable ``-s`` hash size for Jellyfish count.
+# ---------------------------------------------------------------------------
+# Sizing the child's k-mer count (Module 1)
+# ---------------------------------------------------------------------------
+#
+# Jellyfish 2 facts the sizing rests on (sub_commands/count_main.cc):
+#   * ``-s`` is the INITIAL hash size. Without ``--disk`` a full table is
+#     doubled in memory - the old and the new table coexist during the copy -
+#     so a 4G table that needs 32G passes through 23, 68, 45, 133, 88 and then
+#     264 GB of RSS: that is how every WGS child used to be OOM-killed.  With
+#     ``--disk`` (``do_size_doubling(false)``) a full table is dumped to
+#     ``<out>_N`` files and jellyfish merges them into ``<out>`` at the end.
+#   * ``--bf-size N`` puts a Bloom filter in front of the table: a k-mer is
+#     inserted only once the filter has seen it, so k-mers seen once never
+#     enter the hash and every count in the hash is ONE LESS than the true
+#     count.  The caller dumps with ``-L (min_count - 1)`` to compensate.
+#
+# Memory (observed on the jobs that died, k=31: 23.1 GB at 2^32 entries, 45.2
+# at 2^33, 88.0 at 2^34): a hash entry takes about (2k - log2(size) + 16) / 8
+# bytes; a Bloom filter at the default 1% false-positive rate about 1.2 bytes
+# per element.
 
-    Uses the BAM file size as a rough proxy for the number of k-mers
-    (approximately ``file_size / 4`` for compressed BAM → approximate
-    bases, divided by reasonable overhead).  The result is capped to
-    keep initial memory reasonable.
+GENOME_DISTINCT_KMERS = 3.1e9   # distinct k-mers of a human genome, errors aside
+READ_ERROR_RATE = 0.004         # a sequencing error makes up to k novel k-mers
+BAM_COMPRESSION = 3.0           # uncompressed bases per BAM byte (rough)
+CRAM_COMPRESSION = 4.5          # ... per CRAM byte (reference-based compression)
+HASH_LOAD = 0.8                 # the share of a jellyfish table used before it fills
+HASH_MIN_ENTRIES = 100_000_000
+BLOOM_MIN_ELEMENTS = 10_000_000
+BLOOM_FP = 0.01
+MEMORY_SHARE = 0.6              # the share of the memory budget the count may use (filter + table)
 
-    Returns a string suitable for Jellyfish's ``-s`` argument
-    (e.g. ``"2G"``, ``"500M"``).
-    """
+
+FASTA_SUFFIXES = (".fa", ".fasta", ".fna", ".fa.gz", ".fasta.gz", ".fna.gz")
+
+
+def _is_fasta(path):
+    return str(path).lower().endswith(FASTA_SUFFIXES)
+
+
+def _estimate_bases(bam_path):
+    """Bases in the file, from its size and a compression ratio (0 when the size is unknown): reads in a BAM or CRAM,
+    the sequence itself in a FASTA (a reference, uncompressed or gzipped)."""
     try:
-        file_size = os.path.getsize(bam_path)
+        size = os.path.getsize(bam_path)
+    except OSError:
+        return 0
+    name = str(bam_path).lower()
+    if _is_fasta(name):
+        ratio = 4.0 if name.endswith(".gz") else 1.0
+    else:
+        ratio = CRAM_COMPRESSION if name.endswith(".cram") else BAM_COMPRESSION
+    return int(size * ratio)
+
+
+def _genome_kmers(bases):
+    """The error-free distinct k-mers the reads can hold: the genome's, or fewer bases than that for a small input."""
+    return min(GENOME_DISTINCT_KMERS, float(bases))
+
+
+def _estimate_distinct_kmers(bam_path, kmer_size):
+    """Distinct k-mers the child's reads hold, errors included: the genome's (or the input's, when smaller) plus one
+    novel k-mer per error per position of the window (bases x error rate x k)."""
+    bases = _estimate_bases(bam_path)
+    if _is_fasta(bam_path):                                            # a reference: no sequencing errors
+        return int(_genome_kmers(bases))
+    return int(_genome_kmers(bases) + bases * READ_ERROR_RATE * kmer_size)
+
+
+def _jf_bytes_per_entry(kmer_size, entries):
+    """Bytes per hash entry: the key bits jellyfish stores (2k minus the bits the position encodes), plus the
+    reprobe and counter fields (about 14 bits)."""
+    import math
+    bits = 2 * kmer_size - math.log2(max(entries, 2)) + 16
+    return max(bits, 16) / 8.0
+
+
+def _bloom_bytes_per_element(fp=BLOOM_FP):
+    import math
+    return -math.log(fp) / (math.log(2) ** 2) / 8.0
+
+
+def _parse_size(text):
+    """'4G', '500M', '1k' or a plain integer -> entries (binary suffixes, as jellyfish reads them)."""
+    t = str(text).strip()
+    mult = {"k": 2**10, "m": 2**20, "g": 2**30, "t": 2**40}
+    if t and t[-1].lower() in mult:
+        return int(float(t[:-1]) * mult[t[-1].lower()])
+    return int(float(t))
+
+
+def _pow2_at_most(n):
+    import math
+    return 1 << max(int(math.floor(math.log2(max(n, 1)))), 0)
+
+
+def _pow2_at_least(n):
+    import math
+    return 1 << max(int(math.ceil(math.log2(max(n, 1)))), 0)
+
+
+def size_child_count(bam_path, kmer_size, memory_gb=None, bloom_filter=True, jf_hash_size=None):
+    """Size the child count against a memory budget: the Bloom filter from the input (what the reads hold),
+    the hash from what is left of the budget, never more than the input needs.
+
+    Returns a dict: hash_entries, bloom_elements (0 when the filter is off), the estimated GB of each, the
+    budget used, est_distinct, and a one-line ``note`` for the log.  memory_gb None: the system's total
+    memory (``_get_available_memory_gb``), else 64 GB when that is unknown too.  jf_hash_size (a string
+    such as '4G') overrides the hash size; the filter is still sized from the input."""
+    from kmer_denovo_filter.core.memory_utils import _get_available_memory_gb
+    import math
+    if memory_gb is None:
+        total, _avail = _get_available_memory_gb()
+        memory_gb = total if total else 64.0
+    budget = memory_gb * MEMORY_SHARE
+    bases = _estimate_bases(bam_path)
+    genome = _genome_kmers(bases)
+    est_distinct = _estimate_distinct_kmers(bam_path, kmer_size)
+    bloom_elements = 0
+    bloom_gb = 0.0
+    if bloom_filter:
+        bloom_elements = max(BLOOM_MIN_ELEMENTS, int(est_distinct * 1.2))
+        bloom_gb = bloom_elements * _bloom_bytes_per_element() / 1024**3
+        # what reaches the hash: the genome's k-mers (and the variants), the errors that recur, the filter's false positives
+        need = genome * 1.3 + (est_distinct - genome) * 0.05 + est_distinct * BLOOM_FP
+    else:
+        need = float(est_distinct)
+    if jf_hash_size:
+        hash_entries = _parse_size(jf_hash_size)
+    else:
+        # jellyfish rounds -s up to a power of two: ask for the power of two that holds the need at HASH_LOAD, unless
+        # that exceeds what the budget leaves beside the filter - then the largest power of two the budget holds
+        left_gb = max(budget - bloom_gb, 0.0)
+        wanted = _pow2_at_least(max(int(need / HASH_LOAD), HASH_MIN_ENTRIES))
+        cap = int(left_gb * 1024**3 / _jf_bytes_per_entry(kmer_size, wanted))
+        hash_entries = wanted if wanted <= cap else max(_pow2_at_most(cap), HASH_MIN_ENTRIES)
+    hash_gb = hash_entries * _jf_bytes_per_entry(kmer_size, hash_entries) / 1024**3
+    overflow = need > hash_entries * HASH_LOAD
+    note = ("hash %s entries (~%.1f GB)%s; %s; budget %.0f GB of %.0f; input ~%.2g distinct k-mers%s" % (
+        f"{hash_entries:,}", hash_gb, " (given)" if jf_hash_size else "",
+        ("Bloom filter %s elements (~%.1f GB)" % (f"{bloom_elements:,}", bloom_gb)) if bloom_filter else "no Bloom filter",
+        budget, memory_gb, est_distinct, "; the table will fill and dump to disk (merged at the end)" if overflow else ""))
+    return dict(hash_entries=int(hash_entries), hash_gb=hash_gb, bloom_elements=int(bloom_elements), bloom_gb=bloom_gb, budget_gb=budget,
+                memory_gb=memory_gb, est_distinct=est_distinct, overflow=overflow, note=note)
+
+
+def _estimate_jf_hash_size(bam_path, kmer_size, default="1G", memory_gb=None):
+    """The ``-s`` for the child count as a string of entries, sized by :func:`size_child_count` (kept for callers
+    of the old name; the file-size heuristic with its 4G cap is gone - it sent every WGS child into jellyfish's
+    in-memory doubling)."""
+    try:
+        return str(size_child_count(bam_path, kmer_size, memory_gb=memory_gb, bloom_filter=False)["hash_entries"])
     except OSError:
         return default
-
-    # Rough heuristic: BAM compresses ~3:1, so uncompressed bases ≈
-    # file_size * 3.  Distinct k-mers are typically much less than
-    # total bases.  Jellyfish hash entry is ~(k+8) bytes.
-    # Aim for hash that can hold ~75% of distinct k-mers without
-    # resizing while staying within memory budget.
-    #
-    # Conservative estimate: 1 entry per 10 uncompressed bases,
-    # capped between 100M and 4G.
-    estimated_bases = file_size * 3
-    estimated_distinct = estimated_bases // 10
-
-    # Cap between 100M and 4G entries (not bytes)
-    min_entries = 100_000_000   # 100M
-    max_entries = 4_000_000_000  # 4G
-    entries = max(min_entries, min(estimated_distinct, max_entries))
-
-    if entries >= 1_000_000_000:
-        return f"{entries // 1_000_000_000}G"
-    return f"{entries // 1_000_000}M"
 
 
 # ---------------------------------------------------------------------------

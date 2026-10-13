@@ -61,9 +61,16 @@ outputs, and the `--kraken2*` flags.
    BAM/CRAM with Jellyfish. Keep only k-mers with at least
    `--min-child-count` occurrences (default 3), then subtract any k-mers
    present in the reference. The remaining k-mers are non-reference child
-   k-mers. Intermediate data (the child Jellyfish index and candidates
-   FASTA) is removed as soon as each step completes to keep disk and
-   memory usage low.
+   k-mers. The count is bounded in memory: the hash is sized from
+   `--memory` and from what the reads hold, `jellyfish count --disk` dumps
+   a full table to disk and merges the pieces at the end instead of
+   doubling it in RAM, and a Bloom filter in front of the table keeps
+   k-mers seen once (most of a WGS child's distinct k-mers: sequencing
+   errors) out of it - the filter admits a k-mer from its second
+   occurrence, so the dump bound is lowered by one to compensate
+   (`--no-child-bloom-filter` to count without it). Intermediate data (the
+   child Jellyfish index and candidates FASTA) is removed as soon as each
+   step completes to keep disk and memory usage low.
 
 3. **Filter against parents** – Stream each parent's BAM/CRAM through
    Jellyfish to count the non-reference child k-mers. Remove any k-mer
@@ -240,7 +247,8 @@ k-mer parameters. Each command also has its own mode-specific arguments.
 | `--threads` / `-t` | 4 | Number of threads for Jellyfish and parallel anchoring workers |
 | `--memory` | auto | Available memory in GB. On HPC (e.g. SLURM), set this to the allocated memory so worker counts and hash sizes are tuned correctly. When omitted, auto-detected from the system |
 | `--debug-kmers` | false | Enable per-variant debug output |
-| `--jf-hash-size` | auto | Initial hash size for `jellyfish count` in discovery mode (e.g. `2G`, `500M`). Estimated from the child BAM file size by default. A larger value avoids hash overflow (which creates multi-file indexes requiring more memory to merge/dump). **Note:** This argument only applies to the discovery mode child k-mer counting step; VCF mode parent hash sizes are automatically sized from the number of child k-mers and are not affected by this flag |
+| `--no-child-bloom-filter` | false | Count the child's k-mers without the Bloom filter that keeps k-mers seen once out of the hash (several times smaller with it; see step 2) |
+| `--jf-hash-size` | auto | Hash size for the child's `jellyfish count` (e.g. `4G`, `500M`). Sized from `--memory` and the input by default; the count runs with `--disk`, so a table that fills is dumped and merged, never doubled in memory. Give this only to override the automatic size. Was: estimated from the child BAM file size and capped at 4G, which sent every WGS child into jellyfish's in-memory doubling (a 4G table doubled to 8G, 16G and died asking for 32G creates multi-file indexes requiring more memory to merge/dump). **Note:** This argument only applies to the discovery mode child k-mer counting step; VCF mode parent hash sizes are automatically sized from the number of child k-mers and are not affected by this flag |
 | `--tmp-dir` | auto | Directory for temporary files (jellyfish indexes, intermediate FASTA files). Defaults to a subdirectory next to the output files. Avoid RAM-backed filesystems like tmpfs (`/tmp` on many HPC systems), as intermediate files can exceed 100 GB for WGS data |
 
 #### `kmer-denovo` arguments (VCF mode)
@@ -853,9 +861,12 @@ apptainer exec --bind /data,/scratch "$SIF" kmer-denovo \
   --memory $(( ${SLURM_MEM_PER_NODE:-32768} / 1024 ))
 
 # Discovery mode (uncomment to use instead)
-# For WGS discovery, request at least 64 GB; 128 GB recommended.
-# The child k-mer counting step (Module 1) may need 80–120 GB
-# for large WGS BAMs. Module 3 (anchoring) uses a disk-backed
+# For WGS discovery, request at least 64 GB; 128 GB recommended, more
+# for a deep child. The child k-mer counting step (Module 1) sizes
+# itself to --memory: a Bloom filter of about 1.2 bytes per distinct
+# k-mer of the reads (a 40x child ~15 GB, a 70x child ~35 GB) plus a
+# hash of the k-mers seen twice or more (~45 GB), counted with --disk
+# so that it can never grow past the budget. Module 3 (anchoring) uses a disk-backed
 # Jellyfish index, keeping per-worker memory low (~2–10 GB shared
 # via page cache). The --tmp-dir flag defaults to a subdirectory
 # next to --out-prefix; on HPC systems, point it to a fast scratch

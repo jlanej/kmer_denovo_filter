@@ -50,12 +50,20 @@ def _add_shared_args(parser):
     )
     parser.add_argument(
         "--jf-hash-size", default=None,
-        help="Initial hash size for Jellyfish count (e.g. '2G', '500M'). "
-             "By default, estimated from the child BAM file size. "
-             "A larger value reduces the chance of hash overflow "
-             "(which creates multi-file indexes that require more memory "
-             "to merge/dump), but uses more upfront RAM. "
-             "Recommended: set to ~50%% of available memory.",
+        help="Hash size for the child's jellyfish count (e.g. '4G', '500M'). "
+             "By default sized from --memory and from what the child's reads "
+             "hold; the count runs with --disk, so a table that fills is "
+             "dumped and merged, never doubled in memory. Give this only to "
+             "override the automatic size.",
+    )
+    parser.add_argument(
+        "--no-child-bloom-filter", action="store_true", default=False,
+        help="Count the child's k-mers without the Bloom filter. By default "
+             "(with --min-child-count 2 or more) a Bloom filter keeps k-mers "
+             "seen once - most of a WGS child's distinct k-mers, sequencing "
+             "errors - out of the hash, which shrinks it several-fold; the "
+             "filter admits a k-mer from its second occurrence, and the dump "
+             "bound is lowered by one to compensate.",
     )
     parser.add_argument(
         "--tmp-dir", default=None,

@@ -27,6 +27,7 @@ from kmer_denovo_filter.core.jellyfish_wrappers import (  # noqa: F401
     _build_proband_jf_index,
     _ensure_ref_jf,
     _estimate_jf_hash_size,
+    size_child_count,
     _find_jf_files,
     _merge_jf_files,
     _scan_parent_jellyfish,

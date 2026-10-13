@@ -28,6 +28,7 @@ from kmer_denovo_filter.core.bam_scanner import (  # noqa: F401
 )
 from kmer_denovo_filter.core.jellyfish_wrappers import (  # noqa: F401
     _estimate_jf_hash_size,
+    size_child_count,
     _find_jf_files,
 )
 from kmer_denovo_filter.core.memory_utils import (  # noqa: F401
