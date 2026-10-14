@@ -320,7 +320,7 @@ or `SV_VCF` at a downloaded call set.
 | `CRAM_DIR`, `RESULTS_DIR`, `LOG_DIR`, `REF_DIR`, `STATE_DIR`, `TMP_ROOT` | under `WORK_DIR` | staged CRAMs, outputs, logs, reference, manager state, discovery scratch |
 | `CONFIG_SNAPSHOT` | `$STATE_DIR/config.env` | the effective configuration, passed to every submitted job as `--config` |
 | `CONTAINER_URI`, `SIF_IMAGE` | `docker://ghcr.io/jlanej/kmer_denovo_filter:latest`, `$WORK_DIR/kmer_denovo_filter.sif` | image to pull, or an existing `.sif` to use as is |
-| `CONTAINER_EXAMPLE_DIR` | `/app/examples/1kg_trios` | where the image holds this directory's helpers |
+| `CONTAINER_EXAMPLE_DIR` | `/app/examples/1kg_trios` | where the image holds this directory's helpers; a host directory here (a checkout newer than the image) is bound into the discovery job |
 | `MODULES_TO_LOAD` | empty | environment modules every script loads, e.g. `apptainer` |
 | `SBATCH_EXTRA_ARGS` | empty | site flags for every `sbatch` (partition, account, QoS) |
 | `REF_BASE_URL`, `REF_NAME`, `REF_FASTA`, `REF_JF` | 1000G FTP, `GRCh38_full_analysis_set_plus_decoy_hla.fa`, under `REF_DIR`, `$REF_FASTA.k31.jf` | the reference and its Jellyfish index |

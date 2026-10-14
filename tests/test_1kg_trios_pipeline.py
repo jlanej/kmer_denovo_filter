@@ -342,6 +342,11 @@ def test_setup_stage_discover_and_summarise(workspace):
     assert "Keeping HG00403.cram: trio HG00406 still needs it" in jobs_log
     assert "Removed HG00405.cram" in jobs_log
     assert "Removed HG00403.cram" in jobs_log       # by HG00406's job
+    # the image's helper directory is not a host directory, so it is not bound
+    running = [l for l in jobs_log.splitlines() if l.startswith("[2/3] Running:")]
+    assert len(running) == 2
+    assert all("/app/examples/1kg_trios" not in l.split(" --bind ")[1].split()[0]
+               for l in running)
     assert sorted(os.listdir(crams)) == []
     timing = (work / "results" / "HG00405" / "HG00405.timing.tsv").read_text().splitlines()
     assert timing[0].startswith("trio\tchild\twall_s")
@@ -424,7 +429,8 @@ def test_flags_site_file_and_snapshot(workspace):
         'TRIO_SEED="${TRIO_SEED-}"\n'
         'EXPECTED_COMPLETE_TRIOS="${EXPECTED_COMPLETE_TRIOS:-3}"\n'
         'USE_SV_CALLSET="${USE_SV_CALLSET:-0}"\n'
-        'MODULES_TO_LOAD="${MODULES_TO_LOAD:-}"\n')
+        'MODULES_TO_LOAD="${MODULES_TO_LOAD:-}"\n'
+        f'CONTAINER_EXAMPLE_DIR="${{CONTAINER_EXAMPLE_DIR:-{EXAMPLE_DIR}}}"\n')
     bare = {k: v for k, v in env.items() if k in ("PATH", "HOME")}
 
     # --help prints the header and the effective values, and runs nothing
@@ -443,6 +449,7 @@ def test_flags_site_file_and_snapshot(workspace):
     assert "export DISCOVERY_MEM=4G" in snapshot
     assert "export N_TRIOS=2" in snapshot
     assert "export USE_SV_CALLSET=0" in snapshot
+    assert f"export CONTAINER_EXAMPLE_DIR={EXAMPLE_DIR}" in snapshot
     assert "00b_build_ref_index.sh --config " + str(work2 / "state" / "config.env") \
         in (logs / "sbatch.log").read_text()
     assert (work2 / "reference" / "GRCh38_full_analysis_set_plus_decoy_hla.fa.k31.jf").exists()
@@ -462,6 +469,12 @@ def test_flags_site_file_and_snapshot(workspace):
     args = (work2 / "results" / "HG00405" / "HG00405.args").read_text()
     assert f"--child {work2}/crams/HG00405.cram" in args
     assert "--threads 2 --memory 4" in args
+    # a host directory as CONTAINER_EXAMPLE_DIR (here, this checkout) is bound
+    # into the discovery job, so its helpers are reachable in the container
+    running = [l for l in (logs / "jobs.log").read_text().splitlines()
+               if l.startswith("[2/3] Running:")]
+    binds = running[-1].split(" --bind ")[1].split()[0].split(",")
+    assert os.path.realpath(EXAMPLE_DIR) in [os.path.realpath(b) for b in binds]
 
     # a missing site file, and an unknown --flag, are errors not silent defaults
     result = run("02_summarize.sh", bare, "--config", str(work2 / "nope.sh"), check=False)

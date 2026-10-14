@@ -145,8 +145,12 @@ TMP_DIR="${DISCOVERY_TMP_DIR:-${TMP_ROOT}}/${TRIO}"
 mkdir -p "${TMP_DIR}"
 echo "Threads: ${THREADS}; memory budget: ${MEMORY_GB} GB; tmp: ${TMP_DIR}"
 
+# CONTAINER_EXAMPLE_DIR is bound when it is a host directory (a checkout of
+# these helpers in place of the image's copy); the image's own /app path is
+# not one and is skipped.
 BINDS="$(bind_list "${WORK_DIR}" "${CRAM_DIR}" "${RESULTS_DIR}" "${TMP_DIR}" \
-  "$(dirname "${REF_FASTA}")" "$(dirname "${REF_JF}")" "$(dirname "${SV_COHORT_VCF}")" "$(dirname "${SV_VCF}")")"
+  "$(dirname "${REF_FASTA}")" "$(dirname "${REF_JF}")" "$(dirname "${SV_COHORT_VCF}")" "$(dirname "${SV_VCF}")" \
+  "${CONTAINER_EXAMPLE_DIR}")"
 
 # ── 1. Child-only SVs from the published call set ────────────────────────────
 DNM_ARGS=()
