@@ -32,6 +32,9 @@ jobs:
       - name: Run unit tests
         run: pytest tests/test_cli.py tests/test_kmer_utils.py tests/test_kraken2_bed.py -v
 
+      - name: Run 1000 Genomes trio screen script tests
+        run: pytest tests/test_1kg_trios_helpers.py tests/test_1kg_trios_pipeline.py -v
+
       - name: Run VCF-mode integration tests
         run: |
           pytest tests/vcf/test_pipeline.py -v -k "not (deletion_dka or insertion_dka or decomposed_indel or decomposed_insertion)"

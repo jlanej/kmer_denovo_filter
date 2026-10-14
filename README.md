@@ -202,7 +202,10 @@ links an SV's breakpoints and gives its type. See
 deletion, duplication, inversion, translocation and insertions that runs
 in seconds. [`scripts/sv_benchmark.py`](scripts/sv_benchmark.py)
 benchmarks SV calls on a trio simulated from real GRCh38 sequence, aligned
-with BWA-MEM.
+with BWA-MEM. [`examples/1kg_trios`](examples/1kg_trios/) runs discovery
+on real 30x 1000 Genomes trios at scale on a SLURM cluster, screens the
+published SV calls, and summarises de novo SV candidates across the
+cohort.
 
 To skip the reference indexing step on subsequent runs, pass a precomputed
 Jellyfish index:
@@ -889,6 +892,13 @@ apptainer exec --bind /data,/scratch "$SIF" kmer-denovo \
 > **Tip:** Use `--bind` to make host directories visible inside the
 > container. Bind your input data directory and a writable scratch directory
 > for output.
+
+### A cohort of real trios on SLURM
+
+[`examples/1kg_trios`](examples/1kg_trios/) stages any number of the 602
+1000 Genomes 30x trios from public mirrors, runs `kmer-discovery` on each
+as its own SLURM job, checks the published SV calls, and summarises the SV
+candidates across trios. It is the at-scale test of discovery mode.
 
 ### Using CRAM files on HPC
 

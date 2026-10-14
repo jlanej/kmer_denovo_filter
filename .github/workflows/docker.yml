@@ -62,8 +62,17 @@ jobs:
               || { echo "FAIL: ${script} missing from image"; exit 1; }
           done
 
-          # Verify bcftools is available in the image
+          # Verify the 1000 Genomes trio screen helpers are present too
+          for script in config.sh 00_setup.sh 01_stage_and_discover.sh 01b_discover_trio.sh select_trios.py child_only_svs.py summarize_trios.py; do
+            docker run --rm --entrypoint /bin/bash "$IMAGE_TAG" \
+              -c "test -f '/app/examples/1kg_trios/${script}'" \
+              && echo "OK: /app/examples/1kg_trios/${script} exists" \
+              || { echo "FAIL: ${script} missing from image"; exit 1; }
+          done
+
+          # Verify bcftools and the downloader the trio screen uses are available in the image
           docker run --rm --entrypoint bcftools "$IMAGE_TAG" --version | head -1
+          docker run --rm --entrypoint aria2c "$IMAGE_TAG" --version | head -1
 
           # Functional test: run identify_putative_denovos.sh entirely inside the
           # container using synthetic trio VCFs created with the image's own tools.
