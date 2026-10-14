@@ -81,7 +81,7 @@ class TestSizing:
         os.truncate(fa, int(3.2 * 1e9))
         z = size_child_count(fa, 31, memory_gb=64.0, bloom_filter=False)
         assert 3.0e9 <= z["est_distinct"] <= 3.1e9 and z["hash_entries"] == 2**32 and z["hash_gb"] < 30 and not z["overflow"]
-        assert _estimate_jf_hash_size(fa, 31) == str(2**32) or int(_estimate_jf_hash_size(fa, 31)) >= 2**32
+        assert _estimate_jf_hash_size(fa, 31, memory_gb=64.0) == str(2**32)   # without a budget the system's RAM caps it (a 16-GB CI runner: 2^30)
 
     def test_a_missing_file_falls_back(self):
         assert _estimate_jf_hash_size("/nonexistent/child.bam", 31, memory_gb=16.0) == str(_pow2_at_least(HASH_MIN_ENTRIES))
