@@ -8,8 +8,10 @@ scale test for discovery mode: the GIAB example in
 cohort.
 
 Everything it reads is public, and nothing in it is specific to one cluster.
-The scheduler specifics (partition, account, QoS) go in one variable, and
-every path hangs off `WORK_DIR`.
+Every path and setting is a variable with a default that you can override
+with a flag, an exported variable or a site config file
+([Configuration](#configuration)); scheduler specifics go in one of them,
+and every path hangs off `WORK_DIR`.
 
 > **Cite the data:** Byrska-Bishop, M. et al. (2022). High-coverage
 > whole-genome sequencing of the expanded 1000 Genomes Project cohort
@@ -25,7 +27,7 @@ every path hangs off `WORK_DIR`.
 * [Step by step](#step-by-step)
 * [Outputs](#outputs)
 * [Reading the results](#reading-the-results)
-* [Configuration reference](#configuration-reference)
+* [Configuration](#configuration)
 * [Monitoring and troubleshooting](#monitoring-and-troubleshooting)
 * [Testing](#testing)
 
@@ -111,22 +113,25 @@ and the manager picks the staged files up.
 
 ```bash
 cd examples/1kg_trios
-export WORK_DIR=/scratch/$USER/1kg_trios
-export SBATCH_EXTRA_ARGS="--partition=compute --account=mylab"   # your site
+
+# Site settings once: scratch location, sbatch flags, modules (gitignored)
+cp config.local.example.sh config.local.sh && $EDITOR config.local.sh
 
 # 1. One-time setup: ~5 GB of downloads, then submits the reference index job
-N_TRIOS=10 bash 00_setup.sh
+bash 00_setup.sh --n-trios 10
 
 # 2. Once $WORK_DIR/reference/*.k31.jf exists: stage and run the trios
-bash 01_stage_and_discover.sh            # TRIO_LIMIT=1 for a smoke test
+bash 01_stage_and_discover.sh            # --trio-limit 1 for a smoke test
 
 # 3. Any time, as trios finish
 bash 02_summarize.sh
 cat $WORK_DIR/results/cohort/cohort_summary.md
 ```
 
-`N_TRIOS=0` selects all 602. Re-running any script continues where it
-stopped.
+The same settings work as exported variables (`export WORK_DIR=...;
+N_TRIOS=10 bash 00_setup.sh`) or as flags (`--work-dir DIR`, `--n-trios 0`
+selects all 602); `bash 00_setup.sh --help` prints every one with its
+effective value. Re-running any script continues where it stopped.
 
 ## Step by step
 
@@ -276,19 +281,54 @@ Cohort, `$WORK_DIR/results/cohort/`:
   on region counts and runtime. Siblings (`TRIO_ALL_SIBLINGS=1`) share no
   de novo SVs, which is a cheap specificity check.
 
-## Configuration reference
+## Configuration
 
-All in [`config.sh`](config.sh); export to override.
+Every setting is a variable in [`config.sh`](config.sh) with a default. Set
+it any of these ways; the first that applies wins:
+
+1. **Flags**, on any script: `--work-dir DIR`, and `--<variable> VALUE`
+   for every variable in the table below spelled in lower case with dashes
+   (`--results-dir`, `--ref-fasta`, `--n-trios`, `--sbatch-extra-args
+   "--partition=p --account=a"`), `--set NAME=VALUE`, `--config FILE`.
+   `--help` prints the script's usage and the effective values.
+2. **Environment variables** exported before running a script.
+3. **A site config file**, sourced before the defaults: `--config FILE`,
+   else `$KMER_TRIOS_CONFIG`, else `config.local.sh` beside `config.sh`
+   (gitignored). Start from
+   [`config.local.example.sh`](config.local.example.sh) and keep the
+   `VAR="${VAR:-value}"` form so flags and exported variables still win.
+   `MODULES_TO_LOAD` lists environment modules every script loads first.
+4. **The defaults** in `config.sh`: a tree under `WORK_DIR`, the public URLs.
+
+Jobs do not depend on the scheduler exporting the environment: the script
+that submits a job writes the effective configuration to
+`$CONFIG_SNAPSHOT` (`$WORK_DIR/state/config.env`) and passes it as
+`--config`, so a manager job and every discovery job it submits see exactly
+the paths the submitting shell saw. Submitting a job by hand works the same
+way: `sbatch 01b_discover_trio.sh --config $WORK_DIR/state/config.env
+HG00405 verify` (add `--output=$WORK_DIR/logs/discover_HG00405_%j.out` to
+keep its log with the others; the `#SBATCH` defaults write `%x_%j.out` in
+the submission directory).
+
+Existing local copies are reused rather than downloaded: point `REF_FASTA`
+(and `REF_JF`) at a site reference, `SIF_IMAGE` at an image pulled earlier,
+or `SV_VCF` at a downloaded call set.
 
 | Variable | Default | Description |
 |---|---|---|
 | `WORK_DIR` | `/scratch/$USER/1kg_trios` | root of the working tree |
 | `CRAM_DIR`, `RESULTS_DIR`, `LOG_DIR`, `REF_DIR`, `STATE_DIR`, `TMP_ROOT` | under `WORK_DIR` | staged CRAMs, outputs, logs, reference, manager state, discovery scratch |
-| `CONTAINER_URI` | `docker://ghcr.io/jlanej/kmer_denovo_filter:latest` | image to pull, or a local `.sif` |
+| `CONFIG_SNAPSHOT` | `$STATE_DIR/config.env` | the effective configuration, passed to every submitted job as `--config` |
+| `CONTAINER_URI`, `SIF_IMAGE` | `docker://ghcr.io/jlanej/kmer_denovo_filter:latest`, `$WORK_DIR/kmer_denovo_filter.sif` | image to pull, or an existing `.sif` to use as is |
+| `CONTAINER_EXAMPLE_DIR` | `/app/examples/1kg_trios` | where the image holds this directory's helpers |
+| `MODULES_TO_LOAD` | empty | environment modules every script loads, e.g. `apptainer` |
 | `SBATCH_EXTRA_ARGS` | empty | site flags for every `sbatch` (partition, account, QoS) |
+| `REF_BASE_URL`, `REF_NAME`, `REF_FASTA`, `REF_JF` | 1000G FTP, `GRCh38_full_analysis_set_plus_decoy_hla.fa`, under `REF_DIR`, `$REF_FASTA.k31.jf` | the reference and its Jellyfish index |
+| `COLLECTION_URL`, `INDEX_URL_2504`, `INDEX_URL_698`, `PED_URL`, `SV_VCF_URL` | the public 1000G data collection | sources of the indexes, pedigree and SV call set |
+| `INDEX_FILE_2504`, `INDEX_FILE_698`, `PED_FILE`, `SV_VCF`, `SV_COHORT_VCF`, `TRIOS_TSV`, `TRIO_FILES_TSV` | under `WORK_DIR` | their local copies and the manifests |
 | `N_TRIOS`, `TRIO_SEED`, `TRIO_POPULATIONS`, `TRIO_SUPERPOPULATIONS`, `TRIO_CHILDREN`, `TRIO_ALL_SIBLINGS` | 10, 1, –, –, –, 0 | trio selection |
 | `USE_SV_CALLSET`, `SV_MAX_AF`, `SV_MIN_GQ`, `SV_PASS_ONLY` | 1, 0.01, 20, 1 | the child-only SV screen |
-| `S3_HTTPS_BASE`, `ENA_HTTPS_BASE`, `DOWNLOAD_CONNECTIONS` | AWS mirror, ENA, 16 | download sources and streams per file |
+| `S3_HTTPS_BASE`, `S3_PREFIX_2504`, `S3_PREFIX_698`, `ENA_HTTPS_BASE`, `DOWNLOAD_CONNECTIONS` | AWS mirror and its two batch prefixes, ENA, 16 | download sources and streams per file |
 | `TRIO_SLOTS`, `MAX_STAGED_TRIOS`, `TRIO_LIMIT` | 2, 4, 0 | trios staged at once; disk backpressure; sweep limit |
 | `KEEP_CRAMS` | 0 | 1 keeps CRAMs after discovery |
 | `DISCOVERY_CPUS`, `DISCOVERY_MEM`, `DISCOVERY_TIME` | 16, 128G, 36:00:00 | per-trio job resources |
@@ -328,6 +368,11 @@ grep -h "download complete" $WORK_DIR/logs/stage_*.log | sort | uniq -c   # tran
   setup; finished trios not in the new selection keep their results.
 * **Two managers at once** fight over the same files; run one, and let it
   resweep.
+* **A job looked in the wrong place**: it ran without `--config` on a site
+  whose `sbatch` does not export the environment. The scripts always pass
+  the snapshot; when submitting by hand, pass
+  `--config $WORK_DIR/state/config.env` (or `--work-dir`). `--help` on any
+  script shows what it would use.
 
 ## Testing
 
@@ -340,7 +385,9 @@ runs the SLURM scripts end to end with `sbatch`, `squeue`, `curl`, `wget`
 and `apptainer` shimmed and no network: three trios, two of them siblings
 and one with a corrupt CRAM, through setup, staging, the shared-parent
 bookkeeping, a failed trio healed on a resweep, cleanup and the summary.
-Both run in CI and need only pysam and bcftools.
+It also checks the configuration routes: flags over a site file over the
+defaults, and jobs that receive nothing from the submitter's environment
+but the snapshot. Both run in CI and need only pysam and bcftools.
 
 ```bash
 pytest tests/test_1kg_trios_helpers.py tests/test_1kg_trios_pipeline.py -v

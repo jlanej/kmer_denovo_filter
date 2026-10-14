@@ -21,6 +21,9 @@
 # Usage:
 #   export WORK_DIR=/scratch/$USER/1kg_trios      # and SBATCH_EXTRA_ARGS
 #   N_TRIOS=10 bash 00_setup.sh
+#   bash 00_setup.sh --work-dir /scratch/$USER/1kg_trios --n-trios 10   # same, as flags
+#   bash 00_setup.sh --config my_site.sh          # or a site config file
+#   bash 00_setup.sh --help                       # flags and effective values
 # =============================================================================
 
 set -euo pipefail
@@ -33,7 +36,10 @@ else
   echo "ERROR: Could not find config.sh (checked the script directory and the current directory)."
   exit 1
 fi
-source "${CONFIG_FILE}"
+source "${CONFIG_FILE}" "$@"
+set -- ${CONFIG_REMAINING_ARGS[@]+"${CONFIG_REMAINING_ARGS[@]}"}
+load_modules
+reject_extra_args "$@"
 
 # fetch URL DEST — resumable download with curl, else wget; atomic rename.
 fetch() {
@@ -199,17 +205,22 @@ if [[ -s "${REF_JF}" ]]; then
   echo "[6/6] Reference index already present: ${REF_JF}"
 elif [[ "${SETUP_LOCAL:-0}" == "1" ]]; then
   echo "[6/6] Building the reference index in place (SETUP_LOCAL=1; ~23 GB RAM, under an hour)..."
-  bash "${SCRIPT_DIR}/00b_build_ref_index.sh"
+  write_config_snapshot "${CONFIG_SNAPSHOT}"
+  bash "${SCRIPT_DIR}/00b_build_ref_index.sh" --config "${CONFIG_SNAPSHOT}"
 elif command -v sbatch >/dev/null 2>&1; then
   echo "[6/6] Submitting the reference index build (${REF_INDEX_CPUS} CPUs, ${REF_INDEX_MEM}, ${REF_INDEX_TIME})..."
+  # The job reads the effective configuration back from the snapshot, so it
+  # sees the same paths whether or not the scheduler exports the environment.
+  write_config_snapshot "${CONFIG_SNAPSHOT}"
   JOBID=$(submit_job \
     --job-name="${JOB_PREFIX}_refidx" \
     --output="${LOG_DIR}/refidx_%j.out" --error="${LOG_DIR}/refidx_%j.err" \
     --cpus-per-task="${REF_INDEX_CPUS}" --mem="${REF_INDEX_MEM}" --time="${REF_INDEX_TIME}" \
-    "${SCRIPT_DIR}/00b_build_ref_index.sh")
+    "${SCRIPT_DIR}/00b_build_ref_index.sh" --config "${CONFIG_SNAPSHOT}")
   echo "  Job ${JOBID}; the manager refuses to start until ${REF_JF} exists."
 else
   echo "[6/6] sbatch not found: build the reference index with SETUP_LOCAL=1 bash 00_setup.sh, or run 00b_build_ref_index.sh on a node with ~32 GB RAM."
+  write_config_snapshot "${CONFIG_SNAPSHOT}"
 fi
 
 echo ""

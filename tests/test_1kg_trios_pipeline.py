@@ -84,16 +84,21 @@ def make_shims(bin_dir, remote_dir, log_dir):
         # prints a job id, as --parsable would.
         script=""; args=(); cpus=2; mem=4096
         while [[ $# -gt 0 ]]; do
+          if [[ -n "$script" ]]; then args+=("$1"); shift; continue; fi
           case "$1" in
             --cpus-per-task=*) cpus="${{1#*=}}"; shift ;;
             --mem=*) m="${{1#*=}}"; m="${{m%G}}"; mem=$(( m * 1024 )); shift ;;
             --*) shift ;;
-            *) if [[ -z "$script" ]]; then script="$1"; else args+=("$1"); fi; shift ;;
+            *) script="$1"; shift ;;
           esac
         done
         jobid=$(( RANDOM + 1000 ))
         echo "$jobid $(basename "$script") ${{args[*]:-}}" >> "{log_dir}/sbatch.log"
-        SLURM_JOB_ID=$jobid SLURM_CPUS_PER_TASK=$cpus SLURM_MEM_PER_NODE=$mem \\
+        # Like a site whose sbatch exports nothing: the job sees none of the
+        # submitter's configuration variables, only what --config restores.
+        scrub=()
+        for v in $(env | cut -d= -f1 | grep -E '^(WORK_DIR|CRAM_DIR|RESULTS_DIR|LOG_DIR|STATE_DIR|TMP_ROOT|N_TRIOS|TRIO_|DISCOVERY_|USE_SV_CALLSET|SBATCH_EXTRA_ARGS|EXPECTED_COMPLETE_TRIOS|KMER_TRIOS_CONFIG|MODULES_TO_LOAD)'); do scrub+=("-u" "$v"); done
+        env ${{scrub[@]+"${{scrub[@]}}"}} SLURM_JOB_ID=$jobid SLURM_CPUS_PER_TASK=$cpus SLURM_MEM_PER_NODE=$mem \\
           bash "$script" ${{args[@]+"${{args[@]}}"}} >> "{log_dir}/jobs.log" 2>&1 \\
           || echo "job $jobid failed" >> "{log_dir}/jobs.log"
         echo "$jobid"
@@ -353,7 +358,8 @@ def test_setup_stage_discover_and_summarise(workspace):
     assert sorted(os.listdir(crams)) == []
     submissions = [l for l in (logs / "sbatch.log").read_text().splitlines()
                    if "01b_discover_trio.sh" in l]
-    assert [l.split()[2] for l in submissions] == ["HG00405", "HG00406", "NA19240"]
+    assert [l.split()[-1] for l in submissions] == ["HG00405", "HG00406", "NA19240"]
+    assert all(f"--config {work}/state/config.env" in l for l in submissions)
 
     # a third sweep finds nothing to do
     result = run("01_stage_and_discover.sh", env1)
@@ -404,6 +410,64 @@ def test_failed_discovery_keeps_the_crams(workspace):
     assert "downloading CRAM" not in stage_log
     assert (work / "results" / "NA19240" / "NA19240.done").exists()
     assert sorted(os.listdir(work / "crams")) == []
+
+
+def test_flags_site_file_and_snapshot(workspace):
+    """Paths come from flags, a site file or the environment, and jobs get
+    them through the snapshot even when nothing is exported to them."""
+    env, logs = workspace["env"], workspace["logs"]
+    work2 = workspace["work"].parent / "work2"
+    site = workspace["work"].parent / "site.sh"
+    site.write_text(
+        'N_TRIOS="${N_TRIOS:-1}"\n'                 # a flag below overrides it
+        'TRIO_ALL_SIBLINGS="${TRIO_ALL_SIBLINGS:-1}"\n'
+        'TRIO_SEED="${TRIO_SEED-}"\n'
+        'EXPECTED_COMPLETE_TRIOS="${EXPECTED_COMPLETE_TRIOS:-3}"\n'
+        'USE_SV_CALLSET="${USE_SV_CALLSET:-0}"\n'
+        'MODULES_TO_LOAD="${MODULES_TO_LOAD:-}"\n')
+    bare = {k: v for k, v in env.items() if k in ("PATH", "HOME")}
+
+    # --help prints the header and the effective values, and runs nothing
+    result = run("00_setup.sh", bare, "--help", "--work-dir", str(work2))
+    assert "one-time setup" in result.stdout
+    assert f"--work-dir                 {work2}" in result.stdout
+    assert not work2.exists()
+
+    # flags beat the site file, which beats the defaults
+    run("00_setup.sh", bare, "--config", str(site), "--work-dir", str(work2),
+        "--n-trios", "2", "--set", "DISCOVERY_MEM=4G")
+    trios = (work2 / "trios.tsv").read_text().splitlines()
+    assert [t.split("\t")[0] for t in trios[1:]] == ["HG00405", "HG00406"]
+    snapshot = (work2 / "state" / "config.env").read_text()
+    assert f"export WORK_DIR={work2}" in snapshot
+    assert "export DISCOVERY_MEM=4G" in snapshot
+    assert "export N_TRIOS=2" in snapshot
+    assert "export USE_SV_CALLSET=0" in snapshot
+    assert "00b_build_ref_index.sh --config " + str(work2 / "state" / "config.env") \
+        in (logs / "sbatch.log").read_text()
+    assert (work2 / "reference" / "GRCh38_full_analysis_set_plus_decoy_hla.fa.k31.jf").exists()
+
+    # the site file through the environment, flags in --name=value form, and
+    # a manager whose jobs see nothing but the snapshot
+    env2 = dict(bare, KMER_TRIOS_CONFIG=str(site), MANAGER_LOCAL="1",
+                TRIO_SLOTS="1", DISCOVERY_CPUS="2")
+    result = run("01_stage_and_discover.sh", env2, f"--work-dir={work2}",
+                 "--trio-limit=1", "--set=DISCOVERY_MEM=4G")
+    assert "1 trios dispatched to discovery, 0 failed" in result.stdout
+    submissions = [l for l in (logs / "sbatch.log").read_text().splitlines()
+                   if "01b_discover_trio.sh" in l]
+    assert submissions[-1].endswith(
+        f"01b_discover_trio.sh --config {work2}/state/config.env HG00405")
+    assert (work2 / "results" / "HG00405" / "HG00405.done").exists()
+    args = (work2 / "results" / "HG00405" / "HG00405.args").read_text()
+    assert f"--child {work2}/crams/HG00405.cram" in args
+    assert "--threads 2 --memory 4" in args
+
+    # a missing site file, and an unknown --flag, are errors not silent defaults
+    result = run("02_summarize.sh", bare, "--config", str(work2 / "nope.sh"), check=False)
+    assert result.returncode == 2 and "config file not found" in result.stderr
+    result = run("02_summarize.sh", dict(bare, WORK_DIR=str(work2)), "--bogus", check=False)
+    assert result.returncode != 0
 
 
 def test_manager_refuses_without_the_reference_index(workspace):

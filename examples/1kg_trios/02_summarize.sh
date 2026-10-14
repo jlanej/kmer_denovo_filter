@@ -9,7 +9,7 @@
 # finishing.
 #
 # Usage:
-#   bash 02_summarize.sh
+#   bash 02_summarize.sh [--work-dir DIR | --config FILE ...]
 # =============================================================================
 
 set -euo pipefail
@@ -22,7 +22,10 @@ else
   echo "ERROR: Could not find config.sh." >&2
   exit 1
 fi
-source "${CONFIG_FILE}"
+source "${CONFIG_FILE}" "$@"
+set -- ${CONFIG_REMAINING_ARGS[@]+"${CONFIG_REMAINING_ARGS[@]}"}
+load_modules
+reject_extra_args "$@"
 
 if [[ ! -s "${TRIOS_TSV}" ]]; then
   echo "ERROR: manifest missing: ${TRIOS_TSV} - run 00_setup.sh first." >&2

@@ -16,7 +16,7 @@
 # downloading. Run the manager after the transfer completes.
 #
 # Usage:
-#   bash globus_batch_from_manifest.sh [output_prefix]     # default: globus_batch
+#   bash globus_batch_from_manifest.sh [--work-dir DIR ...] [output_prefix]   # default: globus_batch
 #   globus transfer 47772002-3e5b-4fd3-b97c-18cee38d6df2 <YOUR_COLLECTION_UUID> \
 #     --batch globus_batch_crai.txt --sync-level checksum --label "1kg trios crai"
 #   globus transfer 47772002-3e5b-4fd3-b97c-18cee38d6df2 <YOUR_COLLECTION_UUID> \
@@ -35,9 +35,15 @@ else
   echo "ERROR: Could not find config.sh." >&2
   exit 1
 fi
-source "${CONFIG_FILE}"
+source "${CONFIG_FILE}" "$@"
+set -- ${CONFIG_REMAINING_ARGS[@]+"${CONFIG_REMAINING_ARGS[@]}"}
+load_modules
 
 OUT_PREFIX="${1:-globus_batch}"
+if [[ "${OUT_PREFIX}" == -* ]]; then
+  echo "ERROR: unknown flag ${OUT_PREFIX} (see --help)" >&2
+  exit 2
+fi
 CRAI_BATCH="${OUT_PREFIX}_crai.txt"
 CRAM_BATCH="${OUT_PREFIX}_cram.txt"
 

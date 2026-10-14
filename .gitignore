@@ -212,3 +212,6 @@ tests/data/giab/
 # Discovery-mode generated artifacts not needed for regression tests
 tests/example_output_discovery/*.bam
 tests/example_output_discovery/*.bam.bai
+
+# Site configuration for the 1000 Genomes trio screen (examples/1kg_trios)
+examples/1kg_trios/config.local.sh

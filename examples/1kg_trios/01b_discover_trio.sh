@@ -18,12 +18,14 @@
 # metrics JSON, summary, HTML report, log, timing).
 #
 # Usage (normally via the manager; by hand for a trio staged some other way):
-#   sbatch 01b_discover_trio.sh TRIO_ID [verify]     # verify = check MD5s first
+#   sbatch 01b_discover_trio.sh [--config FILE | --work-dir DIR ...] TRIO_ID [verify]
+#   (verify = check the MD5s first; add --output=$WORK_DIR/logs/... to keep the
+#   log with the others)
 # =============================================================================
 
 #SBATCH --job-name=1kgtrio_disc
-#SBATCH --output=logs/discover_%j.out
-#SBATCH --error=logs/discover_%j.err
+#SBATCH --output=%x_%j.out
+#SBATCH --error=%x_%j.err
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=128G
 #SBATCH --time=36:00:00
@@ -40,9 +42,15 @@ else
   echo "ERROR: Could not find config.sh (checked \$SLURM_SUBMIT_DIR, script directory, and current directory)."
   exit 1
 fi
-source "${CONFIG_FILE}"
+source "${CONFIG_FILE}" "$@"
+set -- ${CONFIG_REMAINING_ARGS[@]+"${CONFIG_REMAINING_ARGS[@]}"}
+load_modules
 
-TRIO="${1:?usage: 01b_discover_trio.sh TRIO_ID [verify]}"
+TRIO="${1:?usage: 01b_discover_trio.sh [--config FILE | --work-dir DIR ...] TRIO_ID [verify]}"
+if [[ "${TRIO}" == -* ]]; then
+  echo "ERROR: unknown flag ${TRIO} (see --help); usage: 01b_discover_trio.sh TRIO_ID [verify]" >&2
+  exit 2
+fi
 VERIFY="${2:-}"
 
 OUT_DIR="${RESULTS_DIR}/${TRIO}"

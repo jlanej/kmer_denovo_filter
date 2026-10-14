@@ -66,11 +66,13 @@ def md5_of(sample):
     return hashlib.md5(sample.strip().encode()).hexdigest()
 
 
-def index_row(sample, pop, batch, md5=None):
+def index_row(sample, pop, batch, md5=None, study=None):
     s = sample.strip()
     run = "ERR%07d" % (hash(s) % 10_000_000)
     url = f"ftp://ftp.sra.ebi.ac.uk/vol1/run/{run[:6]}/{run}/{s}.final.cram"
-    fields = [url, md5 or md5_of(s), run, "ERP120144", "30X WGS", "NYGC",
+    if study is None:
+        study = "ERP120144" if batch == "698" else "ERP114329"
+    fields = [url, md5 or md5_of(s), run, study, "30X WGS", "NYGC",
               "ERA1", "2020-03-13 00:00", "ERS1", sample, pop, "ERX1",
               "ILLUMINA", "Illumina NovaSeq 6000", s, "run", "450", "PAIRED",
               "", "1", "2", "high_coverage"]
@@ -175,6 +177,19 @@ class TestSelectTrios:
                        + "\n")
         with pytest.raises(ValueError, match="ENA"):
             mod.read_sequence_index(str(bad))
+
+    def test_batch_from_study_then_file_name(self, tmp_path):
+        mod = load_module("select_trios")
+        idx = tmp_path / "1000G_698_related_high_coverage.sequence.index"
+        idx.write_text(INDEX_HEADER + "\n"
+                       + index_row("HG00405", "CHS", "698") + "\n"
+                       + index_row("NA12718", "CEU", "2504") + "\n"
+                       + index_row("HG00096", "GBR", "698", study="ERP999999") + "\n")
+        samples = mod.read_sequence_index(str(idx))
+        assert samples["HG00405"][2] == "698"
+        assert samples["NA12718"][2] == "2504"        # by its study accession
+        assert samples["HG00096"][2] == "698"         # unknown study: file name
+        assert mod.read_sequence_index(str(idx), batch="x")["NA12718"][2] == "x"
 
     def test_no_match_exits(self, tmp_path):
         with pytest.raises(SystemExit, match="no trio"):

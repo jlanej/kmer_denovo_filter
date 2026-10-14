@@ -10,12 +10,13 @@
 # by hand, and a no-op when the index already exists.
 #
 # Usage:
-#   sbatch 00b_build_ref_index.sh        # or: bash 00b_build_ref_index.sh
+#   sbatch 00b_build_ref_index.sh [--config FILE | --work-dir DIR ...]
+#   bash 00b_build_ref_index.sh          # in place, on a node with ~32 GB RAM
 # =============================================================================
 
 #SBATCH --job-name=1kgtrio_refidx
-#SBATCH --output=logs/refidx_%j.out
-#SBATCH --error=logs/refidx_%j.err
+#SBATCH --output=%x_%j.out
+#SBATCH --error=%x_%j.err
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=06:00:00
@@ -32,7 +33,10 @@ else
   echo "ERROR: Could not find config.sh (checked \$SLURM_SUBMIT_DIR, script directory, and current directory)."
   exit 1
 fi
-source "${CONFIG_FILE}"
+source "${CONFIG_FILE}" "$@"
+set -- ${CONFIG_REMAINING_ARGS[@]+"${CONFIG_REMAINING_ARGS[@]}"}
+load_modules
+reject_extra_args "$@"
 
 if [[ -s "${REF_JF}" ]]; then
   echo "Reference index already exists: ${REF_JF}"

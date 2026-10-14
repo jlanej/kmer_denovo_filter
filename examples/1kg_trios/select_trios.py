@@ -47,6 +47,8 @@ ROLES = ("child", "father", "mother")
 SAMPLE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 MD5_RE = re.compile(r"^[0-9a-f]{32}$")
 ENA_PREFIX = "ftp://ftp.sra.ebi.ac.uk/"
+#: ENA study accession of each release batch (column 4 of the index)
+STUDY_BATCHES = {"ERP114329": "2504", "ERP120144": "698"}
 
 
 def read_pedigree(path):
@@ -73,12 +75,12 @@ def read_pedigree(path):
 def read_sequence_index(path, batch=None):
     """{sample: (cram_url, md5, batch)} for the CRAM rows of an index file.
 
-    *batch* labels the rows (the manager maps a URL to its S3 mirror path
-    by batch); by default it is ``698`` when the file name says so and
-    ``2504`` otherwise, which matches the NYGC file names.
+    The batch labels the row's release (the manager maps a URL to its S3
+    mirror path by batch).  Unless *batch* is given it comes from each row's
+    study accession (STUDY_BATCHES), falling back to ``698`` when the file
+    name says so and ``2504`` otherwise, which matches the NYGC file names.
     """
-    if batch is None:
-        batch = "698" if "698" in os.path.basename(path) else "2504"
+    file_batch = batch or ("698" if "698" in os.path.basename(path) else "2504")
     samples = {}
     with open(path) as fh:
         for lineno, line in enumerate(fh, 1):
@@ -90,6 +92,7 @@ def read_sequence_index(path, batch=None):
             cram, md5, sample = fields[0], fields[1].lower(), fields[9]
             if not sample or not cram:
                 continue
+            row_batch = batch or STUDY_BATCHES.get(fields[3], file_batch)
             # The EBI index has shipped a sample name with a trailing space
             # ("HG03366 "); the strip above removes it, this catches worse.
             if not SAMPLE_ID_RE.match(sample):
@@ -102,7 +105,7 @@ def read_sequence_index(path, batch=None):
             if sample in samples and samples[sample][0] != cram:
                 raise ValueError(f"{path}:{lineno}: {sample} listed twice "
                                  f"with different CRAMs")
-            samples[sample] = (cram, md5, batch)
+            samples[sample] = (cram, md5, row_batch)
     return samples
 
 

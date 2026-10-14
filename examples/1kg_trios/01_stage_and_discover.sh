@@ -21,11 +21,16 @@
 #   bash 01_stage_and_discover.sh                 # submits the manager job
 #   MANAGER_LOCAL=1 bash 01_stage_and_discover.sh # run in place (DTN/login node, tmux)
 #   TRIO_LIMIT=2 bash 01_stage_and_discover.sh    # smoke test: two trios
+#   bash 01_stage_and_discover.sh --work-dir DIR --trio-limit 2   # the same, as flags
+#
+# The manager and every job it submits read the effective configuration from
+# a snapshot (--config $CONFIG_SNAPSHOT), so paths do not depend on the
+# scheduler exporting the environment.
 # =============================================================================
 
 #SBATCH --job-name=1kgtrio_manager
-#SBATCH --output=logs/manager_%j.out
-#SBATCH --error=logs/manager_%j.err
+#SBATCH --output=%x_%j.out
+#SBATCH --error=%x_%j.err
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
 #SBATCH --time=96:00:00
@@ -42,7 +47,10 @@ else
   echo "ERROR: Could not find config.sh (checked \$SLURM_SUBMIT_DIR, script directory, and current directory)."
   exit 1
 fi
-source "${CONFIG_FILE}"
+source "${CONFIG_FILE}" "$@"
+set -- ${CONFIG_REMAINING_ARGS[@]+"${CONFIG_REMAINING_ARGS[@]}"}
+load_modules
+reject_extra_args "$@"
 
 mkdir -p "${LOG_DIR}" "${CRAM_DIR}" "${RESULTS_DIR}" "${STATE_DIR}" "${TMP_ROOT}"
 DISCOVERY_JOB_SCRIPT="${CONFIG_DIR}/01b_discover_trio.sh"
@@ -65,11 +73,13 @@ if [[ -z "${SLURM_JOB_ID:-}" && "${MANAGER_LOCAL:-0}" != "1" ]]; then
   echo "Submitting the stage-and-discover manager (${TRIO_SLOTS} trios at a time)..."
   echo "  Manager log:        ${LOG_DIR}/manager_<jobid>.out"
   echo "  Per-trio stage log: ${LOG_DIR}/stage_<trio>.log"
+  write_config_snapshot "${CONFIG_SNAPSHOT}"
   # shellcheck disable=SC2086
   exec sbatch ${SBATCH_EXTRA_ARGS} \
+    --job-name="${JOB_PREFIX}_manager" \
     --output="${LOG_DIR}/manager_%j.out" \
     --error="${LOG_DIR}/manager_%j.err" \
-    "${BASH_SOURCE[0]}"
+    "${BASH_SOURCE[0]}" --config "${CONFIG_SNAPSHOT}"
 fi
 
 # ── Transports ───────────────────────────────────────────────────────────────
@@ -81,7 +91,7 @@ https_url_for() {
 
 # The AWS Open Data mirror of the NYGC CRAMs (byte-identical to ENA's; every
 # file still passes the index MD5). Its layout drops ENA's run-prefix level
-# and splits the two release batches:
+# and splits the two release batches (S3_PREFIX_2504, S3_PREFIX_698):
 #   vol1/run/ERR324/ERR3239480/NA12718.final.cram (batch 2504)
 #     -> 1000G_2504_high_coverage/data/ERR3239480/NA12718.final.cram
 #   batch 698 -> 1000G_2504_high_coverage/additional_698_related/data/...
@@ -95,8 +105,8 @@ s3_url_for() {
   local rest="${ftp_url#ftp://ftp.sra.ebi.ac.uk/vol1/run/}"
   local run_and_file="${rest#*/}"
   case "${batch}" in
-    2504) echo "${S3_HTTPS_BASE}/1000G_2504_high_coverage/data/${run_and_file}" ;;
-    698)  echo "${S3_HTTPS_BASE}/1000G_2504_high_coverage/additional_698_related/data/${run_and_file}" ;;
+    2504) echo "${S3_HTTPS_BASE}/${S3_PREFIX_2504}/${run_and_file}" ;;
+    698)  echo "${S3_HTTPS_BASE}/${S3_PREFIX_698}/${run_and_file}" ;;
     *)    echo "" ;;
   esac
 }
@@ -295,7 +305,7 @@ stage_trio() {
       --output="${LOG_DIR}/discover_${trio}_%j.out" \
       --error="${LOG_DIR}/discover_${trio}_%j.err" \
       --cpus-per-task="${DISCOVERY_CPUS}" --mem="${DISCOVERY_MEM}" --time="${DISCOVERY_TIME}" \
-      "${DISCOVERY_JOB_SCRIPT}" "${trio}"); then
+      "${DISCOVERY_JOB_SCRIPT}" --config "${CONFIG_SNAPSHOT}" "${trio}"); then
     echo "  Job ${jobid} submitted for ${trio}."
     return 0
   fi
@@ -333,6 +343,8 @@ trio_needs_download() {
 RESULT_DIR="${STATE_DIR}/results"
 rm -rf "${RESULT_DIR:?}" "${LOCK_DIR:?}"
 mkdir -p "${RESULT_DIR}" "${LOCK_DIR}"
+# What every discovery job submitted by this sweep will read.
+write_config_snapshot "${CONFIG_SNAPSHOT}"
 
 IN_FLIGHT_FILE="${STATE_DIR}/in_flight.$$"
 : > "${IN_FLIGHT_FILE}"
