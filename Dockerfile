@@ -13,6 +13,8 @@ RUN apt-get update && \
         tabix \
         jellyfish \
         wget \
+        curl \
+        aria2 \
     && git clone --depth 1 --branch "${KRAKEN2_VERSION}" \
         https://github.com/DerrickWood/kraken2.git /tmp/kraken2 \
     && /tmp/kraken2/install_kraken2.sh /usr/local/bin \

@@ -23,6 +23,17 @@
   candidates are captured within discovered genomic regions.  Also evaluates
   the 7 curated Sulovari et al. 2023 DNM SV regions
   (`examples/HG002_trio/sulovari2023_dnm_regions.tsv`) against discovery output.
+- **test_1kg_trios_helpers.py** – The Python helpers of
+  [`examples/1kg_trios`](../examples/1kg_trios/) on synthetic inputs: trio
+  selection from a pedigree and sequence indexes, child-only SV extraction
+  from a multi-sample SV VCF (its `--dnm-regions` file is checked by the
+  discovery pipeline's own loader), and the cohort summary.
+- **test_1kg_trios_pipeline.py** – The SLURM scripts of that example end to
+  end, hermetically: `sbatch`, `squeue`, `curl`, `wget` and `apptainer` are
+  shimmed, `bcftools` and the Python helpers run for real, and three trios
+  (two siblings, one with a corrupt CRAM) go through setup, staging with MD5
+  checks, the shared-parent bookkeeping, a failed trio healed on a resweep,
+  cleanup and the summary.
 - **conftest.py** – Shared fixtures, including session-scoped
   `generated_example_output` and `generated_discovery_output` fixtures that
   run the GIAB pipeline once and return paths to all output files for reuse
@@ -30,6 +41,7 @@
 
 ```bash
 pytest tests/test_cli.py tests/test_kmer_utils.py tests/vcf/test_pipeline.py tests/discovery -v
+pytest tests/test_1kg_trios_helpers.py tests/test_1kg_trios_pipeline.py -v
 ```
 
 ## GIAB Integration Test
