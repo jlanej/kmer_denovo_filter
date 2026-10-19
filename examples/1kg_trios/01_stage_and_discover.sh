@@ -210,15 +210,22 @@ download_wget() {
 }
 
 # Try each source (S3 mirror, then ENA) with each transport in descending
-# order of speed; wget on the FTP URL is the last resort.
+# order of speed; wget on the FTP URL is the last resort. With ORDER=alt the
+# sources are tried the other way round: what a second attempt does after a
+# file arrived whole but wrong, since a transfer that corrupts its payload
+# tends to do it again from the same place.
 download_file() {
-  local url="$1" dest="$2" label="$3" batch="${4:-}"
+  local url="$1" dest="$2" label="$3" batch="${4:-}" order="${5:-}"
   local sources=() names=() https i
   https="$(s3_url_for "${url}" "${batch}")"
   if [[ -n "${https}" ]]; then
     sources+=("${https}"); names+=("S3")
   fi
   sources+=("$(https_url_for "${url}")"); names+=("ENA")
+  if [[ "${order}" == "alt" && ${#sources[@]} -gt 1 ]]; then
+    sources=("${sources[1]}" "${sources[0]}")
+    names=("${names[1]}" "${names[0]}")
+  fi
   for i in "${!sources[@]}"; do
     if download_aria2 "${sources[${i}]}" "${dest}"; then
       echo "  ${label}: aria2c download complete (${names[${i}]}, ${DOWNLOAD_CONNECTIONS} streams)."
@@ -259,19 +266,18 @@ unlock_sample() {
 stage_sample() {
   local sample="$1" cram_url="$2" crai_url="$3" cram_md5="$4" batch="$5"
   local cram="${CRAM_DIR}/${sample}.cram" crai="${CRAM_DIR}/${sample}.cram.crai"
-  local attempt actual
+  local attempt actual order=""
   lock_sample "${sample}"
-  # shellcheck disable=SC2034
   for attempt in 1 2; do
     if [[ ! -s "${cram}" ]]; then
       echo "  ${sample}: downloading CRAM..."
-      download_file "${cram_url}" "${cram}" "${sample} CRAM" "${batch}" || { unlock_sample "${sample}"; return 1; }
+      download_file "${cram_url}" "${cram}" "${sample} CRAM" "${batch}" "${order}" || { unlock_sample "${sample}"; return 1; }
     else
       echo "  ${sample}: CRAM already present."
     fi
     if [[ ! -s "${crai}" ]]; then
       echo "  ${sample}: downloading CRAI..."
-      download_file "${crai_url}" "${crai}" "${sample} CRAI" "${batch}" || { unlock_sample "${sample}"; return 1; }
+      download_file "${crai_url}" "${crai}" "${sample} CRAI" "${batch}" "${order}" || { unlock_sample "${sample}"; return 1; }
     fi
     echo "  ${sample}: verifying MD5..."
     actual="$(file_md5 "${cram}")"
@@ -280,8 +286,9 @@ stage_sample() {
       unlock_sample "${sample}"
       return 0
     fi
-    echo "  ${sample}: MD5 mismatch (expected ${cram_md5}, got ${actual}); removing and re-downloading."
+    echo "  ${sample}: MD5 mismatch (expected ${cram_md5}, got ${actual}); removing and re-downloading from the other source first."
     rm -f "${cram:?}" "${crai:?}"
+    order="alt"
   done
   echo "  ERROR: ${sample} failed MD5 after a fresh download."
   unlock_sample "${sample}"

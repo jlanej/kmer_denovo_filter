@@ -60,13 +60,18 @@ list to review.
 
 Two things make this a *screen* rather than just a batch run:
 
-* **Known SVs.** The published 3,202-sample SV call set genotypes every
-  sample at every SV. For each trio, the SVs genotyped non-reference in the
-  child and homozygous reference in both parents are passed to discovery as
-  `--dnm-regions`, so the metrics say, per locus, whether discovery found
-  reads there. Most child-only calls in a population call set are parents
-  genotyped wrongly rather than de novo SVs, which is why the filters are
-  strict by default and both counts are reported.
+* **Known SVs, and controls.** The published 3,202-sample SV call set
+  genotypes every sample at every SV. For each trio, the SVs genotyped
+  non-reference in the child and homozygous reference in both parents are
+  passed to discovery as `--dnm-regions`, so the metrics say, per locus,
+  whether discovery found breakpoint reads there. Most child-only calls in
+  a population call set are parents genotyped wrongly rather than de novo
+  SVs, which is why the filters are strict by default and both counts are
+  reported. The SVs the child clearly inherited from one parent go in as
+  `--dnm-negative-regions`: their k-mers are in a parent, so support there
+  is a false positive. And every child of this cohort carries a positive
+  control of its own: the V(D)J rearrangement of its lymphoblastoid line,
+  at IGH and usually IGK, somatic and absent from the parents' clones.
 * **Recurrence.** A region at the same locus in two or more children of
   different families cannot be de novo in all of them. With a few hundred
   trios the recurrent set is a map of discovery's systematic false
@@ -239,6 +244,8 @@ Per trio, `$WORK_DIR/results/<trio>/<trio>.*`:
 | `.bed`, `.sv.bedpe`, `.metrics.json`, `.summary.txt`, `.kmer_coverage.bedgraph`, `.read_coverage.bed`, `.informative.bam` | the `kmer-discovery` outputs ([Discovery Mode Output](../../README.md#discovery-mode-output)) |
 | `.report.html` | the interactive report |
 | `.child_only_svs.tsv` | the `--dnm-regions` file: child-only SVs passing the filters |
+| `.inherited_svs.tsv` | the `--dnm-negative-regions` file: SVs the child inherited from one parent, the negative controls (at most 100) |
+| `.proband_unique.jf` | the proband-unique k-mer index (tens of MB), for a cohort-wide error-k-mer set |
 | `.child_only_svs.detail.tsv` | every child-only call with ID, type, size, AF, filters, the three genotypes and GQs, and `PASS_FILTERS`/`FILTERED` |
 | `.log` | the full discovery log, with per-module times |
 | `.timing.tsv`, `.done` | wall time and resources; the completion marker the manager keys on |
@@ -248,9 +255,9 @@ Cohort, `$WORK_DIR/results/cohort/`:
 | File | Contents |
 |---|---|
 | `cohort_summary.md` | headline numbers and a per-trio table |
-| `trio_summary.tsv` | one row per trio: regions by class, `SV`-class regions by type, non-recurrent SVs, junctions, k-mer and read totals, child-only SVs (all, filtered, tested, supported), wall and per-module hours |
+| `trio_summary.tsv` | one row per trio: regions by class, `SV`-class regions by type, non-recurrent SVs, junctions, k-mer and read totals, child-only SVs (all, filtered, tested, supported at a breakpoint, with a region in the span), the random-locus null rate, the inherited controls (tested, supported), the child's own IGH/IGK/IGL rearrangement (junction reads, 0 if not found), wall and per-module hours |
 | `recurrent_regions.bed` | the recurrent loci: interval, number of children, their IDs, classes and types |
-| `sv_candidates.tsv` | every non-recurrent `SV`-class region with its evidence columns and junctions (`partner|strands|type|reads`) |
+| `sv_candidates.tsv` | every non-recurrent `SV`-class region with its evidence columns (`max_mapq` and `mapq0_reads` included) and junctions (`partner|strands|type|reads`), then the flags: `locus_flags`, `partner_flags`, `partner_recurrent`, `partner_multiplicity`, `both_ends`, `rank` (see [Reading the results](#reading-the-results)) |
 | `sv_candidates.bed`, `sv_candidates.bedpe` | the same for IGV and bedtools, with the trio in the name / last column |
 
 ## Reading the results
@@ -270,13 +277,32 @@ Cohort, `$WORK_DIR/results/cohort/`:
   GRCh38 with this call set of parents: compare `recurrent_regions.bed`
   with known problematic regions, and consider a cohort-derived blacklist
   for other trios.
-* **Known SVs**: `known_svs_tested` and `known_svs_detected` in
+* **Flags, not drops.** Everything is detected; what is not a germline
+  de novo is flagged in `sv_candidates.tsv` so that one `awk` sets it
+  aside: `locus_flags` names the special loci the region overlaps (`IGH`,
+  `IGK`, `IGL`, `TRA`, `TRB`, `TRG`, `PAR`), `chrEBV`, `chrM`, `nonprimary`
+  (a decoy, alt, random or unplaced contig) and `chrY_female` (a girl's
+  chrY); `partner_flags` does the same for its junction partners;
+  `partner_recurrent` counts other children with a junction end within
+  the slack of a partner window, and `partner_multiplicity` the junctions
+  of this child ending there (a window that is the other end of hundreds
+  of junctions is a mapping sink, not a breakpoint); `both_ends` says the
+  partner is itself a candidate of the same child; `rank` orders the whole
+  list by evidence. The strongest, cleanest candidates:
+  `awk -F'\t' 'NR == 1 || ($19 == "." && $20 == "." && $21 == 0 && $18 != ".")' sv_candidates.tsv | sort -t$'\t' -k24,24n | head`.
+* **Controls**: `known_svs_tested` and `known_svs_detected` in
   `trio_summary.tsv` count the published child-only SVs passing the
-  filters and how many discovery supported. A supported one is either a
-  true de novo SV or a parental genotyping miss where discovery sees the
-  child's junction reads; check the parents at the locus. An unsupported
-  one is most often a parent genotyping miss too, and the detail table's
-  `EVIDENCE` and `ALGORITHMS` columns say what called it.
+  filters and how many discovery supported at a breakpoint;
+  `known_svs_any_region` counts those with a region anywhere in their
+  span, which `null_supported_rate` (random loci of the same sizes) puts
+  in perspective. A supported one is either a true de novo SV or a
+  parental genotyping miss where discovery sees the child's junction
+  reads; check the parents at the locus. `negatives_tested` and
+  `negatives_supported` are the inherited SVs and how many were supported
+  anyway: the false-positive rate. `IGH_vdj_reads`, `IGK_vdj_reads` and
+  `IGL_vdj_reads` are the child's own rearrangements, found in every
+  child of a lymphoblastoid cohort when the method works: the sensitivity
+  control, and `cohort_summary.md` counts them.
 * **Scale**: per-trio rows let you see depth, population and node effects
   on region counts and runtime. Siblings (`TRIO_ALL_SIBLINGS=1`) share no
   de novo SVs, which is a cheap specificity check.

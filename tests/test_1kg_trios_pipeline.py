@@ -122,15 +122,15 @@ def make_shims(bin_dir, remote_dir, log_dir):
           echo "fake failure for $sample"; exit 3
         fi
         pos=$(( $(printf '%s' "$sample" | cksum | cut -d' ' -f1) % 100000 + 10000 ))
-        printf '#filters: min_distinct_kmers=1\\n#chrom\\tstart\\tend\\treads\\tunique_kmers\\tsplit_reads\\tdiscordant_pairs\\tmax_clip_len\\tunmapped_mates\\tclass\\tbreakpoint_reads\\tlarge_indel_reads\\tsv_type\\n' > "${prefix}.bed"
-        printf 'chr1\\t1000\\t1300\\t12\\t40\\t5\\t3\\t60\\t0\\tSV\\t6\\t0\\tDEL\\n' >> "${prefix}.bed"
-        printf 'chr2\\t%d\\t%d\\t9\\t30\\t4\\t2\\t55\\t0\\tSV\\t5\\t0\\tDUP\\n' "$pos" $(( pos + 250 )) >> "${prefix}.bed"
+        printf '#filters: min_distinct_kmers=1\\n#chrom\\tstart\\tend\\treads\\tunique_kmers\\tsplit_reads\\tdiscordant_pairs\\tmax_clip_len\\tunmapped_mates\\tclass\\tbreakpoint_reads\\tlarge_indel_reads\\tsv_type\\tmax_mapq\\tmapq0_reads\\n' > "${prefix}.bed"
+        printf 'chr1\\t1000\\t1300\\t12\\t40\\t5\\t3\\t60\\t0\\tSV\\t6\\t0\\tDEL\\t60\\t0\\n' >> "${prefix}.bed"
+        printf 'chr2\\t%d\\t%d\\t9\\t30\\t4\\t2\\t55\\t0\\tSV\\t5\\t0\\tDUP\\t60\\t1\\n' "$pos" $(( pos + 250 )) >> "${prefix}.bed"
         printf '#chrom1\\tstart1\\tend1\\tchrom2\\tstart2\\tend2\\tsv_id\\tsupporting_reads\\tstrand1\\tstrand2\\tsv_type\\n' > "${prefix}.sv.bedpe"
         printf 'chr2\\t%d\\t%d\\tchr2\\t%d\\t%d\\tSV_1\\t7\\t-\\t+\\tDUP\\n' "$pos" $(( pos + 250 )) $(( pos + 900 )) $(( pos + 1200 )) >> "${prefix}.sv.bedpe"
         dnm_json=""
         if [[ -n "$dnm" ]]; then
           n=$(grep -cv '^#' "$dnm")
-          dnm_json=", \\"dnm_evaluation\\": {\\"source\\": \\"$(basename "$dnm")\\", \\"slack_bp\\": 500, \\"total_loci\\": $n, \\"detected\\": 1, \\"detection_rate\\": 0.5, \\"loci\\": []}"
+          dnm_json=", \\"dnm_evaluation\\": {\\"source\\": \\"$(basename "$dnm")\\", \\"slack_bp\\": 500, \\"total_loci\\": $n, \\"detected\\": 1, \\"detection_rate\\": 0.5, \\"both_ends\\": 1, \\"any_region\\": $n, \\"any_region_rate\\": 1.0, \\"loci\\": [], \\"null\\": {\\"loci_per_event\\": 20, \\"seed\\": 1, \\"total_loci\\": 20, \\"detected\\": 0, \\"detection_rate\\": 0.0, \\"both_ends\\": 0, \\"any_region\\": 1, \\"any_region_rate\\": 0.05}}"
         fi
         cat > "${prefix}.metrics.json" <<JSON
         {"mode": "discovery", "child_candidate_kmers": 5000, "non_ref_kmers": 900,
@@ -210,7 +210,11 @@ def write_remote_store(remote, cram_bytes):
         + sv_record("chr1", 1000, "DEL1", "<DEL>", "PASS",
                     "SVTYPE=DEL;SVLEN=-300;END=1300;AF=0.001", gts(HG00405="0/1:70"))
         + sv_record("chr1", 5000, "INS1", "<INS:ME:ALU>", "PASS",
-                    "SVTYPE=INS;SVLEN=300;END=5001;AF=0.2", gts(HG00406="0/1:70")))
+                    "SVTYPE=INS;SVLEN=300;END=5001;AF=0.2", gts(HG00406="0/1:70"))
+        # inherited by HG00405 from HG00403: a negative control for that trio
+        + sv_record("chr1", 20000, "DUP1", "<DUP>", "PASS",
+                    "SVTYPE=DUP;SVLEN=4000;END=24000;AF=0.1",
+                    gts(HG00405="0/1:70", HG00403="0/1:60")))
     gz = str(remote / "1KGP_3202.gatksv_svtools_novelins.freeze_V3.wAF.vcf.gz")
     pysam.tabix_compress(str(vcf), gz, force=True)
     pysam.tabix_index(gz, preset="vcf", force=True)
@@ -329,12 +333,20 @@ def test_setup_stage_discover_and_summarise(workspace):
     if BCFTOOLS:
         assert "--dnm-regions" in args_405        # one rare child-only DEL
         assert "--dnm-regions" not in args_406    # its only call is common
+        # HG00405 inherited DUP1 from its father: the job passes it as a
+        # negative control; HG00406 has none to pass
+        assert f"--dnm-negative-regions {work}/results/HG00405/HG00405.inherited_svs.tsv" in args_405
+        assert "--dnm-negative-regions" not in args_406
+        inherited = (work / "results" / "HG00405" / "HG00405.inherited_svs.tsv")
+        assert [l for l in inherited.read_text().splitlines()
+                if not l.startswith("#")] == ["chr1\t20000\t4000\tDUP"]
         detail = (work / "results" / "HG00406" / "HG00406.child_only_svs.detail.tsv")
         assert detail.read_text().splitlines()[1].startswith("INS1\tchr1\t5000")
     else:
         assert "--dnm-regions" not in args_405
     stage_log = (work / "logs" / "stage_NA19240.log").read_text()
     assert stage_log.count("MD5 mismatch") == 2
+    assert "re-downloading from the other source first" in stage_log
     assert "failed MD5 after a fresh download" in stage_log
     assert (work / "state" / "results" / "NA19240").read_text().strip() == "fail"
     jobs_log = (logs / "jobs.log").read_text()
@@ -384,15 +396,19 @@ def test_setup_stage_discover_and_summarise(workspace):
                  if not l.startswith("#")]
     assert len(recurrent) == 1
     assert recurrent[0].startswith("chr1\t1000\t1300\t3\t3\tSV:3\tDEL:3\t")
-    candidates = [l for l in (cohort / "sv_candidates.tsv").read_text().splitlines()[1:]]
+    cand_rows = [l.split("\t") for l in (cohort / "sv_candidates.tsv").read_text().splitlines()]
+    candidates = [dict(zip(cand_rows[0], r)) for r in cand_rows[1:]]
     assert len(candidates) == 3
-    assert all("\tDUP\t" in c and c.endswith("|-+|DUP|7") for c in candidates)
+    assert all(c["sv_type"] == "DUP" and c["junctions"].endswith("|-+|DUP|7")
+               and c["locus_flags"] == "." and c["partner_recurrent"] == "0"
+               for c in candidates)
+    assert sorted(int(c["rank"]) for c in candidates) == [1, 2, 3]
     md = (cohort / "cohort_summary.md").read_text()
     assert "Trios selected: 3; finished: 3; missing: 0" in md
     assert "Recurrent loci (regions from >= 2 children within 500 bp): 1 of" in md
     if BCFTOOLS:
         assert by_trio["HG00405"]["known_svs_tested"] == "1"
-        assert "Published child-only SVs passing the filters: 1; supported by discovery: 1" in md
+        assert "Published child-only SVs passing the filters: 1; supported at a breakpoint: 1" in md
 
 
 def test_failed_discovery_keeps_the_crams(workspace):

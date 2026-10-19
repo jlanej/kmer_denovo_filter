@@ -468,7 +468,7 @@ class TestSummarizeTrios:
         md = (out / "cohort_summary.md").read_text()
         assert "Trios selected: 3; finished: 2; missing: 1" in md
         assert "De novo SV candidates after dropping recurrent loci: 2" in md
-        assert "supported by discovery: 1 (50%)" in md
+        assert "supported at a breakpoint: 1 (50%)" in md
         assert "| C | GBR | (missing) |" in md
 
     def test_no_finished_trio(self, tmp_path):
@@ -487,3 +487,109 @@ class TestSummarizeTrios:
         assert mod.parse_elapsed("1h 2m 3s") == 3723
         assert mod.parse_elapsed("5m 1.5s") == 301.5
         assert mod.parse_elapsed("12.5s") == 12.5
+
+
+class TestChildOnlySvsNegativeControls:
+    def test_inherited_svs_become_negative_controls(self, tmp_path):
+        inherited = tmp_path / "inherited.tsv"
+        run_child_only(tmp_path, "--out-inherited", str(inherited))
+        # DUP1 is carried by the father (PASS, GQ 60): a control. DEL3 has a
+        # missing parental genotype and is neither child-only nor inherited.
+        assert _load_dnm_regions(str(inherited)) == [("chr1", 12000, 3000, "DUP")]
+        text = inherited.read_text()
+        assert text.startswith("# inherited SVs for C1 (father F1, mother M1)")
+        assert "negative controls" in text
+
+    def test_max_inherited_caps_the_draw(self, tmp_path):
+        inherited = tmp_path / "inherited.tsv"
+        run_child_only(tmp_path, "--out-inherited", str(inherited),
+                       "--max-inherited", "0")
+        with pytest.raises(ValueError, match="no de novo events"):
+            _load_dnm_regions(str(inherited))
+
+
+class TestSummarizeFlagsAndControls:
+    def test_flags_partners_rank_and_vdj_control(self, tmp_path):
+        results = tmp_path / "results"
+        trios = tmp_path / "trios.tsv"
+        trios.write_text(
+            "TRIO_ID\tCHILD\tFATHER\tMOTHER\tFAMILY_ID\tCHILD_SEX\tPOPULATION\tSUPERPOPULATION\n"
+            "A\tA\tFA\tMA\tfam1\t1\tCHS\tEAS\n"
+            "B\tB\tFB\tMB\tfam2\t2\tYRI\tAFR\n")
+        igh = ("chr14", 105_700_000, 105_700_200)
+        igh2 = ("chr14", 106_000_000, 106_000_150)
+        write_trio_results(
+            results, "A",
+            [region(*igh, "SV", "DEL"),                    # IGH, its own V(D)J
+             region(*igh2, "SV", "DEL"),
+             region("chr5", 1000, 1200, "SV", "BND"),       # partner window shared with B
+             region("chr5", 8000, 8300, "SV", "DEL"),       # both ends candidates
+             region("chr5", 9000, 9100, "SV", "DEL"),
+             region("chrEBV", 10, 90, "SV", ".")],
+            links=[igh + igh2 + ("SV_1", 40, "+", "-", "DEL"),
+                   ("chr5", 1000, 1200, "chr9", 5000, 5100, "SV_2", 2, "+", "-", "BND"),
+                   ("chr5", 1000, 1200, "chr9", 5050, 5150, "SV_3", 1, "-", "+", "BND"),
+                   ("chr5", 8000, 8300, "chr5", 9000, 9100, "SV_4", 9, "+", "-", "DEL")],
+            dnm={"source": "x", "slack_bp": 500, "total_loci": 2, "detected": 1,
+                 "detection_rate": 0.5, "both_ends": 1, "any_region": 2,
+                 "any_region_rate": 1.0, "loci": [],
+                 "null": {"loci_per_event": 20, "seed": 1, "total_loci": 40,
+                          "detected": 2, "detection_rate": 0.05, "both_ends": 0,
+                          "any_region": 8, "any_region_rate": 0.2},
+                 "negatives": {"source": "inh", "total_loci": 10, "detected": 1,
+                               "detection_rate": 0.1, "both_ends": 0,
+                               "any_region": 3, "any_region_rate": 0.3, "loci": []}})
+        write_trio_results(
+            results, "B",
+            [region("chrY", 3_000_000, 3_000_200, "SV", "BND"),   # a girl's chrY
+             region("chrX", 100_000, 100_100, "SV", "INS"),      # PAR1
+             region("chr7", 500, 700, "SV", "BND")],
+            links=[("chr7", 500, 700, "chr9", 5020, 5120, "SV_1", 3, "+", "+", "BND"),
+                   ("chrY", 3_000_000, 3_000_200, "chrUn_KI270000v1_decoy", 10, 50,
+                    "SV_2", 2, "-", "-", "BND")])
+        out = tmp_path / "cohort"
+        load_module("summarize_trios").main([
+            "--trios", str(trios), "--results-dir", str(results),
+            "--out-dir", str(out), "--recurrent-min-trios", "2", "--slack", "500"])
+
+        rows = [l.split("\t") for l in (out / "sv_candidates.tsv").read_text().splitlines()]
+        header = rows[0]
+        cands = {(r[3], r[0], r[1]): dict(zip(header, r)) for r in rows[1:]}
+        assert header[-6:] == ["locus_flags", "partner_flags", "partner_recurrent",
+                               "partner_multiplicity", "both_ends", "rank"]
+        a_igh = cands[("A", "chr14", "105700000")]
+        assert a_igh["locus_flags"] == "IGH" and a_igh["partner_flags"] == "IGH"
+        assert a_igh["both_ends"] == "1"
+        a_sink = cands[("A", "chr5", "1000")]
+        assert a_sink["locus_flags"] == "."
+        assert a_sink["partner_recurrent"] == "1"       # B's chr7 junction ends at chr9:5020
+        assert a_sink["partner_multiplicity"] == "2"    # A's two junctions end near chr9:5000
+        assert a_sink["both_ends"] == "0"
+        a_del = cands[("A", "chr5", "8000")]
+        assert a_del["both_ends"] == "1" and a_del["partner_recurrent"] == "0"
+        assert cands[("A", "chrEBV", "10")]["locus_flags"] == "chrEBV"
+        b_y = cands[("B", "chrY", "3000000")]
+        assert b_y["locus_flags"] == "chrY_female"
+        assert b_y["partner_flags"] == "nonprimary"
+        assert cands[("B", "chrX", "100000")]["locus_flags"] == "PAR"
+        # rank: both ends first (the IGH pair and the chr5 DEL pair), then by
+        # breakpoint and junction reads; every candidate ranked once
+        ranks = sorted(int(c["rank"]) for c in cands.values())
+        assert ranks == list(range(1, len(cands) + 1))
+        assert int(a_igh["rank"]) <= 4 and int(a_del["rank"]) <= 4
+        assert int(a_sink["rank"]) > int(a_del["rank"])
+
+        summary = [l.split("\t") for l in (out / "trio_summary.tsv").read_text().splitlines()]
+        by_trio = {r[0]: dict(zip(summary[0], r)) for r in summary[1:]}
+        assert by_trio["A"]["IGH_vdj_reads"] == "40"
+        assert by_trio["A"]["IGK_vdj_reads"] == "0" and by_trio["B"]["IGH_vdj_reads"] == "0"
+        assert by_trio["A"]["known_svs_any_region"] == "2"
+        assert by_trio["A"]["null_supported_rate"] == "0.050"
+        assert by_trio["A"]["negatives_tested"] == "10"
+        assert by_trio["A"]["negatives_supported"] == "1"
+        md = (out / "cohort_summary.md").read_text()
+        assert "IGH in 1 of 2 children" in md
+        assert "supported at a breakpoint: 1 (50%); a region anywhere in the span: 2" in md
+        assert "Random loci of the same sizes supported at a breakpoint: median 5.0%" in md
+        assert "Inherited SVs (negative controls): 1 of 10 supported" in md
+        assert "Candidates with a junction, no flag and no recurrent partner: 2; with both ends: 2" in md

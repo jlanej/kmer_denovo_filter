@@ -169,6 +169,7 @@ if [[ "${USE_SV_CALLSET}" == "1" ]]; then
       --vcf "${SV_SOURCE}" --child "${CHILD}" --father "${FATHER}" --mother "${MOTHER}"
       --out-regions "${PREFIX}.child_only_svs.tsv"
       --out-table "${PREFIX}.child_only_svs.detail.tsv"
+      --out-inherited "${PREFIX}.inherited_svs.tsv"
       --max-af "${SV_MAX_AF}" --min-gq "${SV_MIN_GQ}"
     )
     [[ "${SV_PASS_ONLY}" == "1" ]] || SV_ARGS+=(--no-pass-only)
@@ -180,6 +181,14 @@ if [[ "${USE_SV_CALLSET}" == "1" ]]; then
       echo "  ${N_SV} child-only SVs pass the filters; discovery will report on each."
     else
       echo "  No child-only SV passes the filters; running without --dnm-regions."
+    fi
+    # Inherited SVs (child and one parent carry them) are the negative
+    # controls: their k-mers are in a parent, so discovery should not
+    # support them; where it does, that is the false-positive rate.
+    N_NEG=$(grep -cv '^#' "${PREFIX}.inherited_svs.tsv" || true)
+    if (( N_NEG > 0 )); then
+      DNM_ARGS+=(--dnm-negative-regions "${PREFIX}.inherited_svs.tsv")
+      echo "  ${N_NEG} inherited SVs go in as negative controls."
     fi
   fi
 else
