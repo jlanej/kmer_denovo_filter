@@ -20,7 +20,10 @@ job leaves ``<trio>.done`` beside its outputs) and writes, under
     Every ``SV``-class region that is not recurrent, with its evidence
     columns and the BEDPE junctions that start or end in it: the de novo
     SV candidates to review (IGV with the trio's informative BAM, or a
-    dedicated SV caller on the staged CRAMs).
+    dedicated SV caller on the staged CRAMs).  Nothing else is dropped;
+    what the reader will want to set aside is flagged in columns instead
+    (``locus_flags``, ``partner_flags``, ``partner_recurrent``,
+    ``partner_multiplicity``), and ``rank`` orders the list by evidence.
 ``sv_candidates.bedpe``
     The junctions of those candidates, with a trio column appended.
 ``cohort_summary.md``
@@ -31,6 +34,7 @@ are still finishing; unfinished trios are listed as missing.
 """
 
 import argparse
+import bisect
 import collections
 import csv
 import json
@@ -43,8 +47,28 @@ CLASSES = ("SV", "AMBIGUOUS", "SMALL")
 SV_TYPES = ("DEL", "DUP", "INV", "INS", "BND")
 EVIDENCE_COLUMNS = ("reads", "unique_kmers", "split_reads", "discordant_pairs",
                     "unmapped_mates", "breakpoint_reads", "large_indel_reads",
-                    "max_clip_len")
+                    "max_clip_len", "max_mapq", "mapq0_reads")
 MODULES = ("1", "2", "2b", "3")
+#: Loci a reader will want to set aside with one filter, never dropped here
+#: (GRCh38, 0-based half-open): the immunoglobulin and T-cell receptor
+#: loci - every B- or T-cell-derived sample carries its own V(D)J
+#: rearrangement, somatic and absent from the parents' clones, so in
+#: lymphoblastoid lines IGH and IGK are a child's strongest "de novo" hits
+#: and its built-in sensitivity control - and the pseudoautosomal regions.
+SPECIAL_LOCI = {
+    "IGH": ("chr14", 105586437, 106879844),
+    "IGK": ("chr2", 88857361, 90235368),
+    "IGL": ("chr22", 22026076, 22922913),
+    "TRA": ("chr14", 21621904, 22552132),
+    "TRB": ("chr7", 142299011, 142813287),
+    "TRG": ("chr7", 38240024, 38368055),
+    "PAR1_X": ("chrX", 10000, 2781479),
+    "PAR2_X": ("chrX", 155701382, 156030895),
+    "PAR1_Y": ("chrY", 10000, 2781479),
+    "PAR2_Y": ("chrY", 56887902, 57217415),
+}
+VDJ_LOCI = ("IGH", "IGK", "IGL")
+PRIMARY_CONTIG_RE = re.compile(r"^chr([0-9]{1,2}|X|Y)$")
 MODULE_RE = re.compile(r"\[Module (\w+)\] Complete \(([^)]*)\)")
 FINISHED_RE = re.compile(r"Pipeline finished in (.+)$")
 
@@ -126,7 +150,7 @@ def read_child_only_counts(detail_path):
     return n_all, n_pass
 
 
-def load_trio(results_dir, trio_id):
+def load_trio(results_dir, trio_id, child_sex=None):
     """Everything the summary needs about one trio, or None when unfinished."""
     prefix = os.path.join(results_dir, trio_id, trio_id)
     if not (os.path.isfile(prefix + ".done")
@@ -140,6 +164,7 @@ def load_trio(results_dir, trio_id):
     n_all, n_pass = read_child_only_counts(prefix + ".child_only_svs.detail.tsv")
     return {
         "trio": trio_id,
+        "sex": child_sex,
         "metrics": metrics,
         "regions": regions,
         "links": read_bedpe(prefix + ".sv.bedpe"),
@@ -149,6 +174,86 @@ def load_trio(results_dir, trio_id):
         "child_only_all": n_all,
         "child_only_pass": n_pass,
     }
+
+
+# -- flags --------------------------------------------------------------------
+
+def locus_flags(chrom, start, end, child_sex=None):
+    """The flags of an interval, ``;``-joined, or ``.`` when it has none.
+
+    The special loci it overlaps (``IGH`` ... ``TRG``, ``PAR``), ``chrEBV``,
+    ``chrM``, ``nonprimary`` for any other contig that is not a nuclear
+    chromosome, and ``chrY_female`` for a chrY interval in a girl
+    (CHILD_SEX 2): sequence homologous to X placed on Y, not biology.
+    """
+    flags = []
+    for name, (c, s, e) in SPECIAL_LOCI.items():
+        if chrom == c and start < e and s < end:
+            flag = "PAR" if name.startswith("PAR") else name
+            if flag not in flags:
+                flags.append(flag)
+    if chrom == "chrEBV":
+        flags.append("chrEBV")
+    elif chrom == "chrM":
+        flags.append("chrM")
+    elif not PRIMARY_CONTIG_RE.match(chrom):
+        flags.append("nonprimary")
+    if chrom == "chrY" and str(child_sex) == "2":
+        flags.append("chrY_female")
+    return ";".join(flags) if flags else "."
+
+
+def _within(name, locus):
+    """Whether an interval (chrom, start, end) lies inside a special locus."""
+    c, s, e = SPECIAL_LOCI[name]
+    chrom, start, end = locus
+    return chrom == c and start >= s and end <= e
+
+
+def vdj_rearrangement_reads(links, name):
+    """Reads of the strongest junction with both ends inside a V(D)J locus:
+    the child's own rearrangement, if discovery saw it (0 when not)."""
+    best = 0
+    for l in links:
+        if (_within(name, (l["chrom1"], l["start1"], l["end1"]))
+                and _within(name, (l["chrom2"], l["start2"], l["end2"]))):
+            best = max(best, l["reads"])
+    return best
+
+
+class _EndIndex:
+    """Junction ends by (trio, chrom), for 'what else ends near here'."""
+
+    def __init__(self, trios):
+        buckets = collections.defaultdict(list)
+        for info in trios:
+            for l in info["links"]:
+                buckets[(info["trio"], l["chrom1"])].append((l["start1"], l["end1"]))
+                buckets[(info["trio"], l["chrom2"])].append((l["start2"], l["end2"]))
+        self._by_key = {}
+        self._trios = sorted({info["trio"] for info in trios})
+        for key, ends in buckets.items():
+            ends.sort()
+            running, max_ends = -1, []
+            for s, e in ends:
+                running = max(running, e)
+                max_ends.append(running)
+            self._by_key[key] = ([s for s, e in ends], max_ends, ends)
+
+    def count(self, trio, chrom, start, end):
+        """Ends of *trio* overlapping [start, end)."""
+        entry = self._by_key.get((trio, chrom))
+        if entry is None:
+            return 0
+        starts, max_ends, ends = entry
+        hi = bisect.bisect_left(starts, end)
+        lo = bisect.bisect_right(max_ends, start)
+        return sum(1 for s, e in ends[lo:hi] if e > start)
+
+    def other_trios(self, trio, chrom, start, end):
+        """How many OTHER trios have a junction end overlapping [start, end)."""
+        return sum(1 for t in self._trios
+                   if t != trio and self.count(t, chrom, start, end) > 0)
 
 
 # -- analysis -----------------------------------------------------------------
@@ -225,6 +330,17 @@ def summarise_trio(info):
     row["known_svs_tested"] = dnm.get("total_loci", 0 if info["dnm"] is None
                                       else dnm.get("total_loci", ""))
     row["known_svs_detected"] = dnm.get("detected", 0)
+    row["known_svs_any_region"] = dnm.get("any_region", "")
+    null = dnm.get("null") or {}
+    row["null_supported_rate"] = (f"{null['detection_rate']:.3f}"
+                                  if "detection_rate" in null else "")
+    negatives = dnm.get("negatives") or {}
+    row["negatives_tested"] = negatives.get("total_loci", "")
+    row["negatives_supported"] = negatives.get("detected", "")
+    # The child's own V(D)J rearrangements: the sensitivity control of an
+    # LCL cohort (every child has them; no parent's clone does)
+    for name in VDJ_LOCI:
+        row[name + "_vdj_reads"] = vdj_rearrangement_reads(links, name)
     timing = info["timing"]
     wall = timing.get("wall_s")
     row["wall_hours"] = f"{int(wall) / 3600:.2f}" if wall else ""
@@ -284,17 +400,43 @@ def write_recurrent(path, clusters, min_trios):
     return recurrent
 
 
-def write_candidates(out_dir, trios, min_trios):
-    """The non-recurrent SV-class regions, with their junctions."""
+def write_candidates(out_dir, trios, min_trios, slack=500):
+    """The non-recurrent SV-class regions, with their junctions and flags.
+
+    Nothing is dropped beyond recurrence.  The columns after ``junctions``
+    let a reader set aside what is not a germline de novo without losing
+    it: ``locus_flags`` (the region's own locus), ``partner_flags`` (its
+    junction partners'), ``partner_recurrent`` (other children with a
+    junction end within *slack* of a partner window: an end that recurs
+    across families is a mapping sink, not a breakpoint),
+    ``partner_multiplicity`` (junctions of this child ending in the
+    busiest partner window: hundreds mean a sink too), ``both_ends``
+    (a partner that is itself a candidate of the same child) and ``rank``
+    (1 = strongest: both ends, then breakpoint reads, then junction reads).
+    """
     header = ["chrom", "start", "end", "trio", "class", "sv_type"] + \
-        list(EVIDENCE_COLUMNS) + ["n_trios_at_locus", "junctions"]
+        list(EVIDENCE_COLUMNS) + [
+            "n_trios_at_locus", "junctions", "locus_flags", "partner_flags",
+            "partner_recurrent", "partner_multiplicity", "both_ends", "rank"]
+    ends = _EndIndex(trios)
     candidates = []
     bedpe_lines = []
+    candidate_keys = set()
+    for info in trios:
+        for r in info["regions"]:
+            if r.get("class") == "SV" and r.get("n_trios", 1) < min_trios:
+                candidate_keys.add((info["trio"], r["chrom"], r["start"], r["end"]))
     for info in trios:
         for r in info["regions"]:
             if r.get("class") != "SV" or r.get("n_trios", 1) >= min_trios:
                 continue
+            key = (r["chrom"], r["start"], r["end"])
             links = links_for_region(r, info["links"])
+            partners = []
+            for l in links:
+                this_end = (l["chrom1"], l["start1"], l["end1"])
+                partners.append((l["chrom2"], l["start2"], l["end2"]) if this_end == key
+                                else (l["chrom1"], l["start1"], l["end1"]))
             row = collections.OrderedDict()
             row["chrom"], row["start"], row["end"] = r["chrom"], r["start"], r["end"]
             row["trio"] = info["trio"]
@@ -304,14 +446,30 @@ def write_candidates(out_dir, trios, min_trios):
             row["n_trios_at_locus"] = r.get("n_trios", 1)
             row["junctions"] = ";".join(
                 "%s:%d-%d|%s%s|%s|%d" % (
-                    l["chrom2"] if (l["chrom1"], l["start1"], l["end1"])
-                    == (r["chrom"], r["start"], r["end"]) else l["chrom1"],
-                    l["start2"] if (l["chrom1"], l["start1"], l["end1"])
-                    == (r["chrom"], r["start"], r["end"]) else l["start1"],
-                    l["end2"] if (l["chrom1"], l["start1"], l["end1"])
-                    == (r["chrom"], r["start"], r["end"]) else l["end1"],
-                    l["strand1"], l["strand2"], l["sv_type"], l["reads"])
-                for l in links) or "."
+                    p[0], p[1], p[2], l["strand1"], l["strand2"], l["sv_type"],
+                    l["reads"])
+                for l, p in zip(links, partners)) or "."
+            row["locus_flags"] = locus_flags(r["chrom"], r["start"], r["end"],
+                                             info.get("sex"))
+            partner_flags = []
+            for p in partners:
+                for flag in locus_flags(*p, info.get("sex")).split(";"):
+                    if flag != "." and flag not in partner_flags:
+                        partner_flags.append(flag)
+            row["partner_flags"] = ";".join(partner_flags) if partner_flags else "."
+            row["partner_recurrent"] = max(
+                (ends.other_trios(info["trio"], p[0], p[1] - slack, p[2] + slack)
+                 for p in partners), default=0)
+            row["partner_multiplicity"] = max(
+                (ends.count(info["trio"], p[0], p[1] - slack, p[2] + slack)
+                 for p in partners), default=0)
+            row["both_ends"] = int(any((info["trio"],) + p in candidate_keys
+                                       for p in partners))
+            row["_evidence"] = (
+                row["both_ends"], int(bool(links)),
+                r.get("breakpoint_reads", 0) or 0,
+                max((l["reads"] for l in links), default=0),
+                r.get("reads", 0) or 0)
             candidates.append(row)
             for l in links:
                 line = (l["chrom1"], l["start1"], l["end1"], l["chrom2"],
@@ -319,6 +477,11 @@ def write_candidates(out_dir, trios, min_trios):
                         l["strand1"], l["strand2"], l["sv_type"], info["trio"])
                 if line not in bedpe_lines:
                     bedpe_lines.append(line)
+    by_evidence = sorted(candidates, key=lambda r: r["_evidence"], reverse=True)
+    for rank, row in enumerate(by_evidence, 1):
+        row["rank"] = rank
+    for row in candidates:
+        del row["_evidence"]
     candidates.sort(key=lambda r: (r["chrom"], r["start"], r["trio"]))
     write_tsv(os.path.join(out_dir, "sv_candidates.tsv"), candidates, header)
     with open(os.path.join(out_dir, "sv_candidates.bed"), "w") as fh:
@@ -363,12 +526,43 @@ def write_markdown(path, rows, trio_meta, candidates, recurrent, clusters,
         lines.append("* Candidate types: " + ", ".join(
             f"{t}: {n}" for t, n in sorted(types.items(),
                                            key=lambda kv: -kv[1])))
+        clean = [c for c in candidates
+                 if c["locus_flags"] == "." and c["partner_flags"] == "."
+                 and c["junctions"] != "." and c["partner_recurrent"] == 0]
+        lines.append(f"* Candidates with a junction, no flag and no recurrent "
+                     f"partner: {len(clean)}; with both ends: "
+                     f"{sum(1 for c in clean if c['both_ends'])} "
+                     f"(see `rank`, `locus_flags`, `partner_flags`, "
+                     f"`partner_recurrent`, `partner_multiplicity`)")
+    found = {name: sum(1 for r in done if r.get(name + "_vdj_reads", 0))
+             for name in VDJ_LOCI}
+    lines.append("* V(D)J rearrangement found (the child's own, the sensitivity "
+                 "control of an LCL cohort): " + ", ".join(
+                     f"{name} in {found[name]} of {len(done)} children"
+                     for name in VDJ_LOCI))
     tested = sum(r["known_svs_tested"] or 0 for r in done)
     detected = sum(r["known_svs_detected"] or 0 for r in done)
     if tested:
+        any_region = sum(int(r["known_svs_any_region"] or 0) for r in done
+                         if r["known_svs_any_region"] != "")
         lines.append(f"* Published child-only SVs passing the filters: {tested}; "
-                     f"supported by discovery: {detected} "
-                     f"({100.0 * detected / tested:.0f}%)")
+                     f"supported at a breakpoint: {detected} "
+                     f"({100.0 * detected / tested:.0f}%); a region anywhere "
+                     f"in the span: {any_region}")
+        nulls = [float(r["null_supported_rate"]) for r in done
+                 if r["null_supported_rate"]]
+        if nulls:
+            lines.append(f"  * Random loci of the same sizes supported at a "
+                         f"breakpoint: median {100 * _median(nulls):.1f}% per child")
+        neg_tested = sum(int(r["negatives_tested"] or 0) for r in done
+                         if r["negatives_tested"] != "")
+        neg_supported = sum(int(r["negatives_supported"] or 0) for r in done
+                            if r["negatives_supported"] != "")
+        if neg_tested:
+            lines.append(f"  * Inherited SVs (negative controls): {neg_supported} "
+                         f"of {neg_tested} supported at a breakpoint "
+                         f"({100.0 * neg_supported / neg_tested:.0f}%: the "
+                         f"false-positive rate)")
     walls = [float(r["wall_hours"]) for r in done if r["wall_hours"]]
     if walls:
         lines.append(f"* Wall time per trio: median {_fmt(_median(walls), 2)} h, "
@@ -422,7 +616,7 @@ def main(argv=None):
 
     loaded, rows = [], []
     for t in trio_rows:
-        info = load_trio(args.results_dir, t["TRIO_ID"])
+        info = load_trio(args.results_dir, t["TRIO_ID"], t.get("CHILD_SEX"))
         if info is None:
             rows.append(missing_row(t["TRIO_ID"]))
             continue
@@ -437,7 +631,8 @@ def main(argv=None):
     rows.sort(key=lambda r: [t["TRIO_ID"] for t in trio_rows].index(r["trio"]))
     header = list(summarise_trio(loaded[0]).keys()) if loaded else ["trio", "status"]
     write_tsv(os.path.join(args.out_dir, "trio_summary.tsv"), rows, header)
-    candidates = write_candidates(args.out_dir, loaded, args.recurrent_min_trios)
+    candidates = write_candidates(args.out_dir, loaded, args.recurrent_min_trios,
+                                  slack=args.slack)
     write_markdown(os.path.join(args.out_dir, "cohort_summary.md"), rows,
                    trio_meta, candidates, recurrent, clusters,
                    args.recurrent_min_trios, args.slack, len(trio_rows))

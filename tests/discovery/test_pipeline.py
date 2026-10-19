@@ -110,13 +110,15 @@ class TestDiscoveryPipeline:
         with open(bed_path) as fh:
             bed_lines = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
         assert len(bed_lines) >= 1, "Expected at least one candidate region"
-        # BED lines should have 13 columns: chrom, start, end, reads, kmers,
+        # BED lines should have 15 columns: chrom, start, end, reads, kmers,
         # split_reads, discordant_pairs, max_clip_len, unmapped_mates, class,
-        # breakpoint_reads, large_indel_reads, sv_type
+        # breakpoint_reads, large_indel_reads, sv_type, max_mapq, mapq0_reads
         parts = bed_lines[0].split("\t")
-        assert len(parts) == 13
+        assert len(parts) == 15
         assert int(parts[3]) >= 1  # at least 1 read
         assert int(parts[4]) >= 1  # at least 1 k-mer
+        # The test BAMs are written at MAPQ 60: annotated, not filtered
+        assert parts[13] == "60" and parts[14] == "0"
 
         # Check informative reads BAM
         info_bam = f"{out_prefix}.informative.bam"
@@ -2418,3 +2420,247 @@ class TestSamtoolsJellyfishFailures:
                 truncated, None, kmer_fa, 11, str(tmp_path / "mother"),
                 threads=1, label="Mother", n_filter_kmers=1,
             )
+
+
+# ── Annotation, kept index, retries and the known-event evaluation ──────────
+
+def _create_bam_with_mapq(path, chrom, reads):
+    """A BAM from (name, pos, seq, mapq) tuples, all-match alignments."""
+    header = pysam.AlignmentHeader.from_references([chrom], [300])
+    with pysam.AlignmentFile(path, "wb", header=header) as bam:
+        for name, pos, seq, mapq in reads:
+            seg = pysam.AlignedSegment()
+            seg.query_name = name
+            seg.query_sequence = seq
+            seg.flag = 0
+            seg.reference_id = 0
+            seg.reference_start = pos
+            seg.mapping_quality = mapq
+            seg.cigar = [(0, len(seq))]
+            seg.query_qualities = pysam.qualitystring_to_array("I" * len(seq))
+            bam.write(seg)
+    pysam.sort("-o", path, path)
+    pysam.index(path)
+
+
+class TestDiscoveryAnnotationAndControls:
+    """MAPQ columns, the kept proband index, Module 3 retries, and the
+    breakpoint-level evaluation with its null and negative controls."""
+
+    @pytest.fixture()
+    def tmpdir(self, tmp_path):
+        return str(tmp_path)
+
+    def _trio(self, tmpdir, child_reads):
+        """A reference, a child BAM from *child_reads* (name, pos, seq,
+        mapq) and reference-only parents; returns the args list."""
+        chrom = "chr1"
+        ref_fa = os.path.join(tmpdir, "ref.fa")
+        ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
+        child_seq = list(ref_seq[30:90])
+        child_seq[20] = "G" if ref_seq[50] != "G" else "T"
+        child_seq = "".join(child_seq)
+        child_bam = os.path.join(tmpdir, "child.bam")
+        _create_bam_with_mapq(
+            child_bam, chrom,
+            [(name, 30, child_seq, mapq) for name, mapq in child_reads],
+        )
+        parent_seq = ref_seq[30:90]
+        for parent in ("mother", "father"):
+            _create_bam(
+                os.path.join(tmpdir, f"{parent}.bam"), ref_fa, chrom,
+                [(f"{parent}1", 30, parent_seq, None),
+                 (f"{parent}2", 30, parent_seq, None)],
+            )
+        return [
+            "--child", child_bam,
+            "--mother", os.path.join(tmpdir, "mother.bam"),
+            "--father", os.path.join(tmpdir, "father.bam"),
+            "--ref-fasta", ref_fa,
+            "--out-prefix", os.path.join(tmpdir, "out"),
+            "--min-child-count", "3",
+            "--kmer-size", "5",
+        ]
+
+    def test_mapq_is_annotated_not_filtered(self, tmpdir):
+        """MAPQ-0 reads make regions like any other; the region records
+        its best MAPQ and how many of its reads are MAPQ 0."""
+        argv = self._trio(tmpdir, [("r1", 0), ("r2", 0), ("r3", 60),
+                                   ("r4", 0)])
+        run_discovery_pipeline(parse_args(argv))
+        with open(os.path.join(tmpdir, "out.bed")) as fh:
+            rows = [l.rstrip("\n").split("\t") for l in fh
+                    if not l.startswith("#")]
+        assert len(rows) == 1
+        assert rows[0][3] == "4"                     # all four reads anchored
+        assert rows[0][13] == "60" and rows[0][14] == "3"
+        with open(os.path.join(tmpdir, "out.metrics.json")) as fh:
+            region = json.load(fh)["regions"][0]
+        assert region["max_mapq"] == 60 and region["mapq0_reads"] == 3
+
+        # All MAPQ 0: still a region, max 0
+        argv = self._trio(tmpdir, [("q1", 0), ("q2", 0), ("q3", 0)])
+        run_discovery_pipeline(parse_args(argv))
+        with open(os.path.join(tmpdir, "out.bed")) as fh:
+            rows = [l.rstrip("\n").split("\t") for l in fh
+                    if not l.startswith("#")]
+        assert rows[0][13] == "0" and rows[0][14] == "3"
+
+    def test_proband_kmer_index_is_kept_unless_discarded(self, tmpdir):
+        argv = self._trio(tmpdir, [("r1", 60), ("r2", 60), ("r3", 60)])
+        run_discovery_pipeline(parse_args(argv))
+        kept = os.path.join(tmpdir, "out.proband_unique.jf")
+        assert os.path.getsize(kept) > 0
+        os.remove(kept)
+        run_discovery_pipeline(parse_args(argv + ["--discard-proband-kmers"]))
+        assert not os.path.exists(kept)
+
+    def test_a_failing_contig_scan_is_run_again(self, tmpdir, monkeypatch,
+                                                caplog):
+        """One failure of a contig's scan is retried and the run completes;
+        a contig that keeps failing fails the run after the last attempt."""
+        argv = self._trio(tmpdir, [("r1", 60), ("r2", 60), ("r3", 60)])
+        real = discovery_pipeline_mod._scan_contig_for_hits
+        failures = {"left": 1}
+
+        def flaky(*a, **kw):
+            if failures["left"] > 0:
+                failures["left"] -= 1
+                raise OSError(116, "Stale file handle")
+            return real(*a, **kw)
+
+        monkeypatch.setattr(discovery_pipeline_mod, "_scan_contig_for_hits",
+                            flaky)
+        # One worker: the in-process path (a process pool would need a
+        # picklable stand-in); the retry logic is the same either way
+        argv = argv + ["--threads", "1"]
+        with caplog.at_level("WARNING"):
+            run_discovery_pipeline(parse_args(argv))
+        assert "running the contig again" in caplog.text
+        with open(os.path.join(tmpdir, "out.bed")) as fh:
+            assert sum(1 for l in fh if not l.startswith("#")) == 1
+
+        def broken(*a, **kw):
+            raise OSError(116, "Stale file handle")
+
+        monkeypatch.setattr(discovery_pipeline_mod, "_scan_contig_for_hits",
+                            broken)
+        with pytest.raises(OSError):
+            run_discovery_pipeline(parse_args(argv))
+
+    def test_jellyfish_query_is_retried(self, monkeypatch):
+        from kmer_denovo_filter import kmer_utils
+
+        calls = []
+
+        class FakeProc:
+            def __init__(self, rc, out, err):
+                self.returncode, self._out, self._err = rc, out, err
+
+            def communicate(self, data):
+                return self._out, self._err
+
+        def fake_popen(cmd, **kw):
+            calls.append(cmd)
+            if len(calls) == 1:
+                return FakeProc(1, b"", b"Failed to parse header of file")
+            return FakeProc(0, b"AAAAA 1\nCCCCC 0\n", b"")
+
+        monkeypatch.setattr(kmer_utils.subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(kmer_utils.time, "sleep", lambda s: None)
+        hits = kmer_utils.JellyfishKmerQuery("x.jf")._subprocess_query(
+            ["AAAAA", "CCCCC"])
+        assert hits == {"AAAAA"} and len(calls) == 2
+
+        calls.clear()
+        monkeypatch.setattr(kmer_utils.subprocess, "Popen",
+                            lambda cmd, **kw: FakeProc(1, b"", b"boom"))
+        with pytest.raises(RuntimeError, match="3 attempts"):
+            kmer_utils.JellyfishKmerQuery("x.jf")._subprocess_query(["AAAAA"])
+
+    def test_evaluation_counts_breakpoints_not_spans(self):
+        from kmer_denovo_filter.discovery.pipeline import (
+            _evaluate_dnm_regions, _null_dnm_regions, _summarise_dnm_evaluation,
+        )
+        regions = [("chr1", 1000, 1300), ("chr1", 5000, 5200),
+                   ("chr1", 9000, 9100)]
+        detail = [
+            {"chrom": "chr1", "start": 1000, "end": 1300, "reads": 8,
+             "unique_kmers": 30, "split_reads": 5, "discordant_pairs": 0,
+             "breakpoint_reads": 4, "max_clip_len": 60, "unmapped_mates": 0,
+             "class": "SV"},
+            {"chrom": "chr1", "start": 5000, "end": 5200, "reads": 6,
+             "unique_kmers": 20, "split_reads": 0, "discordant_pairs": 0,
+             "breakpoint_reads": 3, "max_clip_len": 40, "unmapped_mates": 0,
+             "class": "SV"},
+            {"chrom": "chr1", "start": 9000, "end": 9100, "reads": 2,
+             "unique_kmers": 9, "split_reads": 0, "discordant_pairs": 0,
+             "breakpoint_reads": 0, "max_clip_len": 0, "unmapped_mates": 0,
+             "class": "SMALL"},
+        ]
+        events = [
+            ("chr1", 1301, 3700, "DEL"),   # ends at 1300 and 5000: both supported
+            ("chr1", 9050, None, "INS"),   # a region on it, no breakpoint reads
+            ("chr1", 2000, 2000, "DUP"),   # inside the deletion's span: no end near a region
+            ("chr2", 500, 100, "DEL"),     # nothing there
+        ]
+        out = _evaluate_dnm_regions(regions, detail, events, slack=500)
+        by = {e["locus"]: e for e in out}
+        assert by["chr1:1301"]["assessment"] == "SUPPORTED_BOTH_ENDS"
+        assert by["chr1:1301"]["breakpoint_support"] == 2
+        assert by["chr1:1301"]["breakpoints"]["start"]["split_reads"] == 5
+        assert by["chr1:1301"]["breakpoints"]["end"]["breakpoint_reads"] == 3
+        assert by["chr1:1301"]["any_region"] and by["chr1:1301"]["detected"]
+        assert by["chr1:9050"]["assessment"] == "REGION_ONLY"
+        assert by["chr1:9050"]["ends"] == 1 and not by["chr1:9050"]["detected"]
+        assert by["chr1:2000"]["assessment"] == "NOT_DETECTED"
+        assert by["chr1:2000"]["any_region"] is False
+        assert by["chr2:500"]["assessment"] == "NOT_DETECTED"
+        headline = _summarise_dnm_evaluation(out)
+        assert headline == {"total_loci": 4, "detected": 1,
+                            "detection_rate": 0.25, "both_ends": 1,
+                            "any_region": 2, "any_region_rate": 0.5}
+
+        # The null: matched loci, deterministic, within the chromosome
+        null = _null_dnm_regions(events[:1], {"chr1": 100_000}, 5)
+        assert len(null) == 5
+        assert null == _null_dnm_regions(events[:1], {"chr1": 100_000}, 5)
+        assert all(c == "chr1" and 1 <= p <= 100_000 - 3700 and s == 3700
+                   and t == "DEL" for c, p, s, t in null)
+        assert _null_dnm_regions(events[:1], {"chr1": 2_000}, 5) == []
+        assert _null_dnm_regions(events[3:], {"chr1": 100_000}, 5) == []
+
+    def test_negative_controls_and_null_in_the_outputs(self, tmpdir):
+        argv = self._trio(tmpdir, [("r1", 60), ("r2", 60), ("r3", 60)])
+        known = os.path.join(tmpdir, "known.tsv")
+        negatives = os.path.join(tmpdir, "inherited.tsv")
+        with open(known, "w") as fh:
+            fh.write("chr1\t31\t60\tSNV\n")
+        with open(negatives, "w") as fh:
+            fh.write("chr1\t31\t60\tSNV\nchr1\t150\t20\tDEL\n")
+        # A slack of 10 bp: the second negative control, 60 bp past the
+        # region, must not count as "a region in the span"
+        run_discovery_pipeline(parse_args(
+            argv + ["--dnm-regions", known, "--dnm-negative-regions",
+                    negatives, "--dnm-null", "4", "--cluster-distance", "10"]))
+        with open(os.path.join(tmpdir, "out.metrics.json")) as fh:
+            ev = json.load(fh)["dnm_evaluation"]
+        assert ev["total_loci"] == 1 and ev["any_region"] == 1
+        assert ev["loci"][0]["assessment"] == "REGION_ONLY"
+        assert ev["null"]["loci_per_event"] == 4 and ev["null"]["total_loci"] == 4
+        assert ev["negatives"]["total_loci"] == 2
+        assert ev["negatives"]["loci"][1]["assessment"] == "NOT_DETECTED"
+        with open(os.path.join(tmpdir, "out.summary.txt")) as fh:
+            text = fh.read()
+        assert "Supported at a breakpoint:" in text
+        assert "Random loci of the same sizes:" in text
+        assert "Negative controls (inherited.tsv): 0 / 2" in text
+
+        # Negatives alone still produce the block
+        run_discovery_pipeline(parse_args(
+            argv + ["--dnm-negative-regions", negatives, "--dnm-null", "0",
+                    "--cluster-distance", "10"]))
+        with open(os.path.join(tmpdir, "out.metrics.json")) as fh:
+            ev = json.load(fh)["dnm_evaluation"]
+        assert ev["total_loci"] == 0 and ev["negatives"]["total_loci"] == 2
+        assert "null" not in ev

@@ -185,7 +185,7 @@ kmer-discovery \
   --threads 8
 ```
 
-This produces seven output files (see [Discovery Mode Output](#discovery-mode-output)):
+This produces eight output files (see [Discovery Mode Output](#discovery-mode-output)):
 
 * `discovery_output.bed`
 * `discovery_output.informative.bam`
@@ -194,6 +194,7 @@ This produces seven output files (see [Discovery Mode Output](#discovery-mode-ou
 * `discovery_output.read_coverage.bed`
 * `discovery_output.metrics.json`
 * `discovery_output.summary.txt`
+* `discovery_output.proband_unique.jf` (the proband-unique k-mer index, kept unless `--discard-proband-kmers`)
 
 Each region is annotated with structural-variant evidence, and the BEDPE
 links an SV's breakpoints and gives its type. See
@@ -287,7 +288,10 @@ k-mer parameters. Each command also has its own mode-specific arguments.
 | `--min-bedgraph-reads` | 3 | Minimum distinct reads at a position for inclusion in the bedGraph and read coverage BED |
 | `--parent-max-count` | 0 | Maximum k-mer count in a parent before the k-mer is considered parental; k-mers with count > this value in either parent are removed |
 | `--candidate-summary` | – | Path to a VCF-mode `summary.txt` for candidate comparison. High-quality *de novos* (DKA\_DKT > 0.25, DKA > 10) are checked against discovered regions |
-| `--dnm-regions` | – | Tab-separated file of known *de novo* events to check the discovered regions against: `chrom`, 1-based `pos`, `size` in bp (`.` if unknown), `event_type`; `#` lines are comments. Adds a per-event detection table to the metrics JSON, summary and report. A region counts toward an event when it overlaps it or lies within `--cluster-distance` of it, because a deletion's breakpoint regions flank the deleted interval. [`examples/HG002_trio/sulovari2023_dnm_regions.tsv`](examples/HG002_trio/sulovari2023_dnm_regions.tsv) lists the Sulovari et al. 2023 candidates used by the GIAB (HG002) integration test |
+| `--dnm-regions` | – | Tab-separated file of known *de novo* events to check the discovered regions against: `chrom`, 1-based `pos`, `size` in bp (`.` if unknown), `event_type`; `#` lines are comments. Adds a per-event detection table to the metrics JSON, summary and report. An event is supported when split, discordant or breakpoint-clipped reads lie within `--cluster-distance` of one of its ends (a deletion's breakpoint regions flank the deleted interval); a region anywhere in its span is reported separately, since on a genome with a region every few kilobases that is what chance gives. [`examples/HG002_trio/sulovari2023_dnm_regions.tsv`](examples/HG002_trio/sulovari2023_dnm_regions.tsv) lists the Sulovari et al. 2023 candidates used by the GIAB (HG002) integration test |
+| `--dnm-negative-regions` | – | Events in the same format that should *not* be found: inherited variants, whose k-mers are in a parent. Evaluated like `--dnm-regions` and reported beside them as the false-positive control |
+| `--dnm-null` | 20 | With `--dnm-regions`, also evaluate this many random loci per event, of the same size on the same chromosome, and report how often chance alone supports them; 0 disables |
+| `--discard-proband-kmers` | – | Do not keep the proband-unique k-mer index (`[out-prefix].proband_unique.jf`, tens of MB for a genome); by default it is copied out of the temporary directory, since the k-mers recurring in unrelated probands of a cohort are errors and that set can only be built from these files |
 | `--sv-bedpe` | – | Output BEDPE file for linked SV breakpoint pairs (default: `[out-prefix].sv.bedpe`) |
 | `--report` | – | Output path for an interactive HTML report summarizing discovery results with Plotly visualizations. When omitted, no report is generated |
 
@@ -531,6 +535,8 @@ generate the file:
 | breakpoint_reads | Most molecules soft-clipped (by at least 20 bp) within 5 bp of one breakpoint; 0 unless at least two |
 | large_indel_reads | Molecules with a CIGAR insertion or deletion of at least 50 bp |
 | sv_type | Majority SV type among the region's molecules: `DEL`, `DUP` or `INV` from breakpoint orientation (see the BEDPE); `INS` or `DEL` from CIGAR indels; `INS` from split reads with more read than reference between their parts; `BND` for a link to another chromosome. With no votes, `INS` when at least two molecules are clipped from each side at one point, otherwise `.`; also `.` on a tie |
+| max_mapq | Highest mapping quality among the region's informative reads |
+| mapq0_reads | How many of them have mapping quality 0. Annotated, never filtered on: a proband-unique k-mer is novel sequence wherever its read landed, but a region made only of MAPQ-0 reads sits in multi-copy sequence, where a sequencing error's k-mer reaches the child-count floor by being seen across the copies |
 
 Evidence columns count molecules (read names), each at most once per
 region. A region is `SV` when at least two molecules show one kind of
@@ -608,7 +614,9 @@ Machine-readable pipeline statistics:
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
       "sv_type": ".",
-      "class": "AMBIGUOUS"
+      "class": "AMBIGUOUS",
+      "max_mapq": 60,
+      "mapq0_reads": 0
     }
   ]
 }
@@ -617,9 +625,16 @@ Machine-readable pipeline statistics:
 When `--candidate-summary` is used, a `candidate_comparison` object is
 included with capture rate and per-candidate details. When `--dnm-regions`
 is used, a `dnm_evaluation` object is included with the source file name,
-the matching slack (`slack_bp`, from `--cluster-distance`), the detection
-rate, and per-event evidence from the regions that overlap each event or lie
-within the slack of it.
+the slack (`slack_bp`, from `--cluster-distance`), the headline counts
+(`total_loci`; `detected` and `detection_rate` for events supported by split,
+discordant or breakpoint-clipped reads within the slack of one of their ends;
+`both_ends`; `any_region` and `any_region_rate` for events with a region
+anywhere in their span) and, per event, the evidence at each end
+(`breakpoints`), the regions in the span and an `assessment`:
+`SUPPORTED_BOTH_ENDS`, `SUPPORTED`, `REGION_ONLY` or `NOT_DETECTED`. With
+`--dnm-null` (default 20 per event) a `null` object gives the same counts for
+random loci of the same sizes, and with `--dnm-negative-regions` a
+`negatives` object gives them for the inherited controls.
 
 #### Summary text (`{prefix}.summary.txt`)
 

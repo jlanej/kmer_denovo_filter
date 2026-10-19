@@ -9,9 +9,9 @@ child and homozygous reference in both parents, and writes them in the
 
     chrom  pos  size  event_type
 
-so a discovery run on the trio reports, per SV, whether it found reads at
-the locus.  A second, wider table keeps the call set's own evidence for
-review.
+so a discovery run on the trio reports, per SV, whether it found breakpoint
+reads at the locus.  A second, wider table keeps the call set's own evidence
+for review.
 
 A child-only genotype in a population call set is more often a parent
 genotyped wrongly than a de novo SV, so by default a call must be PASS,
@@ -19,7 +19,18 @@ have a population allele frequency of at most ``--max-af`` and genotype
 qualities of at least ``--min-gq`` in all three members.  The counts before
 and after these filters are printed, and both are worth reading: a locus
 discovery supports despite failing them is as interesting as one it does
-not support despite passing.
+not support despite passing.  Even then most of the list is inherited: a
+true de novo SV is the exception, and discovery supporting a child-only
+call says the junction's k-mers are absent from both parents' reads, which
+a parental genotyping miss does not give.
+
+With ``--out-inherited``, the SVs the child clearly inherited (one parent
+carries the allele, the other is homozygous reference, all three PASS with
+GQ at least ``--min-gq``, any allele frequency) are written in the same
+format as negative controls (``--dnm-negative-regions``): their k-mers are
+in a parent, so discovery should not support them, and the share it does
+support is the false-positive rate of the evaluation.  At most
+``--max-inherited`` of them, drawn with a fixed seed.
 
 Sizes: deletions, duplications, inversions and complex SVs get their
 reference span (|SVLEN|, else END - POS); insertions and breakends get
@@ -33,11 +44,15 @@ reads that smaller file.
 """
 
 import argparse
+import random
 import sys
 
 import pysam
 
 DEFAULT_TYPES = "DEL,DUP,INS,INV,BND,CTX,CPX"
+#: The seed of the --max-inherited draw: the same call set gives the same
+#: controls.
+INHERITED_SEED = 1
 REGIONS_HEADER = ("chrom", "pos", "size", "event_type")
 DETAIL_HEADER = ("ID", "CHROM", "POS", "END", "SVTYPE", "ALT", "SVLEN", "AF",
                  "FILTER", "CHILD_GT", "CHILD_GQ", "FATHER_GT", "FATHER_GQ",
@@ -96,11 +111,15 @@ def event_size(record, svtype):
 
 def child_only_svs(vcf_path, child, father, mother, sv_types, pass_only=True,
                    max_af=None, min_gq=0, include_cnv=False):
-    """Yield (record, child_only, passes_filters) for every SV record.
+    """Yield (record, category, passes_filters) for every SV record.
 
-    *child_only* is True when the child carries an alternate allele and both
-    parents are homozygous reference; *passes_filters* applies the quality
-    filters on top of that.
+    *category* is ``"child_only"`` when the child carries an alternate
+    allele and both parents are homozygous reference, ``"inherited"`` when
+    the child and exactly one parent carry one and the other parent is
+    homozygous reference, and ``None`` otherwise.  *passes_filters* applies
+    the quality filters on top: the call set's PASS, the allele frequency
+    cap and the GQ floor for a child-only call; PASS and the GQ floor for
+    an inherited one (its frequency does not matter: it is a control).
     """
     with pysam.VariantFile(vcf_path) as vcf:
         missing = [s for s in (child, father, mother)
@@ -117,18 +136,22 @@ def child_only_svs(vcf_path, child, father, mother, sv_types, pass_only=True,
             if sv_types and svtype not in sv_types:
                 continue
             c, f, m = (_gt(record.samples[s]) for s in (child, father, mother))
-            is_child_only = (
-                c is not None and f is not None and m is not None
-                and any(a > 0 for a in c)
-                and all(a == 0 for a in f) and all(a == 0 for a in m))
-            if not is_child_only:
-                yield record, False, False
+            if c is None or f is None or m is None or not any(a > 0 for a in c):
+                yield record, None, False
+                continue
+            f_alt, m_alt = any(a > 0 for a in f), any(a > 0 for a in m)
+            if not f_alt and not m_alt:
+                category = "child_only"
+            elif f_alt != m_alt:
+                category = "inherited"
+            else:
+                yield record, None, False
                 continue
             ok = True
             if pass_only:
                 filters = list(record.filter.keys())
                 ok = filters in ([], ["PASS"])
-            if ok and max_af is not None:
+            if ok and max_af is not None and category == "child_only":
                 af = record.info.get("AF")
                 if af is not None:
                     af = af if isinstance(af, tuple) else (af,)
@@ -136,13 +159,28 @@ def child_only_svs(vcf_path, child, father, mother, sv_types, pass_only=True,
             if ok and min_gq > 0 and "GQ" in record.format:
                 gqs = [_gq(record.samples[s]) for s in (child, father, mother)]
                 ok = all(g is not None and g >= min_gq for g in gqs)
-            yield record, True, ok
+            yield record, category, ok
+
+
+def _region_line(record, svtype):
+    size = event_size(record, svtype)
+    alt = (record.alts[0] if record.alts else ".")
+    label = alt.strip("<>") if alt.startswith("<") else svtype
+    return "%s\t%d\t%s\t%s\n" % (
+        record.chrom, record.pos, "." if size is None else size, label)
 
 
 def write_outputs(records, out_regions, out_table, child, father, mother,
-                  params):
-    """Write the --dnm-regions file and the detail table; return the counts."""
-    n_scanned = n_child_only = n_pass = 0
+                  params, out_inherited=None, max_inherited=100):
+    """Write the --dnm-regions file and the detail table; return the counts.
+
+    With *out_inherited*, the inherited SVs passing the filters are written
+    there as negative controls, at most *max_inherited* of them drawn with
+    INHERITED_SEED.  Returns (scanned, child-only, child-only passing,
+    inherited passing, inherited written).
+    """
+    n_scanned = n_child_only = n_pass = n_inherited = 0
+    inherited_lines = []
     with open(out_regions, "w") as regions, \
             (open(out_table, "w") if out_table else _null()) as table:
         regions.write(
@@ -152,9 +190,15 @@ def write_outputs(records, out_regions, out_table, child, father, mother,
         regions.write("# columns: " + "\t".join(REGIONS_HEADER) + "\n")
         if table:
             table.write("\t".join(DETAIL_HEADER) + "\n")
-        for record, is_child_only, ok in records:
+        for record, category, ok in records:
             n_scanned += 1
-            if not is_child_only:
+            if category == "inherited":
+                if ok:
+                    n_inherited += 1
+                    inherited_lines.append(
+                        _region_line(record, record.info["SVTYPE"]))
+                continue
+            if category != "child_only":
                 continue
             n_child_only += 1
             svtype = record.info["SVTYPE"]
@@ -179,10 +223,26 @@ def write_outputs(records, out_regions, out_table, child, father, mother,
             if not ok:
                 continue
             n_pass += 1
-            size = event_size(record, svtype)
-            regions.write("%s\t%d\t%s\t%s\n" % (
-                record.chrom, record.pos, "." if size is None else size, label))
-    return n_scanned, n_child_only, n_pass
+            regions.write(_region_line(record, svtype))
+    n_written = 0
+    if out_inherited is not None:
+        if len(inherited_lines) > max_inherited:
+            inherited_lines = random.Random(INHERITED_SEED).sample(
+                inherited_lines, max_inherited)
+            inherited_lines.sort(
+                key=lambda l: (l.split("\t")[0], int(l.split("\t")[1])))
+        with open(out_inherited, "w") as negatives:
+            negatives.write(
+                "# inherited SVs for %s (father %s, mother %s) from %s: "
+                "negative controls, carried by one parent\n"
+                % (child, father, mother, params["vcf"]))
+            negatives.write(
+                "# filters: %s; at most %d, seed %d\n"
+                % (params["filters"], max_inherited, INHERITED_SEED))
+            negatives.write("# columns: " + "\t".join(REGIONS_HEADER) + "\n")
+            negatives.writelines(inherited_lines)
+        n_written = len(inherited_lines)
+    return n_scanned, n_child_only, n_pass, n_inherited, n_written
 
 
 class _null:
@@ -220,6 +280,12 @@ def main(argv=None):
                              "(default: %(default)s)")
     parser.add_argument("--no-pass-only", action="store_true",
                         help="keep calls that failed the call set's filters")
+    parser.add_argument("--out-inherited", default=None,
+                        help="also write the SVs the child inherited from "
+                             "one parent, as --dnm-negative-regions controls")
+    parser.add_argument("--max-inherited", type=int, default=100,
+                        help="at most this many inherited controls, drawn "
+                             "with a fixed seed (default: %(default)s)")
     args = parser.parse_args(argv)
 
     sv_types = {t.strip() for t in args.sv_types.split(",") if t.strip()}
@@ -234,13 +300,18 @@ def main(argv=None):
             min_gq=args.min_gq, include_cnv=args.include_cnv)
         counts = write_outputs(
             records, args.out_regions, args.out_table, args.child,
-            args.father, args.mother, {"vcf": args.vcf, "filters": filters})
+            args.father, args.mother, {"vcf": args.vcf, "filters": filters},
+            out_inherited=args.out_inherited, max_inherited=args.max_inherited)
     except (ValueError, OSError) as exc:
         raise SystemExit(f"error: {exc}")
-    n_scanned, n_child_only, n_pass = counts
+    n_scanned, n_child_only, n_pass, n_inherited, n_written = counts
     print(f"{args.child}: {n_scanned} SV records scanned, {n_child_only} "
           f"child-only, {n_pass} after filters ({filters}) -> "
           f"{args.out_regions}", file=sys.stderr)
+    if args.out_inherited:
+        print(f"{args.child}: {n_inherited} inherited SVs pass the filters, "
+              f"{n_written} written as negative controls -> "
+              f"{args.out_inherited}", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -27,7 +27,9 @@
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
       "sv_type": ".",
-      "class": "SMALL"
+      "class": "SMALL",
+      "max_mapq": 59,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr10",
@@ -43,7 +45,9 @@
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
       "sv_type": ".",
-      "class": "SMALL"
+      "class": "SMALL",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr10",
@@ -59,7 +63,9 @@
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
       "sv_type": ".",
-      "class": "SMALL"
+      "class": "SMALL",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr11",
@@ -75,7 +81,9 @@
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
       "sv_type": ".",
-      "class": "SMALL"
+      "class": "SMALL",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr11",
@@ -91,7 +99,9 @@
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
       "sv_type": ".",
-      "class": "SMALL"
+      "class": "SMALL",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr11",
@@ -107,7 +117,9 @@
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
       "sv_type": ".",
-      "class": "SMALL"
+      "class": "SMALL",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr11",
@@ -123,7 +135,9 @@
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
       "sv_type": ".",
-      "class": "SMALL"
+      "class": "SMALL",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr12",
@@ -139,7 +153,9 @@
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
       "sv_type": ".",
-      "class": "SMALL"
+      "class": "SMALL",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr17",
@@ -155,7 +171,9 @@
       "breakpoint_reads": 6,
       "large_indel_reads": 3,
       "sv_type": "DEL",
-      "class": "SV"
+      "class": "SV",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr18",
@@ -171,7 +189,9 @@
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
       "sv_type": ".",
-      "class": "SMALL"
+      "class": "SMALL",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr18",
@@ -187,7 +207,9 @@
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
       "sv_type": ".",
-      "class": "SMALL"
+      "class": "SMALL",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr19",
@@ -203,7 +225,9 @@
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
       "sv_type": ".",
-      "class": "AMBIGUOUS"
+      "class": "AMBIGUOUS",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr22",
@@ -219,7 +243,9 @@
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
       "sv_type": ".",
-      "class": "SMALL"
+      "class": "SMALL",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr5",
@@ -235,7 +261,9 @@
       "breakpoint_reads": 3,
       "large_indel_reads": 0,
       "sv_type": "INS",
-      "class": "SV"
+      "class": "SV",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr7",
@@ -251,7 +279,9 @@
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
       "sv_type": "DEL",
-      "class": "SV"
+      "class": "SV",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr7",
@@ -267,7 +297,9 @@
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
       "sv_type": ".",
-      "class": "AMBIGUOUS"
+      "class": "AMBIGUOUS",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr7",
@@ -283,7 +315,9 @@
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
       "sv_type": ".",
-      "class": "AMBIGUOUS"
+      "class": "AMBIGUOUS",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr7",
@@ -299,7 +333,9 @@
       "breakpoint_reads": 7,
       "large_indel_reads": 0,
       "sv_type": "DEL",
-      "class": "SV"
+      "class": "SV",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr8",
@@ -315,7 +351,9 @@
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
       "sv_type": ".",
-      "class": "SMALL"
+      "class": "SMALL",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr8",
@@ -331,7 +369,9 @@
       "breakpoint_reads": 0,
       "large_indel_reads": 0,
       "sv_type": ".",
-      "class": "SMALL"
+      "class": "SMALL",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     },
     {
       "chrom": "chr8",
@@ -347,7 +387,9 @@
       "breakpoint_reads": 5,
       "large_indel_reads": 0,
       "sv_type": "INS",
-      "class": "SV"
+      "class": "SV",
+      "max_mapq": 70,
+      "mapq0_reads": 0
     }
   ],
   "candidate_comparison": {
@@ -382,13 +424,35 @@
     "source": "sulovari2023_dnm_regions.tsv",
     "slack_bp": 500,
     "total_loci": 7,
-    "detected": 5,
-    "detection_rate": 0.7142857142857143,
+    "detected": 4,
+    "detection_rate": 0.5714285714285714,
+    "both_ends": 3,
+    "any_region": 5,
+    "any_region_rate": 0.7142857142857143,
     "loci": [
       {
         "locus": "chr17:53340465",
         "event_type": "deletion",
         "event_size": 107,
+        "any_region": true,
+        "ends": 2,
+        "breakpoint_support": 2,
+        "breakpoints": {
+          "start": {
+            "regions": 1,
+            "split_reads": 0,
+            "discordant_pairs": 0,
+            "breakpoint_reads": 6,
+            "supported": true
+          },
+          "end": {
+            "regions": 1,
+            "split_reads": 0,
+            "discordant_pairs": 0,
+            "breakpoint_reads": 6,
+            "supported": true
+          }
+        },
         "detected": true,
         "discovery_regions": [
           "chr17:53340222-53341164"
@@ -401,12 +465,24 @@
         "split_reads": 0,
         "sv_class": "SV",
         "kmer_signal": 0.0414,
-        "assessment": "DETECTED"
+        "assessment": "SUPPORTED_BOTH_ENDS"
       },
       {
         "locus": "chr14:23280711",
         "event_type": "microsatellite_expansion",
         "event_size": null,
+        "any_region": false,
+        "ends": 1,
+        "breakpoint_support": 0,
+        "breakpoints": {
+          "start": {
+            "regions": 0,
+            "split_reads": 0,
+            "discordant_pairs": 0,
+            "breakpoint_reads": 0,
+            "supported": false
+          }
+        },
         "detected": false,
         "discovery_regions": [],
         "total_reads": 0,
@@ -423,6 +499,25 @@
         "locus": "chr3:85552367",
         "event_type": "sv_like",
         "event_size": 64,
+        "any_region": false,
+        "ends": 2,
+        "breakpoint_support": 0,
+        "breakpoints": {
+          "start": {
+            "regions": 0,
+            "split_reads": 0,
+            "discordant_pairs": 0,
+            "breakpoint_reads": 0,
+            "supported": false
+          },
+          "end": {
+            "regions": 0,
+            "split_reads": 0,
+            "discordant_pairs": 0,
+            "breakpoint_reads": 0,
+            "supported": false
+          }
+        },
         "detected": false,
         "discovery_regions": [],
         "total_reads": 0,
@@ -439,6 +534,25 @@
         "locus": "chr5:97089276",
         "event_type": "sv_like",
         "event_size": 43,
+        "any_region": true,
+        "ends": 2,
+        "breakpoint_support": 2,
+        "breakpoints": {
+          "start": {
+            "regions": 1,
+            "split_reads": 0,
+            "discordant_pairs": 0,
+            "breakpoint_reads": 3,
+            "supported": true
+          },
+          "end": {
+            "regions": 1,
+            "split_reads": 0,
+            "discordant_pairs": 0,
+            "breakpoint_reads": 3,
+            "supported": true
+          }
+        },
         "detected": true,
         "discovery_regions": [
           "chr5:97089091-97089510"
@@ -451,12 +565,31 @@
         "split_reads": 0,
         "sv_class": "SV",
         "kmer_signal": 0.0714,
-        "assessment": "DETECTED"
+        "assessment": "SUPPORTED_BOTH_ENDS"
       },
       {
         "locus": "chr8:125785998",
         "event_type": "sv_like",
         "event_size": 43,
+        "any_region": true,
+        "ends": 2,
+        "breakpoint_support": 2,
+        "breakpoints": {
+          "start": {
+            "regions": 1,
+            "split_reads": 0,
+            "discordant_pairs": 0,
+            "breakpoint_reads": 5,
+            "supported": true
+          },
+          "end": {
+            "regions": 1,
+            "split_reads": 0,
+            "discordant_pairs": 0,
+            "breakpoint_reads": 5,
+            "supported": true
+          }
+        },
         "detected": true,
         "discovery_regions": [
           "chr8:125785801-125786483"
@@ -469,13 +602,32 @@
         "split_reads": 0,
         "sv_class": "SV",
         "kmer_signal": 0.0776,
-        "assessment": "DETECTED"
+        "assessment": "SUPPORTED_BOTH_ENDS"
       },
       {
         "locus": "chr18:62805217",
         "event_type": "sv_like",
         "event_size": 34,
-        "detected": true,
+        "any_region": true,
+        "ends": 2,
+        "breakpoint_support": 0,
+        "breakpoints": {
+          "start": {
+            "regions": 1,
+            "split_reads": 0,
+            "discordant_pairs": 0,
+            "breakpoint_reads": 0,
+            "supported": false
+          },
+          "end": {
+            "regions": 1,
+            "split_reads": 0,
+            "discordant_pairs": 0,
+            "breakpoint_reads": 0,
+            "supported": false
+          }
+        },
+        "detected": false,
         "discovery_regions": [
           "chr18:62804895-62805439"
         ],
@@ -487,12 +639,31 @@
         "split_reads": 0,
         "sv_class": "SMALL",
         "kmer_signal": 0.0716,
-        "assessment": "DETECTED"
+        "assessment": "REGION_ONLY"
       },
       {
         "locus": "chr7:142786222",
         "event_type": "deletion",
         "event_size": 10607,
+        "any_region": true,
+        "ends": 2,
+        "breakpoint_support": 1,
+        "breakpoints": {
+          "start": {
+            "regions": 1,
+            "split_reads": 0,
+            "discordant_pairs": 0,
+            "breakpoint_reads": 0,
+            "supported": false
+          },
+          "end": {
+            "regions": 1,
+            "split_reads": 0,
+            "discordant_pairs": 2,
+            "breakpoint_reads": 7,
+            "supported": true
+          }
+        },
         "detected": true,
         "discovery_regions": [
           "chr7:142785588-142786223",
@@ -508,8 +679,18 @@
         "split_reads": 0,
         "sv_class": "SV",
         "kmer_signal": 0.0161,
-        "assessment": "DETECTED"
+        "assessment": "SUPPORTED"
       }
-    ]
+    ],
+    "null": {
+      "loci_per_event": 20,
+      "seed": 1,
+      "total_loci": 140,
+      "detected": 0,
+      "detection_rate": 0.0,
+      "both_ends": 0,
+      "any_region": 0,
+      "any_region_rate": 0.0
+    }
   }
 }

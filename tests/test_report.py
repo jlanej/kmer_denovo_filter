@@ -141,7 +141,7 @@ class TestGenerateReport:
                 html = fh.read()
             assert "Discovery mode" in html
             assert "Candidate Regions" in html
-            assert "Curated DNM" in html
+            assert "Known Event Evaluation" in html
             assert "sulovari2023_dnm_regions.tsv" in html
         finally:
             os.unlink(out)
@@ -202,7 +202,7 @@ class TestGenerateReport:
             assert "Parental K-mer Count" in html
             assert "Discovery Mode" in html
             assert "Discovery vs. VCF Mode Concordance" in html
-            assert "Curated DNM Region Evaluation" in html
+            assert "Known Event Evaluation" in html
             assert "Per-Variant Detail Table" in html
             assert "Method Overview" in html
         finally:

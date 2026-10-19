@@ -2656,57 +2656,78 @@ _HTML_TEMPLATE = """\
 <!-- ═══════════════════════════════════════════════════════════════════
      Section 12: Curated DNM Evaluation
      ═══════════════════════════════════════════════════════════════════ -->
-{% if dnm_evaluation and dnm_evaluation.get("loci") %}
-<h2>12. Curated DNM Region Evaluation</h2>
+{% if dnm_evaluation and (dnm_evaluation.get("loci") or dnm_evaluation.get("negatives")) %}
+<h2>12. Known Event Evaluation</h2>
 <p class="description">
-  Evaluation of discovery regions against known de novo events
+  Evaluation of discovery regions against known events
   {%- if dnm_evaluation.get("source") %} listed in
   <code>{{ dnm_evaluation.get("source")|e }}</code>{% endif %} (supplied with
-  <code>--dnm-regions</code>).  An event counts as detected when at least
-  one discovery region overlaps it
-  {%- if dnm_evaluation.get("slack_bp") %} or lies within
-  {{ dnm_evaluation.get("slack_bp") }} bp of it (<code>--cluster-distance</code>),
-  as a deletion's breakpoint regions flank the deleted interval{% endif %}.
+  <code>--dnm-regions</code>).  An event is supported when split reads,
+  discordant pairs or breakpoint-clipped reads lie within
+  {{ dnm_evaluation.get("slack_bp", 0) }} bp (<code>--cluster-distance</code>)
+  of one of its ends; a region anywhere in its span is reported separately,
+  because on a genome with a region every few kilobases that is what chance
+  gives, and the random loci measure how much.
 </p>
 
 <div class="metric-cards">
   <div class="metric-card">
     <span class="value">{{ dnm_evaluation.get("total_loci", 0) }}</span>
-    <span class="label">Curated Loci</span>
+    <span class="label">Known Events</span>
   </div>
   <div class="metric-card green">
     <span class="value">{{ dnm_evaluation.get("detected", 0) }} / {{ dnm_evaluation.get("total_loci", 0) }}</span>
-    <span class="label">Detected</span>
+    <span class="label">Supported at a Breakpoint</span>
   </div>
-  <div class="metric-card {% if dnm_evaluation.get("detection_rate", 0) >= 0.7 %}green{% else %}orange{% endif %}">
-    <span class="value">{{ "%.1f"|format(100 * dnm_evaluation.get("detection_rate", 0)) }}%</span>
-    <span class="label">Detection Rate</span>
+  <div class="metric-card">
+    <span class="value">{{ dnm_evaluation.get("any_region", 0) }} / {{ dnm_evaluation.get("total_loci", 0) }}</span>
+    <span class="label">A Region in the Span</span>
   </div>
+  {% if dnm_evaluation.get("null") %}
+  <div class="metric-card orange">
+    <span class="value">{{ "%.1f"|format(100 * dnm_evaluation["null"].get("detection_rate", 0)) }}%</span>
+    <span class="label">Random Loci Supported ({{ dnm_evaluation["null"].get("loci_per_event", 0) }} per event)</span>
+  </div>
+  {% endif %}
+  {% if dnm_evaluation.get("negatives") %}
+  <div class="metric-card {% if dnm_evaluation["negatives"].get("detected", 0) == 0 %}green{% else %}orange{% endif %}">
+    <span class="value">{{ dnm_evaluation["negatives"].get("detected", 0) }} / {{ dnm_evaluation["negatives"].get("total_loci", 0) }}</span>
+    <span class="label">Negative Controls Supported</span>
+  </div>
+  {% endif %}
 </div>
 
+{% for title, loci in (("Known events", dnm_evaluation.get("loci", [])), ("Negative controls (inherited: support is a false positive)", (dnm_evaluation.get("negatives") or {}).get("loci", []))) %}
+{% if loci %}
+<h3>{{ title }}</h3>
 <table>
   <thead>
     <tr>
-      <th>Locus</th><th>Event</th><th>Size</th><th>Reads</th>
-      <th>K-mers</th><th>Signal</th><th>Class</th><th>Status</th>
+      <th>Locus</th><th>Event</th><th>Size</th><th>Ends supported</th>
+      <th>Reads</th><th>Split</th><th>Discordant</th><th>Clipped</th>
+      <th>Class</th><th>Status</th>
     </tr>
   </thead>
   <tbody>
-    {% for locus in dnm_evaluation.get("loci", []) %}
+    {% for locus in loci %}
     <tr>
       <td>{{ locus.locus|e }}</td>
       <td>{{ locus.event_type|e }}</td>
       <td>{{ (locus.event_size|string ~ "bp") if locus.event_size else "—" }}</td>
+      <td>{{ locus.breakpoint_support }} / {{ locus.ends }}</td>
       <td>{{ locus.total_reads }}</td>
-      <td>{{ locus.total_unique_kmers }}</td>
-      <td>{{ "%.4f"|format(locus.kmer_signal) }}</td>
+      <td>{{ locus.breakpoints.values()|map(attribute="split_reads")|sum }}</td>
+      <td>{{ locus.breakpoints.values()|map(attribute="discordant_pairs")|sum }}</td>
+      <td>{{ locus.breakpoints.values()|map(attribute="breakpoint_reads")|sum }}</td>
       <td>{{ locus.sv_class }}</td>
-      <td><span class="badge {% if locus.detected %}badge-green{% else %}badge-red{% endif %}">
+      <td><span class="badge {% if locus.detected %}badge-green{% elif locus.any_region %}badge-orange{% else %}badge-red{% endif %}">
         {{ locus.assessment }}</span></td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
+{% endif %}
+{% endfor %}
 {% endif %}
 
 <!-- ═══════════════════════════════════════════════════════════════════

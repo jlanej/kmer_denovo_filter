@@ -202,10 +202,31 @@ def parse_discovery_args(argv=None):
         help="Known de novo events to check the discovered regions "
              "against: a tab-separated file with columns chrom, 1-based "
              "pos, size in bp ('.' if unknown) and event type. Adds a "
-             "per-event detection table to the metrics JSON, summary and "
-             "report; regions within --cluster-distance of an event count "
-             "toward it. See "
+             "per-event table to the metrics JSON, summary and report: an "
+             "event is supported when split, discordant or "
+             "breakpoint-clipped reads lie within --cluster-distance of "
+             "one of its ends; regions anywhere in its span are reported "
+             "separately. See "
              "examples/HG002_trio/sulovari2023_dnm_regions.tsv.",
+    )
+    parser.add_argument(
+        "--dnm-negative-regions", default=None, metavar="TSV",
+        help="Events in the same format that should NOT be found - "
+             "inherited variants, whose k-mers are in a parent. Evaluated "
+             "like --dnm-regions and reported beside them as the "
+             "false-positive control.",
+    )
+    parser.add_argument(
+        "--dnm-null", type=int, default=20, metavar="N",
+        help="With --dnm-regions: also evaluate N random loci per event, "
+             "of the same size on the same chromosome, and report how often "
+             "chance alone supports them (default: 20; 0 disables)",
+    )
+    parser.add_argument(
+        "--discard-proband-kmers", action="store_true",
+        help="Do not keep the proband-unique k-mer index "
+             "([out-prefix].proband_unique.jf); by default it is copied "
+             "out of the temporary directory for later use",
     )
     parser.add_argument(
         "--cluster-distance", type=int, default=500,
@@ -331,9 +352,30 @@ def parse_args(argv=None):
         help="Known de novo events to check the discovered regions "
              "against in discovery mode: a tab-separated file with columns "
              "chrom, 1-based pos, size in bp ('.' if unknown) and event "
-             "type. Adds a per-event detection table to the metrics JSON, "
-             "summary and report; regions within --cluster-distance of an "
-             "event count toward it.",
+             "type. Adds a per-event table to the metrics JSON, summary and "
+             "report: an event is supported when split, discordant or "
+             "breakpoint-clipped reads lie within --cluster-distance of one "
+             "of its ends; regions anywhere in its span are reported "
+             "separately.",
+    )
+    parser.add_argument(
+        "--dnm-negative-regions", default=None, metavar="TSV",
+        help="Events in the same format that should NOT be found - "
+             "inherited variants, whose k-mers are in a parent. Evaluated "
+             "like --dnm-regions and reported beside them as the "
+             "false-positive control.",
+    )
+    parser.add_argument(
+        "--dnm-null", type=int, default=20, metavar="N",
+        help="With --dnm-regions: also evaluate N random loci per event, "
+             "of the same size on the same chromosome, and report how often "
+             "chance alone supports them (default: 20; 0 disables)",
+    )
+    parser.add_argument(
+        "--discard-proband-kmers", action="store_true",
+        help="Do not keep the proband-unique k-mer index "
+             "([out-prefix].proband_unique.jf); by default it is copied "
+             "out of the temporary directory for later use",
     )
     parser.add_argument(
         "--cluster-distance", type=int, default=500,
