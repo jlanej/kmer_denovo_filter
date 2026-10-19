@@ -34,6 +34,11 @@ logger = logging.getLogger(__name__)
 
 _COMP = str.maketrans("ACGTacgt", "TGCAtgca")
 
+#: ``jellyfish query`` attempts before a worker gives up, and the pauses
+#: between them (seconds).
+_JF_QUERY_ATTEMPTS = 3
+_JF_QUERY_BACKOFF_S = (1.0, 5.0)
+
 def reverse_complement(seq):
     """Return the reverse complement of a DNA sequence."""
     return seq.translate(_COMP)[::-1]
@@ -176,18 +181,33 @@ class JellyfishKmerQuery:
         fasta_block = "".join(
             f">{i}\n{kmer}\n" for i, kmer in enumerate(kmers)
         )
-        proc = subprocess.Popen(
-            ["jellyfish", "query", self.jf_path, "-s", "/dev/stdin"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        stdout, stderr = proc.communicate(fasta_block.encode())
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"jellyfish query on {self.jf_path} failed with exit code "
-                f"{proc.returncode}: {stderr.decode(errors='replace').strip()}"
+        # A query that fails is retried a few times before it fails the
+        # worker: on a network filesystem the memory-mapped index can
+        # momentarily be unreadable ("Failed to parse header"), and a
+        # worker that dies there takes hours of scanning with it.
+        for attempt in range(1, _JF_QUERY_ATTEMPTS + 1):
+            proc = subprocess.Popen(
+                ["jellyfish", "query", self.jf_path, "-s", "/dev/stdin"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
             )
+            stdout, stderr = proc.communicate(fasta_block.encode())
+            if proc.returncode == 0:
+                break
+            message = stderr.decode(errors="replace").strip()
+            if attempt == _JF_QUERY_ATTEMPTS:
+                raise RuntimeError(
+                    f"jellyfish query on {self.jf_path} failed with exit "
+                    f"code {proc.returncode} ({attempt} attempts): {message}"
+                )
+            logger.warning(
+                "jellyfish query on %s failed (attempt %d of %d, exit code "
+                "%d): %s; retrying in %.1f s",
+                self.jf_path, attempt, _JF_QUERY_ATTEMPTS, proc.returncode,
+                message, _JF_QUERY_BACKOFF_S[attempt - 1],
+            )
+            time.sleep(_JF_QUERY_BACKOFF_S[attempt - 1])
 
         hits = set()
         for line in stdout.decode().split("\n"):

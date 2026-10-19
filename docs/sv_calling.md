@@ -545,6 +545,12 @@ python scripts/sv_benchmark.py score --outdir bench --prefix bench/disc
   `bedtools pairtopair`. The BEDPE's first ten columns follow the standard
   layout, and each line is one junction.
 * **Check known events.** `--dnm-regions` reports, for each listed event,
-  the regions that overlap it or lie within `--cluster-distance` of it. A
-  deletion's two breakpoint regions both count, although they flank the
-  deleted interval rather than overlap it.
+  whether split, discordant or breakpoint-clipped reads lie within
+  `--cluster-distance` of its ends (a deletion's breakpoint regions flank
+  the deleted interval), and separately whether any region lies in its
+  span. Only the first is support: on a genome with a region every few
+  kilobases, a span of some kilobases holds one by chance, and `--dnm-null`
+  measures that chance with random loci of the same sizes. Events that
+  should *not* be found, such as the variants a child inherited from one
+  parent, go in through `--dnm-negative-regions` and give the
+  false-positive rate.

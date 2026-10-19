@@ -338,6 +338,15 @@ def _validate_inputs(args):
                 f"Known de novo events (--dnm-regions): file not found: "
                 f"{dnm_regions}"
             )
+        negatives = getattr(args, 'dnm_negative_regions', None)
+        if negatives is not None and not os.path.isfile(negatives):
+            errors.append(
+                f"Negative-control events (--dnm-negative-regions): file "
+                f"not found: {negatives}"
+            )
+        dnm_null = getattr(args, 'dnm_null', 0)
+        if dnm_null is not None and dnm_null < 0:
+            errors.append(f"--dnm-null must be >= 0, got {dnm_null}")
         min_child_count = getattr(args, 'min_child_count', 3)
         if min_child_count < 1:
             errors.append(

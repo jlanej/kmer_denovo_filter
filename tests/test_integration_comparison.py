@@ -238,15 +238,23 @@ class TestEvaluateDNMRegions:
             regions, metrics["regions"], DNM_REGIONS,
         )
         assert len(results) == 7
-        detected = [r for r in results if r["detected"]]
-        assert len(detected) == 5
-        for r in detected:
-            assert r["assessment"] == "DETECTED"
+        # With no slack, three events have split, discordant or clipped
+        # reads at both ends; five have a region somewhere in their span
+        supported = [r for r in results if r["detected"]]
+        assert len(supported) == 3
+        assert sum(r["any_region"] for r in results) == 5
+        for r in supported:
+            assert r["assessment"] == "SUPPORTED_BOTH_ENDS"
+            assert r["breakpoint_support"] == r["ends"] == 2
             assert r["total_reads"] > 0
             assert r["total_unique_kmers"] > 0
+        by_locus = {r["locus"]: r for r in results}
+        assert by_locus["chr18:62805217"]["assessment"] == "REGION_ONLY"
+        assert by_locus["chr14:23280711"]["assessment"] == "NOT_DETECTED"
 
     def test_region_overlap_point_event(self):
-        """A point-event DNM inside a region should be detected."""
+        """A point-event DNM inside a region: a region in the span, but
+        no breakpoint evidence, so REGION_ONLY rather than supported."""
         dnm = [("chr1", 100, None, "sv_like")]
         regions = [("chr1", 50, 200)]
         detail = [{"chrom": "chr1", "start": 50, "end": 200, "size": 150,
@@ -254,8 +262,17 @@ class TestEvaluateDNMRegions:
                     "discordant_pairs": 0, "max_clip_len": 20,
                     "unmapped_mates": 0, "class": "SMALL"}]
         results = _evaluate_dnm_regions(regions, detail, dnm_regions=dnm)
-        assert results[0]["detected"] is True
+        assert results[0]["any_region"] is True
+        assert results[0]["detected"] is False
+        assert results[0]["assessment"] == "REGION_ONLY"
+        assert results[0]["ends"] == 1
         assert results[0]["kmer_signal"] > 0
+        # The same region with breakpoint reads supports the single end
+        detail[0]["split_reads"] = 2
+        results = _evaluate_dnm_regions(regions, detail, dnm_regions=dnm)
+        assert results[0]["detected"] is True
+        assert results[0]["assessment"] == "SUPPORTED"
+        assert results[0]["breakpoints"]["start"]["split_reads"] == 2
 
     def test_no_overlap(self):
         """A DNM with no overlapping discovery region → NOT_DETECTED."""
@@ -267,6 +284,7 @@ class TestEvaluateDNMRegions:
                     "unmapped_mates": 0, "class": "SMALL"}]
         results = _evaluate_dnm_regions(regions, detail, dnm_regions=dnm)
         assert results[0]["detected"] is False
+        assert results[0]["any_region"] is False
         assert results[0]["assessment"] == "NOT_DETECTED"
         assert results[0]["kmer_signal"] == 0.0
 
@@ -280,6 +298,7 @@ class TestEvaluateDNMRegions:
                     "discordant_pairs": 0, "max_clip_len": 20,
                     "unmapped_mates": 0, "class": "SMALL"}]
         results = _evaluate_dnm_regions(regions, detail, dnm_regions=dnm)
+        assert results[0]["any_region"] is False
         assert results[0]["detected"] is False
 
     @pytest.mark.parametrize("slack, expected", [
@@ -291,20 +310,27 @@ class TestEvaluateDNMRegions:
         dnm = [("chr1", 101, 400, "deletion")]  # deletes 0-based [100, 500)
         regions = [("chr1", 0, 100), ("chr1", 500, 600)]
         detail = [{"chrom": c, "start": s, "end": e, "reads": 4,
-                   "unique_kmers": 20, "class": "SV"}
+                   "unique_kmers": 20, "split_reads": 2, "class": "SV"}
                   for c, s, e in regions]
         results = _evaluate_dnm_regions(regions, detail, dnm, slack=slack)
         assert results[0]["discovery_regions"] == expected
-        assert results[0]["detected"] is bool(expected)
+        assert results[0]["any_region"] is bool(expected)
+        # The flanks never overlap the deleted interval, but each touches a
+        # junction, so their split reads support both ends with any slack
+        assert results[0]["breakpoint_support"] == 2
+        assert results[0]["detected"] is True
+        assert results[0]["assessment"] == "SUPPORTED_BOTH_ENDS"
 
-    @pytest.mark.parametrize("gap, detected", [(499, True), (500, False)])
-    def test_slack_bounds_the_gap(self, gap, detected):
+    @pytest.mark.parametrize("gap, within", [(499, True), (500, False)])
+    def test_slack_bounds_the_gap(self, gap, within):
         dnm = [("chr1", 1001, None, "sv_like")]  # 0-based 1000
         regions = [("chr1", 1001 + gap, 1100 + gap)]
         detail = [{"chrom": "chr1", "start": 1001 + gap, "end": 1100 + gap,
-                   "reads": 4, "unique_kmers": 20, "class": "SV"}]
+                   "reads": 4, "unique_kmers": 20, "discordant_pairs": 1,
+                   "class": "SV"}]
         results = _evaluate_dnm_regions(regions, detail, dnm, slack=500)
-        assert results[0]["detected"] is detected
+        assert results[0]["any_region"] is within
+        assert results[0]["detected"] is within
 
     def test_last_base_of_region_overlaps(self):
         """1-based 200 is the last base of the half-open region [50, 200)."""
@@ -315,7 +341,7 @@ class TestEvaluateDNMRegions:
                     "discordant_pairs": 0, "max_clip_len": 20,
                     "unmapped_mates": 0, "class": "SMALL"}]
         results = _evaluate_dnm_regions(regions, detail, dnm_regions=dnm)
-        assert results[0]["detected"] is True
+        assert results[0]["any_region"] is True
         assert results[0]["locus"] == "chr1:200"
 
     def test_multi_region_overlap(self):
@@ -333,11 +359,15 @@ class TestEvaluateDNMRegions:
              "unmapped_mates": 1, "class": "AMBIGUOUS"},
         ]
         results = _evaluate_dnm_regions(regions, detail, dnm_regions=dnm)
-        assert results[0]["detected"] is True
         assert len(results[0]["discovery_regions"]) == 2
         assert results[0]["total_reads"] == 8
         assert results[0]["total_unique_kmers"] == 18
         assert results[0]["sv_class"] == "SV"
+        # The first region holds the start (a split read there); nothing
+        # sits at the end, so one end of two is supported
+        assert results[0]["breakpoint_support"] == 1
+        assert results[0]["detected"] is True
+        assert results[0]["assessment"] == "SUPPORTED"
 
     def test_sv_class_priority(self):
         """Most severe SV class should be reported."""
@@ -379,13 +409,20 @@ class TestEvaluateDNMRegions:
             regions, metrics["regions"], DNM_REGIONS,
         )
         expected_fields = {
-            "locus", "event_type", "event_size", "detected",
+            "locus", "event_type", "event_size", "detected", "any_region",
+            "ends", "breakpoint_support", "breakpoints",
             "discovery_regions", "total_reads", "total_unique_kmers",
             "max_clip_len", "unmapped_mates", "discordant_pairs",
             "split_reads", "sv_class", "kmer_signal", "assessment",
         }
         for r in results:
             assert set(r.keys()) == expected_fields
+            assert set(r["breakpoints"]) == (
+                {"start", "end"} if r["ends"] == 2 else {"start"})
+            for end in r["breakpoints"].values():
+                assert set(end) == {"regions", "split_reads",
+                                    "discordant_pairs", "breakpoint_reads",
+                                    "supported"}
 
     def test_chr7_large_deletion_multi_region(self):
         """chr7 TRB locus 10.6kb deletion should span multiple regions."""
@@ -412,10 +449,20 @@ class TestEvaluateDNMRegions:
         chr7_del = [r for r in results if r["locus"] == "chr7:142786222"]
         assert len(chr7_del) == 1
         result = chr7_del[0]
-        assert result["detected"] is True
+        assert result["any_region"] is True
         assert len(result["discovery_regions"]) >= 2
         assert result["sv_class"] in ("SV", "AMBIGUOUS")
         assert result["total_unique_kmers"] > 50
+        # Its right breakpoint region starts 1 bp past the interval: with
+        # no slack neither end is supported, with the pipeline's 500 bp
+        # the start is
+        assert result["assessment"] == "REGION_ONLY"
+        with_slack = _evaluate_dnm_regions(
+            regions, metrics["regions"], DNM_REGIONS, slack=500,
+        )
+        chr7_slack = [r for r in with_slack if r["locus"] == "chr7:142786222"][0]
+        assert chr7_slack["assessment"] == "SUPPORTED"
+        assert chr7_slack["breakpoint_support"] == 1
 
     def test_kmer_signal_per_locus(self):
         """Each detected locus should have positive k-mer signal density."""
@@ -510,8 +557,15 @@ class TestDNMRegionIntegration:
         assert "dnm_evaluation" in metrics
         dnm_eval = metrics["dnm_evaluation"]
         assert dnm_eval["total_loci"] == 7
-        assert dnm_eval["detected"] == 5
+        assert dnm_eval["detected"] == 4          # supported at a breakpoint
+        assert dnm_eval["both_ends"] == 3
+        assert dnm_eval["any_region"] == 5        # a region somewhere in the span
         assert len(dnm_eval["loci"]) == 7
+        # the null: 20 random loci per event, none supported on this
+        # 130-kb reference
+        assert dnm_eval["null"]["loci_per_event"] == 20
+        assert dnm_eval["null"]["total_loci"] == 140
+        assert dnm_eval["null"]["detected"] == 0
 
     def test_summary_contains_dnm_evaluation(
         self, generated_discovery_output,
@@ -520,10 +574,11 @@ class TestDNMRegionIntegration:
         with open(generated_discovery_output["summary"]) as fh:
             text = fh.read()
 
-        assert "Curated DNM Region Evaluation" in text
-        assert "(sulovari2023_dnm_regions.tsv)" in text
-        assert "Detected by discovery" in text
-        assert "5 / 7 (71.4%)" in text
+        assert "Known Event Evaluation (sulovari2023_dnm_regions.tsv)" in text
+        assert "Supported at a breakpoint:" in text
+        assert "4 / 7 (57.1%)" in text
+        assert "A region anywhere in the span:" in text
+        assert "Random loci of the same sizes:" in text
 
     def test_all_dnm_loci_detected(
         self, generated_discovery_output,

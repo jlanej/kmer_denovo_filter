@@ -56,20 +56,25 @@ Candidate Comparison (DKA_DKT > 0.25, DKA > 10)
   chr11:55003995 T>C                21    0.4565              chr11:55003557-55004234
   chr11:55008577 C>T                13    0.3824              chr11:55008334-55008814
 
-Curated DNM Region Evaluation (sulovari2023_dnm_regions.tsv)
+Known Event Evaluation (sulovari2023_dnm_regions.tsv)
 --------------------------------------------------------------------------------
-  Curated DNM loci:                   7
-  Detected by discovery:              5 / 7 (71.4%)
-  Regions counted within:           500 bp of an event
+  An end is supported by split, discordant or breakpoint-clipped reads within 500 bp of it;
+  a region anywhere in the span (within 500 bp) is reported, not counted: on a genome with a
+  region every few kb it is chance, which the random loci below measure.
+  Known events:                         7
+  Supported at a breakpoint:            4 / 7 (57.1%)
+  Supported at both ends:               3
+  A region anywhere in the span:        5 / 7
+  Random loci of the same sizes:      140 (20 per event): 0.0% supported at a breakpoint, 0.0% with a region in the span
 
-  Locus                                    Event     Size  Reads  Kmers  Signal  MaxClip      Class         Status
-  -----                                    -----     ----  -----  -----  ------  -------      -----         ------
-  chr17:53340465                        deletion    107bp     18     39  0.0414      108         SV       DETECTED
-  chr14:23280711        microsatellite_expansion        –      0      0  0.0000        0       NONE   NOT_DETECTED
-  chr3:85552367                          sv_like     64bp      0      0  0.0000        0       NONE   NOT_DETECTED
-  chr5:97089276                          sv_like     43bp     22     30  0.0714       50         SV       DETECTED
-  chr8:125785998                         sv_like     43bp     34     53  0.0776       54         SV       DETECTED
-  chr18:62805217                         sv_like     34bp      7     39  0.0716       27      SMALL       DETECTED
-  chr7:142786222                        deletion  10607bp     26    191  0.0161       98         SV       DETECTED
+  Locus                         Event     Size  Ends  Reads Split  Disc  Clip      Class               Status
+  -----                         -----     ----  ----  ----- -----  ----  ----      -----               ------
+  chr17:53340465             deletion    107bp   2/2     18     0     0    12         SV  SUPPORTED_BOTH_ENDS
+  chr14:23280711       microsatellite        –   0/1      0     0     0     0       NONE         NOT_DETECTED
+  chr3:85552367               sv_like     64bp   0/2      0     0     0     0       NONE         NOT_DETECTED
+  chr5:97089276               sv_like     43bp   2/2     22     0     0     6         SV  SUPPORTED_BOTH_ENDS
+  chr8:125785998              sv_like     43bp   2/2     34     0     0    10         SV  SUPPORTED_BOTH_ENDS
+  chr18:62805217              sv_like     34bp   0/2      7     0     0     0      SMALL          REGION_ONLY
+  chr7:142786222             deletion  10607bp   1/2     26     0     2     7         SV            SUPPORTED
 
 ============================================================

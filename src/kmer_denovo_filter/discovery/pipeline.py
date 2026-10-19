@@ -6,6 +6,7 @@ import concurrent.futures
 import json
 import logging
 import os
+import random
 import shutil
 import statistics
 import subprocess
@@ -61,6 +62,10 @@ from kmer_denovo_filter.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: How many times one contig's scan is attempted in Module 3 before the
+#: run fails (see :func:`_anchor_and_cluster`).
+_SCAN_TASK_ATTEMPTS = 3
 
 
 # ── Discovery-mode helpers ────────────────────────────────────────
@@ -879,6 +884,30 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
             _log_children_memory("during anchoring")
             last_progress_log = now
 
+    # A task that fails is run again, up to _SCAN_TASK_ATTEMPTS times in
+    # all, before the run gives up: on a network filesystem a worker can
+    # lose its memory-mapped index or a shard it is writing ("Stale file
+    # handle") for reasons that are gone a moment later, and the scan of
+    # a whole genome should not be lost to that.  A rerun starts the
+    # task's shard afresh and reports its hits in task order like any
+    # other, so the result is the same as an untroubled run.
+    attempts = collections.Counter()
+
+    def _retry_or_raise(index, exc):
+        attempts[index] += 1
+        if attempts[index] >= _SCAN_TASK_ATTEMPTS:
+            logger.error(
+                "Worker failed for contig=%s (%d attempts)",
+                tasks[index][2], attempts[index],
+            )
+            raise exc
+        logger.warning(
+            "Worker failed for contig=%s (attempt %d of %d): %s; running "
+            "the contig again",
+            tasks[index][2], attempts[index], _SCAN_TASK_ATTEMPTS,
+            str(exc).splitlines()[0] if str(exc) else type(exc).__name__,
+        )
+
     try:
         if n_workers > 1:
             with concurrent.futures.ProcessPoolExecutor(
@@ -920,15 +949,17 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                         continue
 
                     for future in done:
-                        index = futures[future]
+                        index = futures.pop(future)
                         try:
                             result = future.result()
-                        except Exception:
-                            logger.error(
-                                "Worker failed for contig=%s",
-                                tasks[index][2],
+                        except Exception as exc:
+                            _retry_or_raise(index, exc)
+                            retry = executor.submit(
+                                _scan_contig_for_hits, *tasks[index],
                             )
-                            raise
+                            futures[retry] = index
+                            pending.add(retry)
+                            continue
                         _merge_result(index, result)
                     _log_progress()
         else:
@@ -936,7 +967,14 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
             _init_scan_worker(*init_args)
             try:
                 for index, task in enumerate(tasks):
-                    _merge_result(index, _scan_contig_for_hits(*task))
+                    while True:
+                        try:
+                            result = _scan_contig_for_hits(*task)
+                        except Exception as exc:
+                            _retry_or_raise(index, exc)
+                            continue
+                        break
+                    _merge_result(index, result)
                     _log_progress()
             finally:
                 _reset_scan_worker()
@@ -1064,8 +1102,45 @@ def _merge_informative_shards(shard_paths, child_bam, ref_fasta, output_bam,
     return len(written)
 
 
+def _region_mapq_stats(regions, region_reads, read_sv_meta):
+    """Per region, the mapping quality of the reads that made it.
+
+    Discovery anchors every primary read whatever its mapping quality,
+    because a proband-unique k-mer is novel sequence wherever the read
+    landed.  Where it landed still matters to the reader: a region made
+    only of MAPQ-0 reads sits in sequence present at several places in
+    the reference, where a k-mer that is a sequencing error reaches the
+    child-count floor by being seen across the copies.  Nothing is
+    filtered on it here; the numbers are written beside each region so
+    that a cohort summary can rank or drop such regions after the fact.
+
+    Returns:
+        Dict mapping each region tuple to ``(max_mapq, mapq0_reads)``:
+        the highest mapping quality among the region's informative reads
+        and how many of them have mapping quality 0.  A read with both a
+        primary and a supplementary record counts once, by its primary.
+    """
+    stats = {}
+    for region_key in regions:
+        best = 0
+        n_zero = 0
+        for name in region_reads.get(region_key, ()):
+            meta = read_sv_meta.get((name, False))
+            if meta is None:
+                meta = read_sv_meta.get((name, True))
+            if meta is None or "mapq" not in meta:
+                continue
+            mapq = meta["mapq"]
+            if mapq > best:
+                best = mapq
+            if mapq == 0:
+                n_zero += 1
+        stats[region_key] = (best, n_zero)
+    return stats
+
+
 def _write_bed(regions, region_reads, region_kmers, bed_path,
-               region_annotations=None, filters=None):
+               region_annotations=None, filters=None, region_mapq=None):
     """Write clustered regions to a BED file with read/k-mer counts and SV annotations.
 
     Args:
@@ -1077,6 +1152,8 @@ def _write_bed(regions, region_reads, region_kmers, bed_path,
         filters: Optional dict of applied filter parameters to record
             in the file header (e.g. min_supporting_reads,
             min_distinct_kmers, min_distinct_kmers_per_read).
+        region_mapq: Optional dict from :func:`_region_mapq_stats`; the
+            two mapping-quality columns are 0 when it is missing.
     """
     with open(bed_path, "w") as fh:
         if filters:
@@ -1086,7 +1163,8 @@ def _write_bed(regions, region_reads, region_kmers, bed_path,
             "#chrom\tstart\tend\treads\tunique_kmers"
             "\tsplit_reads\tdiscordant_pairs"
             "\tmax_clip_len\tunmapped_mates\tclass"
-            "\tbreakpoint_reads\tlarge_indel_reads\tsv_type\n"
+            "\tbreakpoint_reads\tlarge_indel_reads\tsv_type"
+            "\tmax_mapq\tmapq0_reads\n"
         )
         for chrom, start, end in regions:
             region_key = (chrom, start, end)
@@ -1101,11 +1179,13 @@ def _write_bed(regions, region_reads, region_kmers, bed_path,
             breakpoint_reads = ann.get("breakpoint_reads", 0)
             large_indel_reads = ann.get("large_indel_reads", 0)
             sv_type = ann.get("sv_type", ".")
+            max_mapq, mapq0_reads = (region_mapq or {}).get(region_key, (0, 0))
             fh.write(
                 f"{chrom}\t{start}\t{end}\t{n_reads}\t{n_kmers}"
                 f"\t{split_reads}\t{discordant_pairs}"
                 f"\t{max_clip_len}\t{unmapped_mates}\t{region_class}"
-                f"\t{breakpoint_reads}\t{large_indel_reads}\t{sv_type}\n"
+                f"\t{breakpoint_reads}\t{large_indel_reads}\t{sv_type}"
+                f"\t{max_mapq}\t{mapq0_reads}\n"
             )
     logger.info("BED file written: %s (%d regions)", bed_path, len(regions))
 
@@ -1859,28 +1939,63 @@ def _load_dnm_regions(path):
     return regions
 
 
+class _RegionIndex:
+    """The discovery regions of one run, indexed for interval queries.
+
+    Regions are grouped by chromosome and sorted by start; a running
+    maximum of their ends lets a query find every region overlapping an
+    interval with two bisections, so that evaluating thousands of loci
+    against hundreds of thousands of regions stays cheap.
+    """
+
+    def __init__(self, discovery_regions):
+        buckets = collections.defaultdict(list)
+        for key in discovery_regions:
+            buckets[key[0]].append(key)
+        self._by_chrom = {}
+        for chrom, keys in buckets.items():
+            keys.sort(key=lambda k: (k[1], k[2]))
+            max_ends = []
+            running = -1
+            for key in keys:
+                running = max(running, key[2])
+                max_ends.append(running)
+            self._by_chrom[chrom] = ([k[1] for k in keys], max_ends, keys)
+
+    def overlapping(self, chrom, start, end):
+        """Region keys overlapping ``[start, end)`` (0-based, half-open)."""
+        entry = self._by_chrom.get(chrom)
+        if entry is None:
+            return []
+        starts, max_ends, keys = entry
+        hi = bisect.bisect_left(starts, end)
+        lo = bisect.bisect_right(max_ends, start)
+        return [k for k in keys[lo:hi] if k[2] > start]
+
+
 def _evaluate_dnm_regions(discovery_regions, region_detail, dnm_regions,
                           slack=0):
-    """Evaluate how well VCF-free discovery captures known DNM regions.
+    """Evaluate the discovered regions against a list of known events.
 
-    For each known de novo event (from ``--dnm-regions``), determines
-    whether it was nominated by the discovery pipeline and collects
-    quantitative k-mer and SV-signal evidence from the discovery
-    region(s) overlapping it or within *slack* bp of it.  The slack
-    matters for deletions: their breakpoint regions flank the deleted
-    interval rather than overlap it, and curated breakpoints can be off
-    by a few bases.
+    Two questions are answered for each event (from ``--dnm-regions`` or
+    ``--dnm-negative-regions``), and they are kept apart on purpose:
 
-    The evaluation provides a simple genotype-like assessment per region:
+    * **Is there a region anywhere in the event?**  (``any_region``)  A
+      discovery region overlapping the event's span, or lying within
+      *slack* bp of it.  On a real genome this is weak evidence: with
+      a region every few kilobases, a span of some kilobases holds one
+      by chance, and a long event always does.
+    * **Is a breakpoint supported?**  (``breakpoint_support``, the
+      count of supported ends, and ``detected`` when it is at least 1)
+      Split reads, discordant pairs or breakpoint-clipped reads in the
+      regions within *slack* bp of an END of the event: its start, and
+      for a sized event its end.  This is the evidence a junction leaves
+      and the one that should be compared with the random-locus null
+      the pipeline reports beside it.
 
-    - **DETECTED**: ≥1 discovery region matches the curated locus with
-      informative reads carrying proband-unique k-mers.
-    - **NOT_DETECTED**: No matching discovery region found.
-
-    For detected regions, a *k-mer signal score* summarises evidence
-    strength as ``unique_kmers / region_size_bp``.  Higher density
-    indicates more child-specific sequence variation concentrated in the
-    region, consistent with a de novo SV.
+    The slack matters for deletions: their breakpoint regions flank the
+    deleted interval rather than overlap it, and curated breakpoints can
+    be off by a few bases.
 
     Args:
         discovery_regions: List of (chrom, start, end) tuples (0-based,
@@ -1891,32 +2006,38 @@ def _evaluate_dnm_regions(discovery_regions, region_detail, dnm_regions,
             tuples, as returned by :func:`_load_dnm_regions`.  *pos* is
             1-based; each event covers *size* bp from *pos* (1 bp when
             the size is unknown).
-        slack: How far (bp) outside an event a region may lie and still
-            count toward it (the pipeline uses ``--cluster-distance``).
+        slack: How far (bp) outside an event or an end a region may lie
+            and still count (the pipeline uses ``--cluster-distance``).
 
     Returns:
-        List of dicts, one per known event, with keys:
+        List of dicts, one per event, with keys:
 
         - locus (str): ``chrom:pos``
         - event_type (str): Event type label.
         - event_size (int or None): Expected event size in bp.
-        - detected (bool): Whether ≥1 discovery region overlaps.
-        - discovery_regions (list of str): Matching region labels.
-        - total_reads (int): Sum of informative reads across matches.
-        - total_unique_kmers (int): Sum of proband-unique k-mers.
-        - max_clip_len (int): Max soft-clip length across matches.
-        - unmapped_mates (int): Sum of unmapped-mate counts.
-        - discordant_pairs (int): Sum of discordant-pair counts.
-        - split_reads (int): Sum of split-read counts.
-        - sv_class (str): Most severe SV class across matches.
+        - any_region (bool): A region overlaps the span or lies within
+          the slack of it.
+        - ends (int): Ends the event has: 2 for a sized event, else 1.
+        - breakpoint_support (int): Ends with split, discordant or
+          breakpoint-clipped reads within the slack.
+        - breakpoints (dict): Per end (``start``, ``end``): the regions
+          within the slack and their split, discordant and clipped read
+          counts, and whether the end is supported.
+        - detected (bool): ``breakpoint_support >= 1``.
+        - discovery_regions (list of str): Labels of the regions in the
+          span (the ``any_region`` matches).
+        - total_reads, total_unique_kmers, max_clip_len, unmapped_mates,
+          discordant_pairs, split_reads: Sums over those regions.
+        - sv_class (str): Most severe class among them, ``NONE`` if none.
         - kmer_signal (float): ``total_unique_kmers / span_bp``.
-        - assessment (str): ``DETECTED`` or ``NOT_DETECTED``.
+        - assessment (str): ``SUPPORTED_BOTH_ENDS``, ``SUPPORTED``,
+          ``REGION_ONLY`` or ``NOT_DETECTED``.
     """
-    # Build an index from region tuple → detail dict
     detail_by_key = {}
     for rd in region_detail:
-        key = (rd["chrom"], rd["start"], rd["end"])
-        detail_by_key[key] = rd
+        detail_by_key[(rd["chrom"], rd["start"], rd["end"])] = rd
+    index = _RegionIndex(discovery_regions)
+    class_priority = {"SV": 3, "AMBIGUOUS": 2, "SMALL": 1}
 
     results = []
     for chrom, pos, size, event_type in dnm_regions:
@@ -1924,63 +2045,75 @@ def _evaluate_dnm_regions(discovery_regions, region_detail, dnm_regions,
         dnm_start = pos - 1
         dnm_end = dnm_start + (size if size else 1)  # point if no size
 
-        # Find discovery regions overlapping the event or within slack
-        matches = []
-        for dr_key in discovery_regions:
-            dr_chrom, dr_start, dr_end = dr_key
-            if dr_chrom != chrom:
-                continue
-            # Both 0-based half-open; a gap shorter than slack counts
-            if dr_start < dnm_end + slack and dnm_start - slack < dr_end:
-                matches.append(dr_key)
-
-        detected = len(matches) > 0
-
-        # Aggregate evidence across matching regions
-        total_reads = 0
-        total_kmers = 0
-        max_clip = 0
-        total_unmapped = 0
-        total_discordant = 0
-        total_split = 0
+        # ── A region anywhere in the span (or within the slack of it) ──
+        matches = index.overlapping(chrom, dnm_start - slack, dnm_end + slack)
+        total_reads = total_kmers = max_clip = 0
+        total_unmapped = total_discordant = total_split = 0
         region_labels = []
         sv_classes = []
-        span_start = dnm_start
-        span_end = dnm_end
-
+        span_start, span_end = dnm_start, dnm_end
         for m_key in matches:
             rd = detail_by_key.get(m_key, {})
             total_reads += rd.get("reads", 0)
             total_kmers += rd.get("unique_kmers", 0)
-            clip = rd.get("max_clip_len", 0)
-            if clip > max_clip:
-                max_clip = clip
+            max_clip = max(max_clip, rd.get("max_clip_len", 0))
             total_unmapped += rd.get("unmapped_mates", 0)
             total_discordant += rd.get("discordant_pairs", 0)
             total_split += rd.get("split_reads", 0)
             sv_classes.append(rd.get("class", "SMALL"))
-            label = f"{m_key[0]}:{m_key[1] + 1}-{m_key[2]}"
-            region_labels.append(label)
-            # Expand span to cover all matching regions
-            if m_key[1] < span_start:
-                span_start = m_key[1]
-            if m_key[2] > span_end:
-                span_end = m_key[2]
-
+            region_labels.append(f"{m_key[0]}:{m_key[1] + 1}-{m_key[2]}")
+            span_start = min(span_start, m_key[1])
+            span_end = max(span_end, m_key[2])
+        any_region = bool(matches)
         span_bp = max(span_end - span_start, 1)
-        kmer_signal = total_kmers / span_bp if detected else 0.0
+        kmer_signal = total_kmers / span_bp if any_region else 0.0
+        sv_class = (max(sv_classes, key=lambda c: class_priority.get(c, 0))
+                    if sv_classes else "NONE")
 
-        # Most severe SV class
-        class_priority = {"SV": 3, "AMBIGUOUS": 2, "SMALL": 1}
-        sv_class = max(sv_classes, key=lambda c: class_priority.get(c, 0)) \
-            if sv_classes else "NONE"
-
-        assessment = "DETECTED" if detected else "NOT_DETECTED"
+        # ── Breakpoint evidence at each end ────────────────────────────
+        ends = [("start", dnm_start)]
+        if size:
+            ends.append(("end", dnm_end))
+        breakpoints = {}
+        n_supported = 0
+        for label, bp in ends:
+            # The junction lies between bases bp - 1 and bp: a region that
+            # ends on the one or starts on the other touches it before any
+            # slack is added (a deletion's flanks never overlap it).
+            near = index.overlapping(chrom, bp - 1 - slack, bp + 1 + slack)
+            split = discordant = clipped = 0
+            for key in near:
+                rd = detail_by_key.get(key, {})
+                split += rd.get("split_reads", 0)
+                discordant += rd.get("discordant_pairs", 0)
+                clipped += rd.get("breakpoint_reads", 0)
+            supported = (split + discordant + clipped) > 0
+            n_supported += supported
+            breakpoints[label] = {
+                "regions": len(near),
+                "split_reads": split,
+                "discordant_pairs": discordant,
+                "breakpoint_reads": clipped,
+                "supported": supported,
+            }
+        detected = n_supported > 0
+        if detected and size and n_supported == len(ends):
+            assessment = "SUPPORTED_BOTH_ENDS"
+        elif detected:
+            assessment = "SUPPORTED"
+        elif any_region:
+            assessment = "REGION_ONLY"
+        else:
+            assessment = "NOT_DETECTED"
 
         results.append({
             "locus": f"{chrom}:{pos}",
             "event_type": event_type,
             "event_size": size,
+            "any_region": any_region,
+            "ends": len(ends),
+            "breakpoint_support": n_supported,
+            "breakpoints": breakpoints,
             "detected": detected,
             "discovery_regions": region_labels,
             "total_reads": total_reads,
@@ -1995,6 +2128,57 @@ def _evaluate_dnm_regions(discovery_regions, region_detail, dnm_regions,
         })
 
     return results
+
+
+#: Seed of the random loci the known-event null draws (see
+#: :func:`_null_dnm_regions`): the same run gives the same null.
+_DNM_NULL_SEED = 1
+
+
+def _null_dnm_regions(dnm_regions, contig_lengths, per_event, seed=_DNM_NULL_SEED):
+    """Random loci matched to a list of events: the null of the evaluation.
+
+    For each event, *per_event* loci of the same size and type are drawn
+    uniformly along the same chromosome (a chromosome absent from
+    *contig_lengths*, or shorter than the event, draws none).  Evaluating
+    them like the events says how often chance alone puts a region, or
+    breakpoint evidence, at a locus of that size on this genome.
+    """
+    rng = random.Random(seed)
+    null = []
+    for chrom, pos, size, event_type in dnm_regions:
+        length = contig_lengths.get(chrom, 0)
+        span = size or 1
+        if length <= span + 1:
+            continue
+        for _ in range(per_event):
+            null.append((chrom, rng.randrange(1, length - span + 1), size,
+                         event_type))
+    return null
+
+
+def _summarise_dnm_evaluation(loci):
+    """The headline counts of an evaluation: what the metrics report."""
+    n = len(loci)
+    supported = sum(1 for e in loci if e["detected"])
+    any_region = sum(1 for e in loci if e["any_region"])
+    both = sum(1 for e in loci if e["ends"] == 2 and e["breakpoint_support"] == 2)
+    return {
+        "total_loci": n,
+        "detected": supported,
+        "detection_rate": supported / n if n else 0.0,
+        "both_ends": both,
+        "any_region": any_region,
+        "any_region_rate": any_region / n if n else 0.0,
+    }
+
+
+def _contig_lengths(bam_path, ref_fasta=None):
+    """Contig lengths from an alignment file's header."""
+    with pysam.AlignmentFile(
+        bam_path, reference_filename=ref_fasta if ref_fasta else None,
+    ) as bam:
+        return dict(zip(bam.references, bam.lengths))
 
 
 def _write_discovery_summary(summary_path, regions, region_reads,
@@ -2144,51 +2328,102 @@ def _write_discovery_summary(summary_path, regions, region_reads,
             )
         lines.append("")
 
-    if dnm_evaluation:
-        n_total = len(dnm_evaluation)
-        n_detected = sum(1 for e in dnm_evaluation if e["detected"])
-        pct = (n_detected / n_total * 100) if n_total else 0.0
-        source = metrics.get("dnm_evaluation", {}).get("source")
+    evaluation = metrics.get("dnm_evaluation") or {}
+    if dnm_evaluation or evaluation.get("negatives"):
+        slack = evaluation.get("slack_bp")
+        source = evaluation.get("source")
         lines.append(
-            f"Curated DNM Region Evaluation ({source})" if source
-            else "Curated DNM Region Evaluation"
+            f"Known Event Evaluation ({source})" if source
+            else "Known Event Evaluation"
         )
         lines.append("-" * 80)
-        lines.append(f"  Curated DNM loci:            {n_total:>8}")
-        lines.append(
-            f"  Detected by discovery:       {n_detected:>8}"
-            f" / {n_total} ({pct:.1f}%)"
-        )
-        slack = metrics.get("dnm_evaluation", {}).get("slack_bp")
         if slack is not None:
             lines.append(
-                f"  Regions counted within:      {slack:>8} bp of an event"
+                f"  An end is supported by split, discordant or"
+                f" breakpoint-clipped reads within {slack} bp of it;"
             )
-        lines.append("")
-        lines.append(
-            f"  {'Locus':<20s} {'Event':>25s} {'Size':>8s}"
-            f" {'Reads':>6s} {'Kmers':>6s} {'Signal':>7s}"
-            f" {'MaxClip':>8s} {'Class':>10s} {'Status':>14s}"
-        )
-        lines.append(
-            f"  {'-----':<20s} {'-----':>25s} {'----':>8s}"
-            f" {'-----':>6s} {'-----':>6s} {'------':>7s}"
-            f" {'-------':>8s} {'-----':>10s} {'------':>14s}"
-        )
-        for e in dnm_evaluation:
-            size_str = (f"{e['event_size']}bp"
-                        if e["event_size"] else "–")
             lines.append(
-                f"  {e['locus']:<20s}"
-                f" {e['event_type']:>25s}"
-                f" {size_str:>8s}"
-                f" {e['total_reads']:>6d}"
-                f" {e['total_unique_kmers']:>6d}"
-                f" {e['kmer_signal']:>7.4f}"
-                f" {e['max_clip_len']:>8d}"
-                f" {e['sv_class']:>10s}"
-                f" {e['assessment']:>14s}"
+                f"  a region anywhere in the span (within {slack} bp) is"
+                f" reported, not counted: on a genome with a"
             )
+            lines.append(
+                "  region every few kb it is chance, which the random loci"
+                " below measure."
+            )
+        if dnm_evaluation:
+            n_total = evaluation.get("total_loci", len(dnm_evaluation))
+            n_detected = evaluation.get("detected", 0)
+            pct = (n_detected / n_total * 100) if n_total else 0.0
+            lines.append(f"  Known events:                  {n_total:>8}")
+            lines.append(
+                f"  Supported at a breakpoint:     {n_detected:>8}"
+                f" / {n_total} ({pct:.1f}%)"
+            )
+            lines.append(
+                f"  Supported at both ends:        "
+                f"{evaluation.get('both_ends', 0):>8}"
+            )
+            lines.append(
+                f"  A region anywhere in the span: "
+                f"{evaluation.get('any_region', 0):>8} / {n_total}"
+            )
+        null = evaluation.get("null")
+        if null:
+            lines.append(
+                f"  Random loci of the same sizes: "
+                f"{null['total_loci']:>8} ({null['loci_per_event']} per event):"
+                f" {100 * null['detection_rate']:.1f}% supported at a"
+                f" breakpoint, {100 * null['any_region_rate']:.1f}% with a"
+                f" region in the span"
+            )
+        negatives = evaluation.get("negatives")
+        if negatives:
+            n_neg = negatives["total_loci"]
+            n_neg_sup = negatives["detected"]
+            neg_pct = (n_neg_sup / n_neg * 100) if n_neg else 0.0
+            lines.append(
+                f"  Negative controls ({negatives.get('source')}):"
+                f" {n_neg_sup} / {n_neg} supported at a breakpoint"
+                f" ({neg_pct:.1f}%; inherited events, whose k-mers are in a"
+                f" parent: support here is a false positive)"
+            )
+        for title, loci in (("", dnm_evaluation or []),
+                            ("Negative controls", (negatives or {}).get("loci", []))):
+            if not loci:
+                continue
+            lines.append("")
+            if title:
+                lines.append(f"  {title}:")
+            lines.append(
+                f"  {'Locus':<20s} {'Event':>14s} {'Size':>8s} {'Ends':>5s}"
+                f" {'Reads':>6s} {'Split':>5s} {'Disc':>5s} {'Clip':>5s}"
+                f" {'Class':>10s} {'Status':>20s}"
+            )
+            lines.append(
+                f"  {'-----':<20s} {'-----':>14s} {'----':>8s} {'----':>5s}"
+                f" {'-----':>6s} {'-----':>5s} {'----':>5s} {'----':>5s}"
+                f" {'-----':>10s} {'------':>20s}"
+            )
+            for e in loci:
+                size_str = (f"{e['event_size']}bp"
+                            if e["event_size"] else "–")
+                ends_str = f"{e['breakpoint_support']}/{e['ends']}"
+                bp = e.get("breakpoints", {})
+                split = sum(v["split_reads"] for v in bp.values())
+                disc = sum(v["discordant_pairs"] for v in bp.values())
+                clip = sum(v["breakpoint_reads"] for v in bp.values())
+                lines.append(
+                    f"  {e['locus']:<20s}"
+                    f" {e['event_type'][:14]:>14s}"
+                    f" {size_str:>8s}"
+                    f" {ends_str:>5s}"
+                    f" {e['total_reads']:>6d}"
+                    f" {split:>5d}"
+                    f" {disc:>5d}"
+                    f" {clip:>5d}"
+                    f" {e['sv_class']:>10s}"
+                    f" {e['assessment']:>20s}"
+                )
         lines.append("")
 
     lines.append("=" * 60)
@@ -2237,6 +2472,14 @@ def run_discovery_pipeline(args):
     if dnm_regions_path:
         try:
             dnm_regions = _load_dnm_regions(dnm_regions_path)
+        except ValueError as exc:
+            logger.error("Validation error: %s", exc)
+            sys.exit(1)
+    negative_regions_path = getattr(args, "dnm_negative_regions", None)
+    negative_regions = None
+    if negative_regions_path:
+        try:
+            negative_regions = _load_dnm_regions(negative_regions_path)
         except ValueError as exc:
             logger.error("Validation error: %s", exc)
             sys.exit(1)
@@ -2466,6 +2709,20 @@ def run_discovery_pipeline(args):
         _log_memory("after proband index build")
         _log_dir_size(tmpdir, "after proband index build")
 
+        # The proband-unique k-mer index is small (tens of MB for a 30x
+        # genome) and is the one intermediate worth keeping: across a
+        # cohort, k-mers recurring in unrelated probands are errors, and
+        # that set can only be built from these files.  It is copied out
+        # before the temporary directory goes.
+        if getattr(args, "discard_proband_kmers", False):
+            logger.info("  Proband-unique k-mer index discarded with the "
+                        "temporary directory (--discard-proband-kmers)")
+        else:
+            kept_jf = f"{out_prefix}.proband_unique.jf"
+            shutil.copyfile(proband_jf, kept_jf)
+            logger.info("  Proband-unique k-mer index kept: %s (%s)",
+                        kept_jf, _format_file_size(kept_jf))
+
         # ── Module 3: Anchoring & Region Clustering ────────────────
         # The informative reads BAM is written during this same scan.
         step_start = time.monotonic()
@@ -2539,6 +2796,8 @@ def run_discovery_pipeline(args):
         regions, read_sv_meta, link_slack=args.cluster_distance,
     )
     _classify_regions(regions, region_annotations, sv_links)
+    # Mapping quality beside each region: annotated, never filtered on.
+    region_mapq = _region_mapq_stats(regions, region_reads, read_sv_meta)
 
     bed_filters = {
         "min_distinct_kmers_per_read": min_dk_per_read,
@@ -2547,7 +2806,7 @@ def run_discovery_pipeline(args):
     }
     _write_bed(regions, region_reads, region_kmers, bed_path,
                region_annotations=region_annotations,
-               filters=bed_filters)
+               filters=bed_filters, region_mapq=region_mapq)
 
     _write_bedgraph(kmer_coverage, bedgraph_path,
                     read_coverage=read_coverage,
@@ -2634,6 +2893,10 @@ def run_discovery_pipeline(args):
                 "class": region_annotations.get(
                     (chrom, start, end), {},
                 ).get("class", "SMALL"),
+                "max_mapq": region_mapq.get((chrom, start, end), (0, 0))[0],
+                "mapq0_reads": region_mapq.get(
+                    (chrom, start, end), (0, 0),
+                )[1],
             }
             for chrom, start, end in regions
         ],
@@ -2658,26 +2921,81 @@ def run_discovery_pipeline(args):
             ],
         }
 
-    # ── Optional evaluation against known de novo events ──────────
+    # ── Optional evaluation against known events ───────────────────
+    # Breakpoint evidence within the slack of an event's ends is what
+    # counts as support; a region anywhere in the span is reported but
+    # is only chance on a genome with a region every few kilobases.  A
+    # random-locus null says how much chance, and the negative controls
+    # (inherited events, whose k-mers are in a parent) how often support
+    # appears where there should be none.
     dnm_evaluation = None
     if dnm_regions:
         dnm_evaluation = _evaluate_dnm_regions(
             regions, metrics["regions"], dnm_regions,
             slack=args.cluster_distance,
         )
-        n_dnm_detected = sum(1 for e in dnm_evaluation if e["detected"])
+        headline = _summarise_dnm_evaluation(dnm_evaluation)
         logger.info(
-            "[Module 4] Curated DNM evaluation: %d / %d detected",
-            n_dnm_detected, len(dnm_evaluation),
+            "[Module 4] Known events: %d / %d supported at a breakpoint "
+            "(%d at both ends; %d with a region anywhere in the span)",
+            headline["detected"], headline["total_loci"],
+            headline["both_ends"], headline["any_region"],
         )
         metrics["dnm_evaluation"] = {
             "source": os.path.basename(dnm_regions_path),
             "slack_bp": args.cluster_distance,
-            "total_loci": len(dnm_evaluation),
-            "detected": n_dnm_detected,
-            "detection_rate": n_dnm_detected / len(dnm_evaluation),
+            **headline,
             "loci": dnm_evaluation,
         }
+        n_null = getattr(args, "dnm_null", 0) or 0
+        if n_null > 0:
+            null_loci = _null_dnm_regions(
+                dnm_regions, _contig_lengths(args.child, args.ref_fasta),
+                n_null,
+            )
+            null_headline = _summarise_dnm_evaluation(_evaluate_dnm_regions(
+                regions, metrics["regions"], null_loci,
+                slack=args.cluster_distance,
+            ))
+            logger.info(
+                "[Module 4] Random loci of the same sizes (%d per event): "
+                "%.1f%% supported at a breakpoint, %.1f%% with a region "
+                "in the span",
+                n_null, 100 * null_headline["detection_rate"],
+                100 * null_headline["any_region_rate"],
+            )
+            metrics["dnm_evaluation"]["null"] = {
+                "loci_per_event": n_null,
+                "seed": _DNM_NULL_SEED,
+                **null_headline,
+            }
+    if negative_regions:
+        negative_evaluation = _evaluate_dnm_regions(
+            regions, metrics["regions"], negative_regions,
+            slack=args.cluster_distance,
+        )
+        negative_headline = _summarise_dnm_evaluation(negative_evaluation)
+        logger.info(
+            "[Module 4] Negative controls: %d / %d supported at a "
+            "breakpoint (%d with a region in the span)",
+            negative_headline["detected"], negative_headline["total_loci"],
+            negative_headline["any_region"],
+        )
+        negatives = {
+            "source": os.path.basename(negative_regions_path),
+            **negative_headline,
+            "loci": negative_evaluation,
+        }
+        if "dnm_evaluation" in metrics:
+            metrics["dnm_evaluation"]["negatives"] = negatives
+        else:
+            metrics["dnm_evaluation"] = {
+                "source": None,
+                "slack_bp": args.cluster_distance,
+                **_summarise_dnm_evaluation([]),
+                "loci": [],
+                "negatives": negatives,
+            }
 
     with open(metrics_path, "w") as fh:
         json.dump(metrics, fh, indent=2)
