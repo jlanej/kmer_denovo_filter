@@ -594,14 +594,12 @@ def _build_proband_jf_index(proband_unique_fa, kmer_size, tmpdir,
                             n_proband_unique=None):
     """Build a Jellyfish index from proband-unique k-mers.
 
-    Creates a ``.jf`` hash file that can be queried via
-    ``jellyfish query`` or :class:`JellyfishKmerQuery` to check k-mer
-    membership without loading the set into Python memory.
-
-    For WGS-scale data with hundreds of millions of proband-unique k-mers,
-    the resulting index is typically 2–10 GB on disk and memory-mapped by
-    each ``jellyfish query`` subprocess.  Multiple workers share the same
-    OS page-cache mapping, so N workers ≈ 1× the hash file memory.
+    Creates a ``.jf`` hash file of the proband-unique k-mers: the index
+    discovery mode keeps beside its output (``[out-prefix].proband_unique.jf``,
+    tens of MB for a genome) for cohort-wide use, where the k-mers
+    recurring in unrelated probands are errors.  Module 3 no longer reads
+    it: the scan loads the FASTA into a sorted array itself (see
+    :mod:`kmer_denovo_filter.core.kmer_set`).
 
     Args:
         proband_unique_fa: Path to FASTA of proband-unique k-mers.

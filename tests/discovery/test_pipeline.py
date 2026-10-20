@@ -1610,100 +1610,6 @@ class TestBedgraphDiscoveryIntegration:
 
 
 
-class TestJellyfishBatchScanMemory:
-    """Unit tests for Jellyfish-backed batch scanning memory behavior."""
-
-    def test_scan_contig_clears_cache_per_batch(self, monkeypatch):
-        class _FakeRead:
-            def __init__(self, seq):
-                self.query_sequence = seq
-                self.is_secondary = False
-                self.is_duplicate = False
-
-        class _FakeBam:
-            def __init__(self, *args, **kwargs):
-                self._reads = [
-                    _FakeRead("AAAAA"),
-                    _FakeRead("CCCCC"),
-                    _FakeRead("GGGGG"),
-                ]
-
-            def fetch(self, contig=None):
-                return iter(self._reads)
-
-            def close(self):
-                return None
-
-        class _FakeJFQuery:
-            def __init__(self):
-                self.query_calls = []
-                self.close_calls = 0
-
-            def query_batch(self, kmers):
-                self.query_calls.append(set(kmers))
-                return set(kmers)
-
-            def close(self):
-                self.close_calls += 1
-
-        jf_query = _FakeJFQuery()
-        seen_reads = []
-
-        def _fake_extract_read_kmers(seq, kmer_size):
-            return ({0: seq}, [seq])
-
-        def _fake_process_informative_read(
-            read,
-            unique_in_read,
-            kmer_hit_indices,
-            kmer_size,
-            reads_seen,
-            read_hits,
-            read_sv_meta,
-            kmer_coverage,
-            read_coverage,
-            bam_out=None,
-        ):
-            seen_reads.append((read.query_sequence, unique_in_read))
-            return 0
-
-        class _FakePysam:
-            AlignmentFile = _FakeBam
-
-        monkeypatch.setattr(bam_scanner_mod, "pysam", _FakePysam)
-        monkeypatch.setattr(
-            bam_scanner_mod, "_extract_read_kmers", _fake_extract_read_kmers,
-        )
-        monkeypatch.setattr(
-            bam_scanner_mod, "_process_informative_read",
-            _fake_process_informative_read,
-        )
-        monkeypatch.setattr(bam_scanner_mod, "_JF_READ_BATCH_SIZE", 2)
-        monkeypatch.setattr(bam_scanner_mod, "_worker_automaton", None)
-        monkeypatch.setattr(bam_scanner_mod, "_worker_jf_query", jf_query)
-        monkeypatch.setattr(bam_scanner_mod, "_worker_kmer_size", 5)
-        monkeypatch.setattr(
-            bam_scanner_mod, "_worker_min_distinct_kmers_per_read", 1,
-        )
-
-        (
-            _read_hits,
-            _reads_seen,
-            _unmapped_informative,
-            total_reads_scanned,
-            _read_sv_meta,
-            _kmer_coverage,
-            _read_coverage,
-        ) = bam_scanner_mod._scan_contig_for_hits("child.bam", "ref.fa", "chr1")
-
-        assert total_reads_scanned == 3
-        assert len(jf_query.query_calls) == 2
-        assert jf_query.query_calls[0] == {"AAAAA", "CCCCC"}
-        assert jf_query.query_calls[1] == {"GGGGG"}
-        assert jf_query.close_calls == 2
-        assert len(seen_reads) == 3
-
-
 def _sv_meta(pos, mapq=60, clips=(), large_indel=None, mate=None, sa=None,
              proper=True, mate_unmapped=False, max_clip=0, reverse=False,
              clip_side=None, qspan=(0, 150), end=None):
@@ -2235,7 +2141,8 @@ class TestAnchoringMergeOrder:
         class _InlineExecutor:
             """Runs each task in-process as soon as it is submitted."""
 
-            def __init__(self, max_workers, initializer, initargs):
+            def __init__(self, max_workers, initializer, initargs,
+                         mp_context=None):
                 initializer(*initargs)
 
             def __enter__(self):
@@ -2532,7 +2439,7 @@ class TestDiscoveryAnnotationAndControls:
         argv = argv + ["--threads", "1"]
         with caplog.at_level("WARNING"):
             run_discovery_pipeline(parse_args(argv))
-        assert "running the contig again" in caplog.text
+        assert "running the task again" in caplog.text
         with open(os.path.join(tmpdir, "out.bed")) as fh:
             assert sum(1 for l in fh if not l.startswith("#")) == 1
 
@@ -2543,36 +2450,6 @@ class TestDiscoveryAnnotationAndControls:
                             broken)
         with pytest.raises(OSError):
             run_discovery_pipeline(parse_args(argv))
-
-    def test_jellyfish_query_is_retried(self, monkeypatch):
-        from kmer_denovo_filter import kmer_utils
-
-        calls = []
-
-        class FakeProc:
-            def __init__(self, rc, out, err):
-                self.returncode, self._out, self._err = rc, out, err
-
-            def communicate(self, data):
-                return self._out, self._err
-
-        def fake_popen(cmd, **kw):
-            calls.append(cmd)
-            if len(calls) == 1:
-                return FakeProc(1, b"", b"Failed to parse header of file")
-            return FakeProc(0, b"AAAAA 1\nCCCCC 0\n", b"")
-
-        monkeypatch.setattr(kmer_utils.subprocess, "Popen", fake_popen)
-        monkeypatch.setattr(kmer_utils.time, "sleep", lambda s: None)
-        hits = kmer_utils.JellyfishKmerQuery("x.jf")._subprocess_query(
-            ["AAAAA", "CCCCC"])
-        assert hits == {"AAAAA"} and len(calls) == 2
-
-        calls.clear()
-        monkeypatch.setattr(kmer_utils.subprocess, "Popen",
-                            lambda cmd, **kw: FakeProc(1, b"", b"boom"))
-        with pytest.raises(RuntimeError, match="3 attempts"):
-            kmer_utils.JellyfishKmerQuery("x.jf")._subprocess_query(["AAAAA"])
 
     def test_evaluation_counts_breakpoints_not_spans(self):
         from kmer_denovo_filter.discovery.pipeline import (

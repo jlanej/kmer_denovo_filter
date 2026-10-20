@@ -4,6 +4,17 @@
 
 - **test_cli.py** – CLI argument parsing and validation.
 - **test_kmer_utils.py** – K-mer utility functions (canonicalization, extraction).
+- **test_kmer_set.py** – The k-mer set behind discovery mode's read scan
+  (`core/kmer_set.py`): 2-bit codes ordered as the strings are, canonical =
+  min of both strands, N / lower-case handling, FASTA loading across chunk
+  boundaries, and the vectorized scan against the per-k-mer reference on
+  random reads for k = 5 to 33 (the > 32 fallback included).
+- **discovery/test_scan.py** – Module 3's scan in windows, batches and
+  workers against the whole-contig single-batch scan (same result, same
+  informative BAM, pairs straddling a window boundary included); Module 1's
+  reference subtraction streamed into parallel `jellyfish query` processes
+  against a single query over the dumped FASTA, the record splitter, a
+  failing query, an empty dump.
 - **vcf/test_pipeline.py** – VCF-mode pipeline integration tests using synthetic BAM/VCF data.
 - **discovery/test_pipeline.py** – Discovery-mode pipeline integration tests using synthetic BAM data.
 - **discovery/test_sv_demo.py** – End-to-end SV calling on the simulated trio

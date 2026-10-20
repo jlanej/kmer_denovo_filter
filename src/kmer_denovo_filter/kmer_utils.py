@@ -1,14 +1,6 @@
 """K-mer utility functions."""
 
 import logging
-import os
-import struct
-import subprocess
-import tempfile
-import threading
-import time
-
-import ahocorasick
 
 # The non-human contamination engine (Kraken2Runner) and allele-support
 # helpers (read_supports_alt, _is_symbolic) now live in the standalone
@@ -34,11 +26,6 @@ logger = logging.getLogger(__name__)
 
 _COMP = str.maketrans("ACGTacgt", "TGCAtgca")
 
-#: ``jellyfish query`` attempts before a worker gives up, and the pauses
-#: between them (seconds).
-_JF_QUERY_ATTEMPTS = 3
-_JF_QUERY_BACKOFF_S = (1.0, 5.0)
-
 def reverse_complement(seq):
     """Return the reverse complement of a DNA sequence."""
     return seq.translate(_COMP)[::-1]
@@ -50,58 +37,16 @@ def canonicalize(kmer):
     return kmer if kmer < rc else rc
 
 
-def build_kmer_automaton(canonical_kmers):
-    """Build an Aho-Corasick automaton from canonical k-mers.
-
-    Adds both the forward and reverse-complement of each canonical
-    k-mer so that reads can be scanned without per-position
-    canonicalization.  The stored value for every pattern is the
-    original canonical k-mer.
-
-    Args:
-        canonical_kmers: Iterable of canonical k-mer strings.
-
-    Returns:
-        An :class:`ahocorasick.Automaton` ready for ``iter()``,
-        or ``None`` if *canonical_kmers* is empty.
-    """
-    A = ahocorasick.Automaton()
-    for kmer in canonical_kmers:
-        A.add_word(kmer, kmer)
-        rc = reverse_complement(kmer)
-        if rc != kmer:
-            A.add_word(rc, kmer)
-    if len(A) == 0:
-        return None
-    A.make_automaton()
-    return A
-
-
-def estimate_automaton_memory_gb(n_kmers):
-    """Estimate the in-memory size of an Aho-Corasick automaton in GB.
-
-    Empirically measured at ~928 bytes per pattern for 31-mer DNA
-    sequences (including trie node, failure links, and Python string
-    value overhead).  With forward + reverse-complement, the pattern
-    count is roughly ``2 × n_kmers``.
-
-    Args:
-        n_kmers: Number of canonical k-mers.
-
-    Returns:
-        Estimated memory in GB (float).
-    """
-    n_patterns = n_kmers * 2  # fwd + RC
-    bytes_per_pattern = 928  # empirically measured
-    total_bytes = n_patterns * bytes_per_pattern
-    return total_bytes / (1024**3)
-
-
-# ── Jellyfish-backed k-mer query (disk-backed, low memory) ─────────
+# ── Per-read k-mer extraction (the reference implementation) ───────
 
 
 def _extract_read_kmers(seq, kmer_size):
     """Extract canonicalized k-mers from a read sequence.
+
+    This is the per-k-mer reference that discovery mode's vectorized scan
+    (:mod:`kmer_denovo_filter.core.kmer_set`) is checked against: the
+    windows of the upper-cased read, those holding an N skipped, each
+    canonicalized.
 
     Args:
         seq: Read sequence string.
@@ -131,155 +76,6 @@ def _extract_read_kmers(seq, kmer_size):
 
     unique_candidates = list(dict.fromkeys(candidates))
     return canon_at_pos, unique_candidates
-
-
-class JellyfishKmerQuery:
-    """Query k-mers against a Jellyfish index file without loading into memory.
-
-    Uses ``jellyfish query -s /dev/stdin`` subprocesses so that the
-    k-mer hash table lives in jellyfish's memory-mapped address space
-    (shared via OS page cache across workers) rather than in Python.
-
-    For WGS-scale discovery with hundreds of millions of proband-unique
-    k-mers, this uses ~2–10 GB (the jellyfish hash file, memory-mapped)
-    instead of ~20–460 GB (Python set or Aho-Corasick automaton).
-
-    A result cache avoids re-querying k-mers that have already been
-    seen.  Adjacent reads in a sorted BAM share most of their k-mers,
-    so the cache dramatically reduces the number of subprocess calls.
-
-    Usage::
-
-        q = JellyfishKmerQuery("/path/to/proband_unique.jf")
-        for read in bam:
-            hits = q.scan_read(read.query_sequence, kmer_size=31)
-            # hits: set of (canonical_kmer, query_start_index)
-        q.close()
-    """
-
-    def __init__(self, jf_path):
-        self.jf_path = jf_path
-        self._cache = {}  # canonical_kmer -> bool (present in index)
-
-    def _subprocess_query(self, kmers):
-        """Query k-mers via a jellyfish subprocess.
-
-        Uses ``communicate()`` to safely handle stdin/stdout without
-        risk of deadlock, even for large batches.
-
-        Args:
-            kmers: Iterable of canonical k-mer strings.
-
-        Returns:
-            Set of canonical k-mers that are present (count > 0).
-
-        Raises:
-            RuntimeError: If jellyfish exits with a non-zero status.  A
-                failed query (missing index, killed process) would
-                otherwise be indistinguishable from "no k-mers present".
-        """
-        fasta_block = "".join(
-            f">{i}\n{kmer}\n" for i, kmer in enumerate(kmers)
-        )
-        # A query that fails is retried a few times before it fails the
-        # worker: on a network filesystem the memory-mapped index can
-        # momentarily be unreadable ("Failed to parse header"), and a
-        # worker that dies there takes hours of scanning with it.
-        for attempt in range(1, _JF_QUERY_ATTEMPTS + 1):
-            proc = subprocess.Popen(
-                ["jellyfish", "query", self.jf_path, "-s", "/dev/stdin"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            stdout, stderr = proc.communicate(fasta_block.encode())
-            if proc.returncode == 0:
-                break
-            message = stderr.decode(errors="replace").strip()
-            if attempt == _JF_QUERY_ATTEMPTS:
-                raise RuntimeError(
-                    f"jellyfish query on {self.jf_path} failed with exit "
-                    f"code {proc.returncode} ({attempt} attempts): {message}"
-                )
-            logger.warning(
-                "jellyfish query on %s failed (attempt %d of %d, exit code "
-                "%d): %s; retrying in %.1f s",
-                self.jf_path, attempt, _JF_QUERY_ATTEMPTS, proc.returncode,
-                message, _JF_QUERY_BACKOFF_S[attempt - 1],
-            )
-            time.sleep(_JF_QUERY_BACKOFF_S[attempt - 1])
-
-        hits = set()
-        for line in stdout.decode().split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split()
-            if len(parts) >= 2 and parts[1] != "0":
-                hits.add(parts[0])
-        return hits
-
-    def query_batch(self, canonical_kmers):
-        """Query a batch of canonical k-mers against the index.
-
-        Results are cached so that repeated queries for the same k-mer
-        (common with overlapping reads) skip the subprocess entirely.
-
-        Args:
-            canonical_kmers: List of canonical k-mer strings.
-
-        Returns:
-            Set of canonical k-mers that are present (count > 0) in the
-            index.
-        """
-        if not canonical_kmers:
-            return set()
-
-        uncached = [k for k in canonical_kmers if k not in self._cache]
-        if uncached:
-            hits = self._subprocess_query(uncached)
-            for k in uncached:
-                self._cache[k] = k in hits
-
-        return {k for k in canonical_kmers if self._cache.get(k, False)}
-
-    def scan_read(self, seq, kmer_size):
-        """Scan a read sequence for proband-unique k-mers.
-
-        Extracts all k-mers via a sliding window, canonicalizes each,
-        and batch-queries the jellyfish index.
-
-        Args:
-            seq: Read sequence string (uppercase recommended).
-            kmer_size: Length of k-mers.
-
-        Returns:
-            Tuple of (unique_in_read, kmer_hit_indices):
-                unique_in_read: set of canonical k-mers found.
-                kmer_hit_indices: set of query start indices.
-        """
-        canon_at_pos, unique_candidates = _extract_read_kmers(seq, kmer_size)
-
-        if not unique_candidates:
-            return set(), set()
-
-        hits = self.query_batch(unique_candidates)
-
-        unique_in_read = set()
-        kmer_hit_indices = set()
-        for pos, canon in canon_at_pos.items():
-            if canon in hits:
-                unique_in_read.add(canon)
-                kmer_hit_indices.add(pos)
-
-        return unique_in_read, kmer_hit_indices
-
-    def close(self):
-        """Clear the result cache."""
-        self._cache.clear()
-
-    def __del__(self):
-        self.close()
 
 
 def extract_variant_spanning_kmers(

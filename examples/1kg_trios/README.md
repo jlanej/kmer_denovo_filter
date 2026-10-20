@@ -111,7 +111,7 @@ and the manager picks the staged files up.
 | SLURM | `sbatch`/`squeue`; site flags via `SBATCH_EXTRA_ARGS` |
 | Internet | On the node that runs `00_setup.sh` and on the node that runs the manager (a DTN or login node with `MANAGER_LOCAL=1`, or a compute partition with outbound access) |
 | python3 ≥ 3.9 | On the setup/summary node (standard library only; the container's python is used otherwise) |
-| Disk | Reference + index ~25 GB; SV call set 1.7 GB; **~45 GB per staged trio × `MAX_STAGED_TRIOS`**; **100+ GB of scratch per running discovery job** (`TMP_ROOT`, not a RAM-backed `/tmp`); results ~1 GB per trio (informative BAM and report included) |
+| Disk | Reference + index ~25 GB; SV call set 1.7 GB; **~45 GB per staged trio × `MAX_STAGED_TRIOS`**; **~40 GB of scratch per running discovery job** (`TMP_ROOT`, not a RAM-backed `/tmp`: the child's ~30 GB k-mer index while it is dumped, plus the non-reference k-mer parts; the dump itself is streamed, never written); results ~1 GB per trio (informative BAM and report included) |
 | Memory | 64 GB for the reference index job (23 GB used); `DISCOVERY_MEM` (default 128 GB) per trio job |
 
 ## Quick start
