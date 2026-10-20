@@ -199,6 +199,10 @@ This produces eight output files (see [Discovery Mode Output](#discovery-mode-ou
 Each region is annotated with structural-variant evidence, and the BEDPE
 links an SV's breakpoints and gives its type. See
 [Structural Variant Calling](docs/sv_calling.md) for how this works.
+With `--kraken2-db`, the informative reads of every `SV` and `AMBIGUOUS`
+region are also classified with Kraken2 and each region gets its
+non-human fraction (the BED columns `nhf_reads` and `nhf`); see
+[Non-human fraction screen](#non-human-fraction-screen) below.
 [`examples/sv_demo`](examples/sv_demo/) has a simulated trio with a
 deletion, duplication, inversion, translocation and insertions that runs
 in seconds. [`scripts/sv_benchmark.py`](scripts/sv_benchmark.py)
@@ -231,6 +235,67 @@ kmer-discovery \
   --ref-fasta GRCh38.fa \
   --out-prefix discovery_output \
   --candidate-summary vcf_mode_summary.txt
+```
+
+#### Non-human fraction screen
+
+A read of a bacterium, a virus, a fungus or a sequencing adapter carries
+k-mers in neither parent nor the reference, so discovery keeps it as
+informative by construction, and aligned with clips to a human locus (or
+placed at its mate's position) it looks like SV evidence. With a Kraken2
+database, `kmer-discovery` classifies its informative reads with the same
+engine VCF mode uses for `DKU_NHF` / `DKA_NHF`
+([`nonhuman-screen`](https://github.com/jlanej/nonhuman-screen) around
+Kraken2), at two levels and in one Kraken2 run:
+
+* **the run**: a deterministic sample of up to `--nhf-sample-reads`
+  (200,000) informative reads, the ones with the smallest hash of their
+  name, gives the child's informative reads as a whole a non-human
+  fraction;
+* **each `SV` and `AMBIGUOUS` region** (and each region at a BEDPE
+  junction end): the informative alignments overlapping it, the other read
+  end of each of those molecules, and the unmapped reads placed within
+  `--cluster-distance` of it (an insertion's interior reads are unmapped
+  and placed at their mate's position: the `unmapped_mates` evidence), one
+  sequence per read end.
+
+The engine's four-way partition of the reads is non-human (classified, off
+the human lineage, outside UniVec Core and with no k-mer voting human, the
+human-homology guard), UniVec Core, human lineage and unclassified; `nhf`
+is the non-human share, broken down by domain in the metrics. `SMALL`
+regions are not screened.
+
+```bash
+kmer-discovery \
+  --child   child.bam \
+  --mother  mother.bam \
+  --father  father.bam \
+  --ref-fasta GRCh38.fa \
+  --out-prefix discovery_output \
+  --kraken2-db /path/to/kraken2_db
+```
+
+This annotates and never filters: the BED gets the columns `nhf_reads`
+and `nhf` (`.` when a region was not screened, which is not 0), the
+metrics JSON a `nonhuman_fraction` block (status, database, engine
+versions, the sampled fractions and one row per screened region, with
+`nhf_reads` and `nhf` also on each region), and the summary and report a
+section. Without `--kraken2-db` the screen is recorded as `disabled`;
+Kraken2, the database or its taxonomy failing is recorded as `failed`
+with the reason, and the run still succeeds, because a screen that failed
+is never a clean one. The database is the one VCF mode uses (see
+[Kraken2 Database Setup Helper](#kraken2-database-setup-helper)); it is
+loaded into memory, so size the job for it or pass
+`--kraken2-memory-mapping`.
+
+`kmer-nhf` runs the same screen on a finished run, from its files, for
+runs made before the option existed or with a new database. It rewrites
+the two BED columns, the metrics block and the summary section in place,
+and exits 1 when the screen failed:
+
+```bash
+kmer-nhf --out-prefix discovery_output --kraken2-db /path/to/kraken2_db \
+  --threads 8 [--cluster-distance 500] [--report discovery_output.report.html]
 ```
 
 ### Arguments
@@ -294,6 +359,16 @@ k-mer parameters. Each command also has its own mode-specific arguments.
 | `--discard-proband-kmers` | – | Do not keep the proband-unique k-mer index (`[out-prefix].proband_unique.jf`, tens of MB for a genome); by default it is copied out of the temporary directory, since the k-mers recurring in unrelated probands of a cohort are errors and that set can only be built from these files |
 | `--sv-bedpe` | – | Output BEDPE file for linked SV breakpoint pairs (default: `[out-prefix].sv.bedpe`) |
 | `--report` | – | Output path for an interactive HTML report summarizing discovery results with Plotly visualizations. When omitted, no report is generated |
+| `--kraken2-db` | – | Kraken2 database for the [non-human fraction screen](#non-human-fraction-screen): the informative reads of every `SV` and `AMBIGUOUS` region (and of every junction end) and a sample of all informative reads are classified, and each screened region gets `nhf_reads` and `nhf` in the BED (`.` = not screened). Annotated, never filtered. Without it the screen is recorded as `disabled`; Kraken2 or the database failing is recorded as `failed` and the run still succeeds. Requires `kraken2` on PATH; the database is loaded into memory |
+| `--kraken2-confidence` | 0.0 | Kraken2 LCA confidence threshold (0.0–1.0), as in VCF mode |
+| `--kraken2-memory-mapping` | false | Passes Kraken2 `--memory-mapping`, as in VCF mode |
+| `--nhf-sample-reads` | 200000 | With `--kraken2-db`: at most this many informative reads (read ends, those with the smallest hash of their name) for the run-level non-human fraction |
+
+`kmer-nhf` takes `--out-prefix` (required), `--kraken2-db` (required),
+`--kraken2-confidence`, `--kraken2-memory-mapping`, `--nhf-sample-reads`,
+`--cluster-distance` (the run's; default 500), `--threads`, `--tmp-dir`,
+`--sv-bedpe` (when the run's BEDPE is not `[prefix].sv.bedpe`) and
+`--report` (regenerate the HTML report from the rewritten files).
 
 ### VCF Mode Output
 
@@ -537,6 +612,8 @@ generate the file:
 | sv_type | Majority SV type among the region's molecules: `DEL`, `DUP` or `INV` from breakpoint orientation (see the BEDPE); `INS` or `DEL` from CIGAR indels; `INS` from split reads with more read than reference between their parts; `BND` for a link to another chromosome. With no votes, `INS` when at least two molecules are clipped from each side at one point, otherwise `.`; also `.` on a tie |
 | max_mapq | Highest mapping quality among the region's informative reads |
 | mapq0_reads | How many of them have mapping quality 0. Annotated, never filtered on: a proband-unique k-mer is novel sequence wherever its read landed, but a region made only of MAPQ-0 reads sits in multi-copy sequence, where a sequencing error's k-mer reaches the child-count floor by being seen across the copies |
+| nhf_reads | With `--kraken2-db` (or `kmer-nhf`): the reads of the region classified by the [non-human fraction screen](#non-human-fraction-screen): the informative alignments overlapping it, the other read end of each of those molecules, and the unmapped reads placed within `--cluster-distance` of it, one per read end. `.` when the region was not screened (`SMALL` regions, no database, or a failed screen) |
+| nhf | The share of those reads classified as non-human: off the human lineage, outside UniVec Core, with no k-mer voting human. Annotated, never filtered on; `.` is unscreened, not 0 |
 
 Evidence columns count molecules (read names), each at most once per
 region. A region is `SV` when at least two molecules show one kind of
@@ -616,11 +693,34 @@ Machine-readable pipeline statistics:
       "sv_type": ".",
       "class": "AMBIGUOUS",
       "max_mapq": 60,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": 14,
+      "nhf": 0.0714
     }
-  ]
+  ],
+  "nonhuman_fraction": {
+    "status": "screened",
+    "reason": "",
+    "db": "/path/to/kraken2_db",
+    "engine": {"nonhuman_screen": "0.1.8", "kraken2": "Kraken version 2.1.3", "db_kmer_len": 35, "taxonomy_available": true},
+    "params": {"cluster_distance": 500, "sample_reads": 200000, "confidence": 0.0, "memory_mapping": false, "threads": 8},
+    "informative_reads": 350,
+    "sampled": {"reads": 350, "fractions": {"total": 350, "nonhuman": 0.0057, "bacterial": 0.0057, "archaeal": 0.0, "fungal": 0.0, "protist": 0.0, "viral": 0.0, "univec_core": 0.0, "human_lineage": 0.9914, "unclassified": 0.0029}},
+    "regions_screened": 30,
+    "regions": [
+      {"chrom": "chr1", "start": 1000, "end": 5500, "class": "AMBIGUOUS", "sv_type": ".", "reads": 14, "placed_unmapped": 1,
+       "fractions": {"total": 14, "nonhuman": 0.0714, "bacterial": 0.0714, "archaeal": 0.0, "fungal": 0.0, "protist": 0.0, "viral": 0.0, "univec_core": 0.0, "human_lineage": 0.9286, "unclassified": 0.0},
+       "top_taxon": "Escherichia_coli(1)"}
+    ]
+  }
 }
 ```
+
+The `nonhuman_fraction` block is always present: `status` is `screened`,
+`disabled` (no `--kraken2-db`; `db` is null and `regions` empty) or
+`failed` (with the `reason`), and `nhf_reads` / `nhf` are null on every
+region the screen did not measure. See the
+[non-human fraction screen](#non-human-fraction-screen).
 
 When `--candidate-summary` is used, a `candidate_comparison` object is
 included with capture rate and per-candidate details. When `--dnm-regions`
@@ -646,6 +746,8 @@ Human-readable overview including:
 * Per-region results table with coordinates, size, read count, k-mer count, SV annotations, classification and SV type
 * Candidate comparison results (when `--candidate-summary` is provided)
 * Detection of known *de novo* events (when `--dnm-regions` is provided)
+* The non-human fraction screen, last: its status, the sampled fractions
+  and one row per screened region (`kmer-nhf` rewrites this section)
 
 #### SV breakpoints BEDPE (`{prefix}.sv.bedpe`)
 

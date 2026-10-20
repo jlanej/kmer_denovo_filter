@@ -10,7 +10,8 @@
 #      (child_only_svs.py) and passes them as --dnm-regions, so the run
 #      reports which of them discovery supports;
 #   2. runs kmer-discovery in the container with the shared reference index,
-#      sized to the job's allocation;
+#      sized to the job's allocation, and with --kraken2-db when KRAKEN2_DB
+#      is set (the non-human fraction screen of its informative reads);
 #   3. records the wall time, writes the done marker, and deletes the CRAMs
 #      unless KEEP_CRAMS=1 or another selected trio still needs one.
 #
@@ -150,7 +151,7 @@ echo "Threads: ${THREADS}; memory budget: ${MEMORY_GB} GB; tmp: ${TMP_DIR}"
 # not one and is skipped.
 BINDS="$(bind_list "${WORK_DIR}" "${CRAM_DIR}" "${RESULTS_DIR}" "${TMP_DIR}" \
   "$(dirname "${REF_FASTA}")" "$(dirname "${REF_JF}")" "$(dirname "${SV_COHORT_VCF}")" "$(dirname "${SV_VCF}")" \
-  "${CONTAINER_EXAMPLE_DIR}")"
+  "${CONTAINER_EXAMPLE_DIR}" "${KRAKEN2_DB}")"
 
 # ── 1. Child-only SVs from the published call set ────────────────────────────
 DNM_ARGS=()
@@ -207,6 +208,12 @@ CMD=(
   --report "${PREFIX}.report.html"
 )
 (( ${#DNM_ARGS[@]} )) && CMD+=("${DNM_ARGS[@]}")
+if [[ -n "${KRAKEN2_DB}" ]]; then
+  # The non-human fraction screen. A database kmer-discovery cannot use is
+  # recorded as a failed screen in the run's metrics; the run still succeeds.
+  CMD+=(--kraken2-db "${KRAKEN2_DB}")
+  [[ -d "${KRAKEN2_DB}" ]] || echo "WARNING: KRAKEN2_DB=${KRAKEN2_DB} is not a directory; the screen will be recorded as failed."
+fi
 if [[ -n "${DISCOVERY_EXTRA_ARGS}" ]]; then
   # shellcheck disable=SC2206
   CMD+=(${DISCOVERY_EXTRA_ARGS})

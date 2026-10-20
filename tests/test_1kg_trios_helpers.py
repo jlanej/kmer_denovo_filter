@@ -354,8 +354,46 @@ def region(chrom, start, end, cls, sv_type, reads=10):
     return dict(zip(REGION_KEYS, values))
 
 
+def nhf_block(regions, status="screened", sampled_nhf=0.01):
+    """A non-human fraction screen block as kmer-discovery records it:
+    every SV/AMBIGUOUS region screened, its ``nhf`` taken from the
+    region dict (``nhf`` key) and the two values put on the region."""
+    rows = []
+    for r in regions:
+        if r.get("class") == "SMALL":
+            r["nhf_reads"] = r["nhf"] = None
+            continue
+        nhf = r.pop("nhf", 0.0)
+        r["nhf_reads"], r["nhf"] = r["reads"] + 2, nhf
+        rows.append({"chrom": r["chrom"], "start": r["start"], "end": r["end"],
+                     "class": r["class"], "sv_type": r["sv_type"],
+                     "reads": r["reads"] + 2, "placed_unmapped": 0,
+                     "fractions": {"total": r["reads"] + 2, "nonhuman": nhf,
+                                   "bacterial": nhf, "archaeal": 0.0,
+                                   "fungal": 0.0, "protist": 0.0, "viral": 0.0,
+                                   "univec_core": 0.0,
+                                   "human_lineage": round(1 - nhf, 4),
+                                   "unclassified": 0.0},
+                     "top_taxon": "Escherichia_coli(3)" if nhf else "."})
+    fractions = {"total": 40, "nonhuman": sampled_nhf, "bacterial": sampled_nhf,
+                 "archaeal": 0.0, "fungal": 0.0, "protist": 0.0, "viral": 0.0,
+                 "univec_core": 0.0, "human_lineage": round(1 - sampled_nhf, 4),
+                 "unclassified": 0.0}
+    if status != "screened":
+        for r in regions:
+            if r.get("class") != "SMALL":
+                r["nhf_reads"] = r["nhf"] = None
+        return {"status": status, "reason": "boom", "db": "/db", "engine": {},
+                "params": {}, "informative_reads": None, "sampled": None,
+                "regions_screened": 0, "regions": []}
+    return {"status": status, "reason": "", "db": "/db", "engine": {},
+            "params": {}, "informative_reads": 40,
+            "sampled": {"reads": 40, "fractions": fractions},
+            "regions_screened": len(rows), "regions": rows}
+
+
 def write_trio_results(results_dir, trio, regions, links=(), dnm=None,
-                       detail_rows=(), wall_s=7200, done=True):
+                       detail_rows=(), wall_s=7200, done=True, nhf=None):
     d = results_dir / trio
     d.mkdir(parents=True)
     p = d / trio
@@ -365,6 +403,8 @@ def write_trio_results(results_dir, trio, regions, links=(), dnm=None,
                "candidate_regions": len(regions), "regions": regions}
     if dnm:
         metrics["dnm_evaluation"] = dnm
+    if nhf is not None:
+        metrics["nonhuman_fraction"] = nhf
     (d / f"{trio}.metrics.json").write_text(json.dumps(metrics))
     (d / f"{trio}.bed").write_text("#chrom\tstart\tend\n" + "".join(
         f"{r['chrom']}\t{r['start']}\t{r['end']}\n" for r in regions))
@@ -470,6 +510,52 @@ class TestSummarizeTrios:
         assert "De novo SV candidates after dropping recurrent loci: 2" in md
         assert "supported at a breakpoint: 1 (50%)" in md
         assert "| C | GBR | (missing) |" in md
+        # runs from before the non-human fraction screen existed: unscreened
+        assert "Non-human fraction screen (kraken2): 0 of 2 trios screened, 2 not screened" in md
+        assert by_trio["A"]["nhf_status"] == "." and by_trio["A"]["nhf_sampled"] == ""
+        assert cand_header[-2:] == ["nhf_reads", "nhf"]
+        assert all((c["nhf_reads"], c["nhf"]) == (".", ".") for c in cands)
+
+    def test_non_human_fraction_screen_is_carried_through(self, tmp_path):
+        """The screen's values reach the candidate table and the cohort summary."""
+        results = tmp_path / "results"
+        trios = tmp_path / "trios.tsv"
+        trios.write_text(
+            "TRIO_ID\tCHILD\tFATHER\tMOTHER\tFAMILY_ID\tCHILD_SEX\tPOPULATION\tSUPERPOPULATION\n"
+            "A\tA\tFA\tMA\tfam1\t1\tCHS\tEAS\n"
+            "B\tB\tFB\tMB\tfam2\t2\tYRI\tAFR\n"
+            "D\tD\tFD\tMD\tfam4\t1\tGBR\tEUR\n")
+        regions_a = [dict(region("chr1", 1000, 1300, "SV", "DEL"), nhf=0.0),
+                     dict(region("chr3", 777, 999, "SV", "INS"), nhf=0.4),
+                     region("chr2", 100, 400, "SMALL", ".")]
+        write_trio_results(results, "A", regions_a, nhf=nhf_block(regions_a, sampled_nhf=0.02))
+        regions_b = [region("chr5", 1, 300, "SV", "DUP")]
+        write_trio_results(results, "B", regions_b, nhf=nhf_block(regions_b, status="failed"))
+        write_trio_results(results, "D", [region("chr6", 1, 300, "SV", "DUP")])
+        out = tmp_path / "cohort"
+        load_module("summarize_trios").main([
+            "--trios", str(trios), "--results-dir", str(results),
+            "--out-dir", str(out)])
+
+        rows = [l.split("\t") for l in (out / "trio_summary.tsv").read_text().splitlines()]
+        by_trio = {r[0]: dict(zip(rows[0], r)) for r in rows[1:]}
+        assert (by_trio["A"]["nhf_status"], by_trio["A"]["nhf_sampled"]) == ("screened", "0.0200")
+        assert (by_trio["B"]["nhf_status"], by_trio["B"]["nhf_sampled"]) == ("failed", "")
+        assert (by_trio["D"]["nhf_status"], by_trio["D"]["nhf_sampled"]) == (".", "")
+        cands = [l.split("\t") for l in (out / "sv_candidates.tsv").read_text().splitlines()]
+        cands = [dict(zip(cands[0], c)) for c in cands[1:]]
+        by_locus = {(c["chrom"], c["trio"]): c for c in cands}
+        assert (by_locus[("chr1", "A")]["nhf_reads"], by_locus[("chr1", "A")]["nhf"]) == ("12", "0.0")
+        assert (by_locus[("chr3", "A")]["nhf_reads"], by_locus[("chr3", "A")]["nhf"]) == ("12", "0.4")
+        assert (by_locus[("chr5", "B")]["nhf_reads"], by_locus[("chr5", "B")]["nhf"]) == (".", ".")
+        assert (by_locus[("chr6", "D")]["nhf_reads"], by_locus[("chr6", "D")]["nhf"]) == (".", ".")
+        md = (out / "cohort_summary.md").read_text()
+        assert ("Non-human fraction screen (kraken2): 1 of 3 trios screened, 1 failed, "
+                "1 not screened; sampled non-human fraction median 0.0200, max 0.0200; "
+                "candidates with non-human reads: 1 of 4 (`nhf`, `nhf_reads`: "
+                "annotated, never dropped)") in md
+        assert "| NHF |" in md
+        assert "| 0.0200 |" in md and "| failed |" in md
 
     def test_no_finished_trio(self, tmp_path):
         trios = tmp_path / "trios.tsv"
@@ -555,7 +641,8 @@ class TestSummarizeFlagsAndControls:
         rows = [l.split("\t") for l in (out / "sv_candidates.tsv").read_text().splitlines()]
         header = rows[0]
         cands = {(r[3], r[0], r[1]): dict(zip(header, r)) for r in rows[1:]}
-        assert header[-6:] == ["locus_flags", "partner_flags", "partner_recurrent",
+        assert header[-2:] == ["nhf_reads", "nhf"]       # the screen's, last
+        assert header[-8:-2] == ["locus_flags", "partner_flags", "partner_recurrent",
                                "partner_multiplicity", "both_ends", "rank"]
         a_igh = cands[("A", "chr14", "105700000")]
         assert a_igh["locus_flags"] == "IGH" and a_igh["partner_flags"] == "IGH"

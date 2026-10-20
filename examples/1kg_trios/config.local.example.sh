@@ -36,3 +36,8 @@ MODULES_TO_LOAD="${MODULES_TO_LOAD:-apptainer}"
 # Node-local scratch for discovery intermediates, only if it is large enough
 # (100+ GB per running trio) and not a RAM-backed filesystem.
 # DISCOVERY_TMP_DIR="${DISCOVERY_TMP_DIR:-/local/scratch/${USER:-$(id -un)}}"
+
+# A Kraken2 database for the non-human fraction screen of each run's
+# informative reads (scripts/download_kraken2_db.sh fetches PrackenDB).
+# Empty = no screen. The database loads into the job's memory.
+# KRAKEN2_DB="${KRAKEN2_DB:-/path/to/kraken2_db}"

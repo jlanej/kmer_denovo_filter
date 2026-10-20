@@ -2,7 +2,12 @@
 
 import pytest
 
-from kmer_denovo_filter.cli import parse_args, parse_vcf_args, parse_discovery_args
+from kmer_denovo_filter.cli import (
+    parse_args,
+    parse_discovery_args,
+    parse_nhf_args,
+    parse_vcf_args,
+)
 
 
 class TestParseArgs:
@@ -308,7 +313,7 @@ class TestParseVcfArgs:
                      "--cluster-distance", "--min-supporting-reads",
                      "--min-distinct-kmers", "--min-bedgraph-reads",
                      "--min-distinct-kmers-per-read", "--parent-max-count",
-                     "--sv-bedpe", "--candidate-summary"):
+                     "--sv-bedpe", "--candidate-summary", "--nhf-sample-reads"):
             with pytest.raises(SystemExit):
                 parse_vcf_args(self.REQUIRED_ARGS + [flag, "value"])
 
@@ -398,11 +403,12 @@ class TestParseDiscoveryArgs:
 
     def test_no_vcf_flags(self):
         """Discovery parser must not accept VCF-only flags."""
+        # (--kraken2-db, --kraken2-confidence and --kraken2-memory-mapping
+        # are shared: discovery's non-human fraction screen takes them too)
         for flag in ("--vcf", "--output", "--min-mapq", "--proband-id",
                      "--informative-reads", "--metrics", "--summary",
-                     "--kraken2-db", "--kraken2-confidence",
-                     "--kraken2-memory-mapping", "--kraken2-read-detail",
-                     "--kraken2-span-bed", "--no-expanded-bed"):
+                     "--kraken2-read-detail", "--kraken2-span-bed",
+                     "--no-expanded-bed"):
             with pytest.raises(SystemExit):
                 parse_discovery_args(self.REQUIRED_ARGS + [flag, "value"])
 
@@ -449,6 +455,74 @@ class TestParseDiscoveryArgs:
         assert args.debug_kmers is True
         assert args.jf_hash_size == "2G"
         assert args.tmp_dir == "/scratch"
+
+
+class TestNhfScreenArgs:
+    """The non-human fraction screen's options: kmer-discovery and kmer-nhf."""
+
+    DISCOVERY_ARGS = [
+        "--child", "child.bam", "--mother", "mother.bam", "--father", "father.bam",
+        "--out-prefix", "out",
+    ]
+
+    def test_discovery_defaults(self):
+        args = parse_discovery_args(self.DISCOVERY_ARGS)
+        assert args.kraken2_db is None
+        assert args.kraken2_confidence == 0.0
+        assert args.kraken2_memory_mapping is False
+        assert args.nhf_sample_reads == 200000
+
+    def test_discovery_accepts_the_vcf_mode_names(self):
+        args = parse_discovery_args(self.DISCOVERY_ARGS + [
+            "--kraken2-db", "/db", "--kraken2-confidence", "0.2",
+            "--kraken2-memory-mapping", "--nhf-sample-reads", "5000",
+        ])
+        assert args.kraken2_db == "/db"
+        assert args.kraken2_confidence == 0.2
+        assert args.kraken2_memory_mapping is True
+        assert args.nhf_sample_reads == 5000
+
+    def test_discovery_has_no_vcf_only_kraken2_outputs(self):
+        for flag in ("--kraken2-read-detail", "--kraken2-span-bed"):
+            with pytest.raises(SystemExit):
+                parse_discovery_args(self.DISCOVERY_ARGS + [flag, "x"])
+
+    def test_compat_parser_takes_the_sample_size(self):
+        args = parse_args(self.DISCOVERY_ARGS + ["--nhf-sample-reads", "7"])
+        assert args.nhf_sample_reads == 7
+        assert parse_args(self.DISCOVERY_ARGS).nhf_sample_reads == 200000
+
+    def test_kmer_nhf_requires_prefix_and_db(self):
+        with pytest.raises(SystemExit):
+            parse_nhf_args(["--kraken2-db", "/db"])
+        with pytest.raises(SystemExit):
+            parse_nhf_args(["--out-prefix", "run"])
+
+    def test_kmer_nhf_defaults(self):
+        args = parse_nhf_args(["--out-prefix", "run", "--kraken2-db", "/db"])
+        assert args.out_prefix == "run"
+        assert args.kraken2_db == "/db"
+        assert args.kraken2_confidence == 0.0
+        assert args.kraken2_memory_mapping is False
+        assert args.nhf_sample_reads == 200000
+        assert args.cluster_distance == 500
+        assert args.threads == 4
+        assert args.tmp_dir is None
+        assert args.sv_bedpe is None
+        assert args.report is None
+
+    def test_kmer_nhf_options(self):
+        args = parse_nhf_args([
+            "--out-prefix", "run", "--kraken2-db", "/db", "--cluster-distance",
+            "800", "-t", "8", "--tmp-dir", "/scratch", "--sv-bedpe", "j.bedpe",
+            "--report", "r.html", "--kraken2-memory-mapping",
+        ])
+        assert args.cluster_distance == 800
+        assert args.threads == 8
+        assert args.tmp_dir == "/scratch"
+        assert args.sv_bedpe == "j.bedpe"
+        assert args.report == "r.html"
+        assert args.kraken2_memory_mapping is True
 
 
 class TestEntryPoints:

@@ -74,6 +74,10 @@ jobs:
           docker run --rm --entrypoint bcftools "$IMAGE_TAG" --version | head -1
           docker run --rm --entrypoint aria2c "$IMAGE_TAG" --version | head -1
 
+          # The non-human fraction screen: kraken2 and the kmer-nhf entry point
+          docker run --rm --entrypoint kraken2 "$IMAGE_TAG" --version | head -1
+          docker run --rm --entrypoint kmer-nhf "$IMAGE_TAG" --help | head -1
+
           # Functional test: run identify_putative_denovos.sh entirely inside the
           # container using synthetic trio VCFs created with the image's own tools.
           #   child  : chr1:100 (de novo), chr1:200 (shared with father), chr1:300 (shared with mother)

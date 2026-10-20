@@ -46,7 +46,7 @@ CONFIG_VARIABLES="WORK_DIR CRAM_DIR RESULTS_DIR COHORT_DIR LOG_DIR REF_DIR STATE
   SV_VCF_URL SV_VCF SV_COHORT_VCF USE_SV_CALLSET SV_MAX_AF SV_MIN_GQ SV_PASS_ONLY
   EXPECTED_FTP_PREFIX ENA_HTTPS_BASE S3_HTTPS_BASE S3_PREFIX_2504 S3_PREFIX_698 DOWNLOAD_CONNECTIONS
   TRIO_SLOTS MAX_STAGED_TRIOS TRIO_LIMIT KEEP_CRAMS
-  DISCOVERY_CPUS DISCOVERY_MEM DISCOVERY_TIME MIN_CHILD_COUNT DISCOVERY_EXTRA_ARGS DISCOVERY_TMP_DIR
+  DISCOVERY_CPUS DISCOVERY_MEM DISCOVERY_TIME MIN_CHILD_COUNT DISCOVERY_EXTRA_ARGS DISCOVERY_TMP_DIR KRAKEN2_DB
   REF_INDEX_CPUS REF_INDEX_MEM REF_INDEX_TIME REF_JF_HASH_SIZE
   SBATCH_EXTRA_ARGS JOB_PREFIX RECURRENT_MIN_TRIOS RECURRENT_SLACK_BP"
 
@@ -242,6 +242,17 @@ DISCOVERY_EXTRA_ARGS="${DISCOVERY_EXTRA_ARGS:-}"   # appended to kmer-discovery
 # per-trio directory under TMP_ROOT. Point it at node-local disk only if that
 # disk is large enough; never at a RAM-backed /tmp.
 DISCOVERY_TMP_DIR="${DISCOVERY_TMP_DIR:-}"
+# The non-human fraction screen (kmer-discovery --kraken2-db): a Kraken2
+# database directory (hash.k2d, opts.k2d, taxo.k2d and its taxonomy; the
+# image has kraken2, and scripts/download_kraken2_db.sh fetches PrackenDB).
+# It is bound into the discovery job, which classifies the informative reads
+# of every SV and AMBIGUOUS region and writes the BED columns nhf_reads and
+# nhf ("." = not screened). Empty = no screen, recorded as disabled in the
+# run's metrics; kmer-nhf can add the screen to a finished run afterwards.
+# The database is loaded into memory (PrackenDB: tens of GB): size
+# DISCOVERY_MEM for it, or add --kraken2-memory-mapping to
+# DISCOVERY_EXTRA_ARGS.
+KRAKEN2_DB="${KRAKEN2_DB:-}"
 
 # ── Reference index job (00b_build_ref_index.sh) ─────────────────────────────
 # jellyfish count -s 4G at k=31 takes about 23 GB of RAM.

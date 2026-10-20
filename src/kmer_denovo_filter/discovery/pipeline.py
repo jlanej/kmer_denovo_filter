@@ -16,6 +16,7 @@ import time
 
 import pysam
 
+from kmer_denovo_filter.discovery import nhf
 from kmer_denovo_filter.core.bam_scanner import (
     _clip_side,
     _collect_read_alignment_metadata,
@@ -1154,6 +1155,10 @@ def _write_bed(regions, region_reads, region_kmers, bed_path,
             min_distinct_kmers, min_distinct_kmers_per_read).
         region_mapq: Optional dict from :func:`_region_mapq_stats`; the
             two mapping-quality columns are 0 when it is missing.
+
+    The last two columns, ``nhf_reads`` and ``nhf``, are written as ``.``
+    (unscreened); :func:`nhf.annotate_bed` fills them in from the
+    non-human fraction screen, during the run or afterwards.
     """
     with open(bed_path, "w") as fh:
         if filters:
@@ -1164,7 +1169,8 @@ def _write_bed(regions, region_reads, region_kmers, bed_path,
             "\tsplit_reads\tdiscordant_pairs"
             "\tmax_clip_len\tunmapped_mates\tclass"
             "\tbreakpoint_reads\tlarge_indel_reads\tsv_type"
-            "\tmax_mapq\tmapq0_reads\n"
+            "\tmax_mapq\tmapq0_reads"
+            "\t" + "\t".join(nhf.NHF_COLUMNS) + "\n"
         )
         for chrom, start, end in regions:
             region_key = (chrom, start, end)
@@ -1185,7 +1191,8 @@ def _write_bed(regions, region_reads, region_kmers, bed_path,
                 f"\t{split_reads}\t{discordant_pairs}"
                 f"\t{max_clip_len}\t{unmapped_mates}\t{region_class}"
                 f"\t{breakpoint_reads}\t{large_indel_reads}\t{sv_type}"
-                f"\t{max_mapq}\t{mapq0_reads}\n"
+                f"\t{max_mapq}\t{mapq0_reads}"
+                f"\t{nhf.UNSCREENED}\t{nhf.UNSCREENED}\n"
             )
     logger.info("BED file written: %s (%d regions)", bed_path, len(regions))
 
@@ -2185,7 +2192,7 @@ def _write_discovery_summary(summary_path, regions, region_reads,
                              region_kmers, metrics,
                              candidate_comparison=None,
                              region_annotations=None,
-                             dnm_evaluation=None):
+                             dnm_evaluation=None, nhf_block=None):
     """Write a human-readable summary for the discovery pipeline.
 
     Analogous to ``_write_summary()`` in VCF mode, but reports
@@ -2204,6 +2211,9 @@ def _write_discovery_summary(summary_path, regions, region_reads,
             annotation dict.
         dnm_evaluation: Optional list of dicts from
             ``_evaluate_dnm_regions()``.
+        nhf_block: Optional non-human fraction screen block (see
+            :mod:`kmer_denovo_filter.discovery.nhf`); its section comes
+            last, where :func:`nhf.update_summary` can rewrite it.
     """
     n_regions = metrics["candidate_regions"]
     n_reads_total = metrics["informative_reads"]
@@ -2426,6 +2436,11 @@ def _write_discovery_summary(summary_path, regions, region_reads,
                 )
         lines.append("")
 
+    if nhf_block is not None:
+        if lines[-1] != "":
+            lines.append("")
+        lines.extend(nhf.summary_lines(nhf_block))
+
     lines.append("=" * 60)
     lines.append("")
 
@@ -2438,14 +2453,17 @@ def _write_discovery_summary(summary_path, regions, region_reads,
 
 
 def _write_empty_discovery_outputs(bed_path, metrics_path, summary_path,
-                                   metrics, bedpe_path=None):
+                                   metrics, bedpe_path=None, nhf_block=None):
     """Write empty discovery outputs for early-exit cases."""
     _write_bed([], {}, {}, bed_path)
     if bedpe_path:
         _write_bedpe([], bedpe_path)
+    if nhf_block is not None:
+        nhf.annotate_metrics(metrics, nhf_block)
     with open(metrics_path, "w") as fh:
         json.dump(metrics, fh, indent=2)
-    _write_discovery_summary(summary_path, [], {}, {}, metrics)
+    _write_discovery_summary(summary_path, [], {}, {}, metrics,
+                             nhf_block=nhf_block)
 
 
 def run_discovery_pipeline(args):
@@ -2464,6 +2482,41 @@ def run_discovery_pipeline(args):
             sys.exit(1)
 
     _validate_inputs(args)
+
+    # The non-human fraction screen (see nhf.py) is optional and never
+    # fatal: a database that cannot be used is reported now, the run goes
+    # on, and the screen is recorded as failed at the end; kmer-nhf can
+    # add it to the finished run afterwards.
+    kraken2_db = getattr(args, "kraken2_db", None)
+    nhf_options = {
+        "cluster_distance": getattr(args, "cluster_distance", 500),
+        "sample_reads": (getattr(args, "nhf_sample_reads", None)
+                         or nhf.DEFAULT_SAMPLE_READS),
+        "confidence": getattr(args, "kraken2_confidence", 0.0) or 0.0,
+        "memory_mapping": bool(getattr(args, "kraken2_memory_mapping", False)),
+        "threads": args.threads,
+    }
+    nhf_preflight = None
+    if kraken2_db is not None:
+        nhf_preflight = nhf.kraken2_db_problems(kraken2_db) or None
+        if nhf_preflight:
+            logger.warning(
+                "[NHF] The non-human fraction screen cannot run: %s. The run "
+                "continues; the screen is recorded as failed, and kmer-nhf "
+                "can add it to the finished run.", "; ".join(nhf_preflight),
+            )
+
+    def _early_nhf_block():
+        """The screen's block for a run that stops before anchoring."""
+        params = nhf.screen_params(**nhf_options)
+        if kraken2_db is None:
+            return nhf.disabled_block(params)
+        if nhf_preflight:
+            return nhf.failed_block("; ".join(nhf_preflight), db=kraken2_db,
+                                    params=params,
+                                    engine=nhf.engine_info(kraken2_db))
+        return nhf.empty_run_block(kraken2_db, params,
+                                   nhf.engine_info(kraken2_db))
 
     # Parse the known de novo events up front so a malformed file fails
     # before hours of counting rather than after.
@@ -2536,6 +2589,11 @@ def run_discovery_pipeline(args):
         f"{dnm_regions_path} ({len(dnm_regions)} events)" if dnm_regions
         else "(none)",
     )
+    logger.info(
+        "  Kraken2 DB:        %s",
+        kraken2_db if kraken2_db is not None
+        else "(none: no non-human fraction screen)",
+    )
     total_mem_gb, avail_mem_gb = _get_available_memory_gb()
     if total_mem_gb is not None:
         logger.info(
@@ -2601,7 +2659,7 @@ def run_discovery_pipeline(args):
             }
             _write_empty_discovery_outputs(
                 bed_path, metrics_path, summary_path, empty_metrics,
-                bedpe_path=bedpe_path,
+                bedpe_path=bedpe_path, nhf_block=_early_nhf_block(),
             )
             logger.info(
                 "Pipeline finished in %s",
@@ -2635,7 +2693,7 @@ def run_discovery_pipeline(args):
             }
             _write_empty_discovery_outputs(
                 bed_path, metrics_path, summary_path, empty_metrics,
-                bedpe_path=bedpe_path,
+                bedpe_path=bedpe_path, nhf_block=_early_nhf_block(),
             )
             logger.info(
                 "Pipeline finished in %s",
@@ -2676,7 +2734,7 @@ def run_discovery_pipeline(args):
             }
             _write_empty_discovery_outputs(
                 bed_path, metrics_path, summary_path, empty_metrics,
-                bedpe_path=bedpe_path,
+                bedpe_path=bedpe_path, nhf_block=_early_nhf_block(),
             )
             logger.info(
                 "Pipeline finished in %s",
@@ -2829,6 +2887,46 @@ def run_discovery_pipeline(args):
 
     _write_bedpe(sv_links, bedpe_path)
 
+    # ── Non-human fraction screen ──────────────────────────────────
+    # With the regions and junctions on disk: the informative reads of
+    # every SV and AMBIGUOUS region (and of every junction end), and a
+    # sample of all of them, classified with kraken2 (see nhf.py).  The
+    # BED's two columns are filled in from the result; "." is unscreened.
+    # kmer-nhf does the same to a finished run from its files.
+    nhf_start = time.monotonic()
+    region_dicts = [
+        {
+            "chrom": chrom, "start": start, "end": end,
+            "class": region_annotations.get(
+                (chrom, start, end), {}).get("class", "SMALL"),
+            "sv_type": region_annotations.get(
+                (chrom, start, end), {}).get("sv_type", "."),
+        }
+        for chrom, start, end in regions
+    ]
+    junction_ends = ({link["region_a"] for link in sv_links}
+                     | {link["region_b"] for link in sv_links})
+    nhf_tmp = None
+    if kraken2_db is not None and not nhf_preflight:
+        logger.info("[Module 4] Non-human fraction screen against %s",
+                    kraken2_db)
+        nhf_tmp = _resolve_tmp_dir(getattr(args, "tmp_dir", None), out_dir)
+    nhf_block = nhf.run_screen(
+        info_bam_path, region_dicts, junction_ends, kraken2_db,
+        preflight_problems=nhf_preflight, tmpdir=nhf_tmp, **nhf_options,
+    )
+    nhf.annotate_bed(bed_path, nhf_block)
+    if nhf_block["status"] == nhf.STATUS_FAILED:
+        logger.warning("[NHF] %s", nhf.describe(nhf_block))
+    elif nhf_block["status"] == nhf.STATUS_SCREENED:
+        logger.info("[Module 4] %s (%s)", nhf.describe(nhf_block),
+                    _format_elapsed(time.monotonic() - nhf_start))
+    try:
+        if nhf_tmp and not getattr(args, "tmp_dir", None):
+            os.rmdir(nhf_tmp)  # only succeeds if empty
+    except OSError:
+        pass
+
     # ── Optional candidate comparison ──────────────────────────────
     candidate_comparison = None
     candidate_summary = getattr(args, "candidate_summary", None)
@@ -2901,6 +2999,7 @@ def run_discovery_pipeline(args):
             for chrom, start, end in regions
         ],
     }
+    nhf.annotate_metrics(metrics, nhf_block)
     if candidate_comparison is not None:
         n_total = len(candidate_comparison)
         n_captured = sum(1 for c in candidate_comparison if c["captured"])
@@ -3007,6 +3106,7 @@ def run_discovery_pipeline(args):
         candidate_comparison=candidate_comparison,
         region_annotations=region_annotations,
         dnm_evaluation=dnm_evaluation,
+        nhf_block=nhf_block,
     )
 
     logger.info(

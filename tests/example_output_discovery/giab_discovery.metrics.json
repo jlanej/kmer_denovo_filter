@@ -29,7 +29,9 @@
       "sv_type": ".",
       "class": "SMALL",
       "max_mapq": 59,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr10",
@@ -47,7 +49,9 @@
       "sv_type": ".",
       "class": "SMALL",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr10",
@@ -65,7 +69,9 @@
       "sv_type": ".",
       "class": "SMALL",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr11",
@@ -83,7 +89,9 @@
       "sv_type": ".",
       "class": "SMALL",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr11",
@@ -101,7 +109,9 @@
       "sv_type": ".",
       "class": "SMALL",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr11",
@@ -119,7 +129,9 @@
       "sv_type": ".",
       "class": "SMALL",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr11",
@@ -137,7 +149,9 @@
       "sv_type": ".",
       "class": "SMALL",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr12",
@@ -155,7 +169,9 @@
       "sv_type": ".",
       "class": "SMALL",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr17",
@@ -173,7 +189,9 @@
       "sv_type": "DEL",
       "class": "SV",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr18",
@@ -191,7 +209,9 @@
       "sv_type": ".",
       "class": "SMALL",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr18",
@@ -209,7 +229,9 @@
       "sv_type": ".",
       "class": "SMALL",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr19",
@@ -227,7 +249,9 @@
       "sv_type": ".",
       "class": "AMBIGUOUS",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr22",
@@ -245,7 +269,9 @@
       "sv_type": ".",
       "class": "SMALL",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr5",
@@ -263,7 +289,9 @@
       "sv_type": "INS",
       "class": "SV",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr7",
@@ -281,7 +309,9 @@
       "sv_type": "DEL",
       "class": "SV",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr7",
@@ -299,7 +329,9 @@
       "sv_type": ".",
       "class": "AMBIGUOUS",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr7",
@@ -317,7 +349,9 @@
       "sv_type": ".",
       "class": "AMBIGUOUS",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr7",
@@ -335,7 +369,9 @@
       "sv_type": "DEL",
       "class": "SV",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr8",
@@ -353,7 +389,9 @@
       "sv_type": ".",
       "class": "SMALL",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr8",
@@ -371,7 +409,9 @@
       "sv_type": ".",
       "class": "SMALL",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     },
     {
       "chrom": "chr8",
@@ -389,9 +429,28 @@
       "sv_type": "INS",
       "class": "SV",
       "max_mapq": 70,
-      "mapq0_reads": 0
+      "mapq0_reads": 0,
+      "nhf_reads": null,
+      "nhf": null
     }
   ],
+  "nonhuman_fraction": {
+    "status": "disabled",
+    "reason": "no --kraken2-db: the informative reads were not screened",
+    "db": null,
+    "engine": {},
+    "params": {
+      "cluster_distance": 500,
+      "sample_reads": 200000,
+      "confidence": 0.0,
+      "memory_mapping": false,
+      "threads": 4
+    },
+    "informative_reads": null,
+    "sampled": null,
+    "regions_screened": 0,
+    "regions": []
+  },
   "candidate_comparison": {
     "hq_candidates": 3,
     "captured": 3,

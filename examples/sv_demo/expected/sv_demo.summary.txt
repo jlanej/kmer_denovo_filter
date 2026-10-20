@@ -35,4 +35,9 @@ Per-Region Results
   chr2:9859-10132                         274bp     23             85      0     0       72          0        12        7         SV   INS
   chr2:14862-15141                        280bp     12             60      6     6       72          0        10        0         SV   BND
   chr2:21867-22078                        212bp     10            211      0     1      114          7         9        0         SV   INS
+
+Non-Human Fraction Screen
+----------------------------------------
+  Status:                      disabled (no --kraken2-db: the informative reads were not screened)
+
 ============================================================

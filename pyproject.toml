@@ -25,6 +25,7 @@ dependencies = [
 kmer-denovo = "kmer_denovo_filter.cli:vcf_main"
 kmer-discovery = "kmer_denovo_filter.cli:discovery_main"
 kmer-report = "kmer_denovo_filter.cli:report_main"
+kmer-nhf = "kmer_denovo_filter.cli:nhf_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

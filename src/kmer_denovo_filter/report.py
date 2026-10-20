@@ -2289,6 +2289,13 @@ _HTML_TEMPLATE = """\
     Variants with <code>DKA_NHF ≥ 0.05</code> are conservatively flagged
     as likely contamination and excluded from the final DNM set.
   </p>
+  <p style="margin-top:8px;">
+    Discovery mode runs the same engine on its informative reads when
+    <code>--kraken2-db</code> is given (or <code>kmer-nhf</code> afterwards):
+    a sample of all of them for the run, and the reads of every SV and
+    AMBIGUOUS region, which get <code>nhf_reads</code> and <code>nhf</code>
+    in the BED.  There it annotates only; nothing is excluded.
+  </p>
 </div>
 
 <!-- ═══════════════════════════════════════════════════════════════════
@@ -2574,8 +2581,9 @@ _HTML_TEMPLATE = """\
 <!-- ═══════════════════════════════════════════════════════════════════
      Section 10: Discovery Mode Results
      ═══════════════════════════════════════════════════════════════════ -->
-{% if disc_regions %}
+{% if disc_regions or nhf %}
 <h2>10. Discovery Mode: Region Landscape</h2>
+{% if disc_regions %}
 <div class="section-rationale">
   <strong>What this shows:</strong> The VCF-free discovery mode
   identifies genomic regions enriched for proband-unique k-mers without
@@ -2603,6 +2611,101 @@ _HTML_TEMPLATE = """\
 <div class="plot-container">
   {{ sv_evidence_div | safe }}
 </div>
+{% endif %}
+{% endif %}
+
+{% if nhf %}
+<h3>Non-human fraction screen</h3>
+<div class="section-rationale">
+  <strong>What this shows:</strong> a read of a bacterium, a virus, a
+  fungus or a sequencing adapter carries k-mers in neither parent nor the
+  reference, so discovery keeps it as informative by construction, and
+  aligned with clips to a human locus it looks like SV evidence.  The
+  informative reads of every <em>SV</em> and <em>AMBIGUOUS</em> region
+  (the alignments overlapping it, the other read end of each of those
+  molecules, and the unmapped reads placed within
+  <code>--cluster-distance</code> of it) and a sample of all informative
+  reads were classified with Kraken2.  <code>nhf</code> is the share
+  classified as non-human: off the human lineage, outside UniVec Core, with
+  no k-mer voting human.  Annotated, never filtered.  A region that is not
+  screened shows <code>.</code> in the BED, which is not 0.
+</div>
+
+<div class="metric-cards">
+  <div class="metric-card {% if nhf.status == 'screened' %}green{% elif nhf.status == 'failed' %}red{% else %}orange{% endif %}">
+    <span class="value">{{ nhf.status }}</span>
+    <span class="label">Screen status</span>
+  </div>
+  {% if nhf.status == 'screened' %}
+  <div class="metric-card">
+    <span class="value">{% if nhf.sampled and nhf.sampled.fractions %}{{ "%.4f"|format(nhf.sampled.fractions.nonhuman) }}{% else %}&mdash;{% endif %}</span>
+    <span class="label">Non-human fraction of {{ "{:,}".format(nhf.sampled.reads if nhf.sampled else 0) }} sampled reads ({{ "{:,}".format(nhf.informative_reads or 0) }} informative read ends)</span>
+  </div>
+  <div class="metric-card">
+    <span class="value">{{ nhf.regions_screened }}</span>
+    <span class="label">Regions screened (SV, AMBIGUOUS, junction ends)</span>
+  </div>
+  <div class="metric-card {% if nhf_positive %}orange{% else %}green{% endif %}">
+    <span class="value">{{ nhf_positive }}</span>
+    <span class="label">Regions with non-human reads</span>
+  </div>
+  {% endif %}
+</div>
+{% if nhf.status != 'screened' %}
+<p class="description">{{ nhf.reason|e }}{% if nhf.db %} (database: <code>{{ nhf.db|e }}</code>){% endif %}</p>
+{% else %}
+<p class="description">
+  Database <code>{{ nhf.db|e }}</code>
+  {%- if nhf.engine %}; {{ nhf.engine.get("kraken2", "kraken2") }}, nonhuman-screen {{ nhf.engine.get("nonhuman_screen", "?") }}{% endif %}.
+  {% if nhf.sampled and nhf.sampled.fractions %}
+  Sampled reads: bacterial {{ "%.4f"|format(nhf.sampled.fractions.bacterial) }},
+  archaeal {{ "%.4f"|format(nhf.sampled.fractions.archaeal) }},
+  fungal {{ "%.4f"|format(nhf.sampled.fractions.fungal) }},
+  protist {{ "%.4f"|format(nhf.sampled.fractions.protist) }},
+  viral {{ "%.4f"|format(nhf.sampled.fractions.viral) }};
+  UniVec Core {{ "%.4f"|format(nhf.sampled.fractions.univec_core) }},
+  human lineage {{ "%.4f"|format(nhf.sampled.fractions.human_lineage) }},
+  unclassified {{ "%.4f"|format(nhf.sampled.fractions.unclassified) }}.
+  {% endif %}
+</p>
+{% endif %}
+
+{% if nhf_rows %}
+<table>
+  <thead>
+    <tr>
+      <th>Region</th><th>Class</th><th>Type</th><th>Reads</th>
+      <th>Placed unmapped</th><th>NHF</th><th>Bacterial</th><th>Viral</th>
+      <th>Fungal</th><th>Archaeal</th><th>Protist</th><th>UniVec Core</th>
+      <th>Human lineage</th><th>Unclassified</th><th>Top non-human taxon</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in nhf_rows %}
+    <tr>
+      <td>{{ r["chrom"]|e }}:{{ r["start"] + 1 }}-{{ r["end"] }}</td>
+      <td>{{ r["class"]|e }}</td>
+      <td>{{ r["sv_type"]|e }}</td>
+      <td>{{ r["reads"] }}</td>
+      <td>{{ r["placed_unmapped"] }}</td>
+      <td>{% if r["fractions"]["nonhuman"] > 0 %}<span class="badge badge-orange">{{ "%.4f"|format(r["fractions"]["nonhuman"]) }}</span>{% else %}{{ "%.4f"|format(r["fractions"]["nonhuman"]) }}{% endif %}</td>
+      <td>{{ "%.4f"|format(r["fractions"]["bacterial"]) }}</td>
+      <td>{{ "%.4f"|format(r["fractions"]["viral"]) }}</td>
+      <td>{{ "%.4f"|format(r["fractions"]["fungal"]) }}</td>
+      <td>{{ "%.4f"|format(r["fractions"]["archaeal"]) }}</td>
+      <td>{{ "%.4f"|format(r["fractions"]["protist"]) }}</td>
+      <td>{{ "%.4f"|format(r["fractions"]["univec_core"]) }}</td>
+      <td>{{ "%.4f"|format(r["fractions"]["human_lineage"]) }}</td>
+      <td>{{ "%.4f"|format(r["fractions"]["unclassified"]) }}</td>
+      <td>{{ r["top_taxon"]|e }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% if nhf.regions_screened > nhf_rows|length %}
+<p class="description">Showing {{ nhf_rows|length }} of {{ nhf.regions_screened }} screened regions: those with non-human reads first, then by reads.  The summary text lists them all.</p>
+{% endif %}
+{% endif %}
 {% endif %}
 {% endif %}
 
@@ -2902,6 +3005,9 @@ def generate_report(
         "mode": None,
         "vcf_metrics": None,
         "disc_metrics": None,
+        "nhf": None,
+        "nhf_rows": [],
+        "nhf_positive": 0,
         "variants": [],
         "hq_variants": [],
         "variant_table_rows": [],
@@ -3023,6 +3129,20 @@ def generate_report(
             "candidate_comparison", {},
         )
         context["dnm_evaluation"] = disc_metrics.get("dnm_evaluation", {})
+
+        # The non-human fraction screen: its block as the run recorded it,
+        # and the screened regions, those with non-human reads first.
+        nhf_block = disc_metrics.get("nonhuman_fraction")
+        context["nhf"] = nhf_block
+        if nhf_block and nhf_block.get("status") == "screened":
+            screened = nhf_block.get("regions", [])
+            context["nhf_positive"] = sum(
+                1 for r in screened if r["fractions"]["nonhuman"] > 0)
+            context["nhf_rows"] = sorted(
+                screened,
+                key=lambda r: (-(r["fractions"]["nonhuman"] > 0),
+                               -r["fractions"]["nonhuman"], -r["reads"]),
+            )[:_VARIANT_TABLE_MAX_ROWS]
 
         if not context.get("funnel_div"):
             context["funnel_div"] = _make_kmer_funnel_chart(
