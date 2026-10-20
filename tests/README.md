@@ -12,6 +12,15 @@
   SNV. The test checks each event's class, type and BEDPE link, and compares
   the output with the committed expected files. When `bwa` is installed, as
   in CI, it repeats the checks on the same reads aligned with BWA-MEM.
+- **discovery/test_nhf.py** – The non-human fraction screen of discovery
+  mode on the same simulated trio, against a tiny Kraken2 database built by
+  the test (`kraken2-build`; skipped with the reason when `kraken2` is not
+  installed): the demo reference as human and the child's 250 bp insertion
+  as *E. coli*, so the insertion's region is the one with non-human reads.
+  Covers the screened, disabled and failed states, the BED, metrics, summary
+  and report wiring, `kmer-nhf` reproducing the run's own output after the
+  fact and against a new database, and, without Kraken2, the read-set
+  definition of a region and the file rewriting.
 - **helpers.py** – Shared test helper functions for creating synthetic BAM, VCF, and FASTA data.
 - **test_example_output.py** – Regression tests that fail when committed example
   output changes (metrics, summary, VCF annotations). Shows a unified diff on

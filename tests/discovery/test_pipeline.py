@@ -110,15 +110,18 @@ class TestDiscoveryPipeline:
         with open(bed_path) as fh:
             bed_lines = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
         assert len(bed_lines) >= 1, "Expected at least one candidate region"
-        # BED lines should have 15 columns: chrom, start, end, reads, kmers,
+        # BED lines should have 17 columns: chrom, start, end, reads, kmers,
         # split_reads, discordant_pairs, max_clip_len, unmapped_mates, class,
-        # breakpoint_reads, large_indel_reads, sv_type, max_mapq, mapq0_reads
+        # breakpoint_reads, large_indel_reads, sv_type, max_mapq, mapq0_reads,
+        # nhf_reads, nhf
         parts = bed_lines[0].split("\t")
-        assert len(parts) == 15
+        assert len(parts) == 17
         assert int(parts[3]) >= 1  # at least 1 read
         assert int(parts[4]) >= 1  # at least 1 k-mer
         # The test BAMs are written at MAPQ 60: annotated, not filtered
         assert parts[13] == "60" and parts[14] == "0"
+        # No --kraken2-db: the non-human fraction columns are unscreened
+        assert parts[15] == "." and parts[16] == "."
 
         # Check informative reads BAM
         info_bam = f"{out_prefix}.informative.bam"
@@ -179,8 +182,8 @@ class TestDiscoveryPipeline:
         assert "Class" in summary
         assert "Curated DNM" not in summary
 
-    def test_discovery_ignores_kraken2_for_now(self, tmpdir, monkeypatch):
-        """Discovery mode should not invoke kraken2 even if args are provided."""
+    def test_discovery_unusable_kraken2_db_is_recorded(self, tmpdir, monkeypatch):
+        """An unusable --kraken2-db never stops the run: the screen is recorded as failed."""
         chrom = "chr1"
         ref_fa = os.path.join(tmpdir, "ref.fa")
         ref_seq = _create_ref_fasta(ref_fa, chrom, 200)
@@ -199,29 +202,16 @@ class TestDiscoveryPipeline:
         _create_bam(mother_bam, ref_fa, chrom, [("mread1", 30, ref_seq[30:90], None)])
         _create_bam(father_bam, ref_fa, chrom, [("fread1", 30, ref_seq[30:90], None)])
 
-        out_prefix = os.path.join(tmpdir, "disc_no_kraken")
+        out_prefix = os.path.join(tmpdir, "disc_bad_kraken")
         kraken_db = os.path.join(tmpdir, "kraken_db")
-        os.makedirs(kraken_db)
+        os.makedirs(kraken_db)   # an empty directory is not a database
 
-        original_check_tool = pipeline_mod._check_tool
+        def _never(*_args, **_kwargs):
+            raise AssertionError("kraken2 must not run on an unusable database")
 
-        called = {
-            "checked_kraken2": False,
-            "ran_kraken2": False,
-        }
-
-        def _check_tool_no_kraken(name):
-            if name == "kraken2":
-                called["checked_kraken2"] = True
-                return False
-            return original_check_tool(name)
-
-        def _track_if_called(*_args, **_kwargs):
-            called["ran_kraken2"] = True
-            result = pipeline_mod.Kraken2Runner.Result()
-            return result
-
-        monkeypatch.setattr(discovery_pipeline_mod, "_check_tool", _check_tool_no_kraken)
+        monkeypatch.setattr(
+            discovery_pipeline_mod.nhf.Kraken2Runner, "classify_sequences", _never,
+        )
 
         args = parse_args([
             "--child", child_bam,
@@ -233,14 +223,20 @@ class TestDiscoveryPipeline:
             "--kmer-size", "5",
             "--kraken2-db", kraken_db,
         ])
-        run_discovery_pipeline(args)
+        run_discovery_pipeline(args)   # exits normally
 
-        metrics_path = f"{out_prefix}.metrics.json"
-        with open(metrics_path) as fh:
+        with open(f"{out_prefix}.metrics.json") as fh:
             metrics = json.load(fh)
-        assert "kraken2" not in metrics
-        assert called["checked_kraken2"] is False
-        assert called["ran_kraken2"] is False
+        block = metrics["nonhuman_fraction"]
+        assert block["status"] == "failed"
+        assert block["db"] == kraken_db
+        assert "hash.k2d" in block["reason"]
+        assert metrics["regions"] and all(
+            r["nhf"] is None and r["nhf_reads"] is None for r in metrics["regions"]
+        )
+        with open(f"{out_prefix}.bed") as fh:
+            rows = [l.rstrip("\n").split("\t") for l in fh if not l.startswith("#")]
+        assert rows and all(r[-2:] == [".", "."] for r in rows)
 
     def test_discovery_inherited_no_regions(self, tmpdir):
         """When child shares k-mers with a parent, no regions should appear."""

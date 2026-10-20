@@ -40,8 +40,8 @@ and every path hangs off `WORK_DIR`.
 01_stage_and_discover.sh   one manager job: downloads each trio's three CRAMs
         │                  (S3 mirror / ENA, MD5-checked), then submits ...
         ├──► 01b_discover_trio.sh   one job per trio: child-only SVs from the
-        ├──► 01b_discover_trio.sh   call set -> --dnm-regions; kmer-discovery;
-        └──► 01b_discover_trio.sh   timing; cleanup of the CRAMs
+        ├──► 01b_discover_trio.sh   call set -> --dnm-regions; kmer-discovery
+        └──► 01b_discover_trio.sh   (+ --kraken2-db from KRAKEN2_DB); timing; cleanup
         │
 02_summarize.sh        cohort tables: per-trio counts, recurrent loci across
                        children, the de novo SV candidate list
@@ -107,7 +107,7 @@ and the manager picks the staged files up.
 
 | Requirement | Notes |
 |---|---|
-| Apptainer ≥ 1.1 (or Singularity) | `module load apptainer`; pulls `ghcr.io/jlanej/kmer_denovo_filter:latest`, which has `kmer-discovery`, samtools, bcftools, jellyfish, aria2c and these helper scripts |
+| Apptainer ≥ 1.1 (or Singularity) | `module load apptainer`; pulls `ghcr.io/jlanej/kmer_denovo_filter:latest`, which has `kmer-discovery`, `kmer-nhf`, kraken2, samtools, bcftools, jellyfish, aria2c and these helper scripts |
 | SLURM | `sbatch`/`squeue`; site flags via `SBATCH_EXTRA_ARGS` |
 | Internet | On the node that runs `00_setup.sh` and on the node that runs the manager (a DTN or login node with `MANAGER_LOCAL=1`, or a compute partition with outbound access) |
 | python3 ≥ 3.9 | On the setup/summary node (standard library only; the container's python is used otherwise) |
@@ -208,8 +208,16 @@ kept until both are done.
 2. `kmer-discovery` runs in the container with `--ref-fasta`, `--ref-jf`,
    `--threads` from the allocation and `--memory` from
    `SLURM_MEM_PER_NODE` (or `DISCOVERY_MEM`), `--tmp-dir` under
-   `TMP_ROOT/<trio>` (or `DISCOVERY_TMP_DIR`), and `--report`. The log is
-   kept as `<trio>.log`.
+   `TMP_ROOT/<trio>` (or `DISCOVERY_TMP_DIR`), and `--report`. With
+   `KRAKEN2_DB` set it also gets `--kraken2-db` (the directory is bound
+   into the container): the [non-human fraction
+   screen](../../docs/sv_calling.md#non-human-reads) of the run's
+   informative reads, whose result lands in the BED columns `nhf_reads` /
+   `nhf` and the metrics block `nonhuman_fraction`. A database the run
+   cannot use is recorded there as a failed screen, not a failed run; and
+   `kmer-nhf --out-prefix $WORK_DIR/results/<trio>/<trio> --kraken2-db
+   $KRAKEN2_DB` adds the screen to a finished run. The log is kept as
+   `<trio>.log`.
 3. On success it writes `<trio>.timing.tsv` (wall seconds, node, threads,
    memory, job id, image) and `<trio>.done`, then deletes the trio's CRAMs
    unless `KEEP_CRAMS=1` or another selected trio still needs one. On
@@ -255,9 +263,9 @@ Cohort, `$WORK_DIR/results/cohort/`:
 | File | Contents |
 |---|---|
 | `cohort_summary.md` | headline numbers and a per-trio table |
-| `trio_summary.tsv` | one row per trio: regions by class, `SV`-class regions by type, non-recurrent SVs, junctions, k-mer and read totals, child-only SVs (all, filtered, tested, supported at a breakpoint, with a region in the span), the random-locus null rate, the inherited controls (tested, supported), the child's own IGH/IGK/IGL rearrangement (junction reads, 0 if not found), wall and per-module hours |
+| `trio_summary.tsv` | one row per trio: regions by class, `SV`-class regions by type, non-recurrent SVs, junctions, k-mer and read totals, the non-human fraction screen (`nhf_status`: `screened`, `disabled`, `failed` or `.` for a run from before it existed; `nhf_sampled`: the sampled informative reads' non-human fraction), child-only SVs (all, filtered, tested, supported at a breakpoint, with a region in the span), the random-locus null rate, the inherited controls (tested, supported), the child's own IGH/IGK/IGL rearrangement (junction reads, 0 if not found), wall and per-module hours |
 | `recurrent_regions.bed` | the recurrent loci: interval, number of children, their IDs, classes and types |
-| `sv_candidates.tsv` | every non-recurrent `SV`-class region with its evidence columns (`max_mapq` and `mapq0_reads` included) and junctions (`partner|strands|type|reads`), then the flags: `locus_flags`, `partner_flags`, `partner_recurrent`, `partner_multiplicity`, `both_ends`, `rank` (see [Reading the results](#reading-the-results)) |
+| `sv_candidates.tsv` | every non-recurrent `SV`-class region with its evidence columns (`max_mapq` and `mapq0_reads` included) and junctions (`partner|strands|type|reads`), then the flags: `locus_flags`, `partner_flags`, `partner_recurrent`, `partner_multiplicity`, `both_ends`, `rank` (see [Reading the results](#reading-the-results)), and last the non-human fraction screen's `nhf_reads` and `nhf` (`.` = not screened) |
 | `sv_candidates.bed`, `sv_candidates.bedpe` | the same for IGV and bedtools, with the trio in the name / last column |
 
 ## Reading the results
@@ -290,6 +298,13 @@ Cohort, `$WORK_DIR/results/cohort/`:
   partner is itself a candidate of the same child; `rank` orders the whole
   list by evidence. The strongest, cleanest candidates:
   `awk -F'\t' 'NR == 1 || ($19 == "." && $20 == "." && $21 == 0 && $18 != ".")' sv_candidates.tsv | sort -t$'\t' -k24,24n | head`.
+  With `KRAKEN2_DB` set, the last two columns, `nhf_reads` and `nhf`, say
+  how many of a candidate's reads were classified and what share of them
+  is non-human (a bacterium's reads look like an insertion); `.` means
+  the region was not screened, which is not 0. Annotated, never dropped:
+  `cohort_summary.md` counts the screened trios and the candidates with
+  non-human reads, and `trio_summary.tsv` carries each trio's status and
+  sampled fraction.
 * **Controls**: `known_svs_tested` and `known_svs_detected` in
   `trio_summary.tsv` count the published child-only SVs passing the
   filters and how many discovery supported at a breakpoint;
@@ -359,6 +374,7 @@ or `SV_VCF` at a downloaded call set.
 | `KEEP_CRAMS` | 0 | 1 keeps CRAMs after discovery |
 | `DISCOVERY_CPUS`, `DISCOVERY_MEM`, `DISCOVERY_TIME` | 16, 128G, 36:00:00 | per-trio job resources |
 | `MIN_CHILD_COUNT`, `KMER_SIZE`, `DISCOVERY_EXTRA_ARGS`, `DISCOVERY_TMP_DIR` | 3, 31, –, – | discovery parameters |
+| `KRAKEN2_DB` | empty | a Kraken2 database directory for the non-human fraction screen of each run's informative reads (`--kraken2-db`; `scripts/download_kraken2_db.sh` fetches PrackenDB). Bound into the job; loaded into its memory, so size `DISCOVERY_MEM` for it or add `--kraken2-memory-mapping` to `DISCOVERY_EXTRA_ARGS`. Empty = no screen, recorded as `disabled` |
 | `REF_INDEX_CPUS`, `REF_INDEX_MEM`, `REF_INDEX_TIME`, `REF_JF_HASH_SIZE` | 8, 64G, 06:00:00, 4G | reference index job |
 | `RECURRENT_MIN_TRIOS`, `RECURRENT_SLACK_BP` | 2, 500 | recurrence filter |
 | `JOB_PREFIX` | `1kgtrio` | job names: `1kgtrio_manager`, `1kgtrio_refidx`, `1kgtrio_disc_<trio>` |

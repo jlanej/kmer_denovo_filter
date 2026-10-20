@@ -21,6 +21,7 @@ the limitations.
 * [Classes](#classes)
 * [Linking breakpoints](#linking-breakpoints)
 * [Breakpoint orientation and SV types](#breakpoint-orientation-and-sv-types)
+* [Non-human reads](#non-human-reads)
 * [Demo: a simulated trio](#demo-a-simulated-trio)
 * [Real data: GIAB HG002](#real-data-giab-hg002)
 * [Validation](#validation)
@@ -260,6 +261,61 @@ each region it touches:
   line, so the event shows as two lines with the same coordinates and
   opposite orientations. A single line of type `INV` or `BND` means only one
   junction was seen, as for an unbalanced translocation.
+
+## Non-human reads
+
+A read of a bacterium, a virus, a fungus or a sequencing adapter carries
+k-mers that are in neither parent nor the reference, so it is informative
+by construction. Aligned with clips to a human locus, or unmapped and
+placed at its mate's position, it looks exactly like the evidence above:
+breakpoint clips, unmapped mates, an `INS`. Nothing in the k-mer logic can
+tell it apart, so the reads themselves are classified.
+
+With `--kraken2-db`, after the regions and junctions are written,
+`kmer-discovery` classifies informative reads with Kraken2 through the
+[`nonhuman-screen`](https://github.com/jlanej/nonhuman-screen) engine that
+VCF mode uses for `DKU_NHF` / `DKA_NHF`, in one Kraken2 run, at two
+levels:
+
+| Level | Reads classified |
+|---|---|
+| the run | a deterministic sample of up to `--nhf-sample-reads` (200,000) informative read ends: those with the smallest hash of their name |
+| each `SV` and `AMBIGUOUS` region, and each region at a BEDPE junction end | the informative alignments overlapping the region, the other read end of each of those molecules, and the unmapped reads placed within `--cluster-distance` of it, one sequence per read end |
+
+A read end is one sequence: the two mates of a pair are two reads. The
+engine assigns each read one of four classes that sum to 1: **non-human**
+(classified, off the human-to-root lineage, outside UniVec Core, and with
+no k-mer voting human, the human-homology guard), **UniVec Core** (vectors
+and adapters), **human lineage** and **unclassified**; the non-human part
+is broken down into bacterial, archaeal, fungal, protist and viral. `nhf`
+is the non-human share.
+
+The BED gets two columns, `nhf_reads` (the reads classified for the
+region) and `nhf`; `SMALL` regions, and every region of a run without a
+database or with a failed screen, show `.`, which is not 0. The metrics
+JSON gets a `nonhuman_fraction` block (status `screened`, `disabled` or
+`failed` with the reason; the database and engine versions; the sampled
+fractions; one row per screened region with its fractions, how many of its
+reads were placed unmapped reads, and the commonest non-human taxon), and
+the summary and the report a section. The screen annotates and never
+filters: a region whose reads are mostly bacterial is still a region, with
+the number beside it. A failed screen is recorded and the run still exits
+0, because a screen that failed is never a clean one.
+
+`kmer-nhf --out-prefix PREFIX --kraken2-db DB` runs the same screen on a
+finished run from `PREFIX.informative.bam`, `PREFIX.bed`,
+`PREFIX.sv.bedpe` and `PREFIX.metrics.json`, and rewrites the two columns,
+the block and the summary section in place: for runs made before the
+option existed, or with a new database. The result is what the run itself
+would have written.
+
+In the [demo](#demo-a-simulated-trio) below, the 250 bp insertion's
+region shows what the screen is for: its interior reads are unmapped and
+placed at their mates' positions, and with a database in which that
+insertion's sequence is a bacterium (as
+[`tests/discovery/test_nhf.py`](../tests/discovery/test_nhf.py) builds
+one) the region's `nhf` is 0.58 over 24 reads, 14 of them placed unmapped
+reads, while every other region is 0.
 
 ## Demo: a simulated trio
 
@@ -541,6 +597,11 @@ python scripts/sv_benchmark.py score --outdir bench --prefix bench/disc
 * **Select SV regions.** Use the class column:
   `awk '$10 == "SV"' {prefix}.bed`. To also require a type, add
   `&& $13 != "."`.
+* **Set aside non-human reads.** With `--kraken2-db` (or `kmer-nhf`),
+  column 17 is the region's non-human fraction: `awk '$17 != "." && $17 >
+  0.05' {prefix}.bed` lists the regions whose reads are partly non-human,
+  and `$17 == "."` the regions that were not screened, which is not the
+  same as 0. See [Non-human reads](#non-human-reads).
 * **Compare with other calls.** Use `bedtools pairtobed` or
   `bedtools pairtopair`. The BEDPE's first ten columns follow the standard
   layout, and each line is one junction.

@@ -24,6 +24,9 @@ job leaves ``<trio>.done`` beside its outputs) and writes, under
     what the reader will want to set aside is flagged in columns instead
     (``locus_flags``, ``partner_flags``, ``partner_recurrent``,
     ``partner_multiplicity``), and ``rank`` orders the list by evidence.
+    The last two columns, ``nhf_reads`` and ``nhf``, carry the run's
+    non-human fraction screen of the region's reads (``KRAKEN2_DB``;
+    ``.`` = not screened, which is not 0).
 ``sv_candidates.bedpe``
     The junctions of those candidates, with a trio column appended.
 ``cohort_summary.md``
@@ -48,6 +51,11 @@ SV_TYPES = ("DEL", "DUP", "INV", "INS", "BND")
 EVIDENCE_COLUMNS = ("reads", "unique_kmers", "split_reads", "discordant_pairs",
                     "unmapped_mates", "breakpoint_reads", "large_indel_reads",
                     "max_clip_len", "max_mapq", "mapq0_reads")
+#: The non-human fraction screen's two values per region (kmer-discovery
+#: --kraken2-db, or kmer-nhf afterwards); "." when the region was not
+#: screened, which is not 0.  Last in the candidate table, so that nothing
+#: before them moves.
+NHF_COLUMNS = ("nhf_reads", "nhf")
 MODULES = ("1", "2", "2b", "3")
 #: Loci a reader will want to set aside with one filter, never dropped here
 #: (GRCh38, 0-based half-open): the immunoglobulin and T-cell receptor
@@ -171,6 +179,7 @@ def load_trio(results_dir, trio_id, child_sex=None):
         "timing": read_timing(prefix + ".timing.tsv"),
         "module_times": read_module_times(prefix + ".log"),
         "dnm": metrics.get("dnm_evaluation"),
+        "nhf": metrics.get("nonhuman_fraction"),
         "child_only_all": n_all,
         "child_only_pass": n_pass,
     }
@@ -322,6 +331,14 @@ def summarise_trio(info):
     row["non_ref_kmers"] = m.get("non_ref_kmers", "")
     row["proband_unique_kmers"] = m.get("proband_unique_kmers", "")
     row["informative_reads"] = m.get("informative_reads", "")
+    # The non-human fraction screen: its status ("." for a run from before
+    # the screen existed) and the sampled fraction of all informative reads
+    nhf = info.get("nhf") or {}
+    row["nhf_status"] = nhf.get("status", ".")
+    sampled = ((nhf.get("sampled") or {}).get("fractions") or {}
+               if nhf.get("status") == "screened" else {})
+    row["nhf_sampled"] = (f"{sampled['nonhuman']:.4f}" if "nonhuman" in sampled
+                          else "")
     row["child_only_svs"] = ("" if info["child_only_all"] is None
                              else info["child_only_all"])
     row["child_only_svs_filtered"] = ("" if info["child_only_pass"] is None
@@ -417,7 +434,8 @@ def write_candidates(out_dir, trios, min_trios, slack=500):
     header = ["chrom", "start", "end", "trio", "class", "sv_type"] + \
         list(EVIDENCE_COLUMNS) + [
             "n_trios_at_locus", "junctions", "locus_flags", "partner_flags",
-            "partner_recurrent", "partner_multiplicity", "both_ends", "rank"]
+            "partner_recurrent", "partner_multiplicity", "both_ends", "rank"] + \
+        list(NHF_COLUMNS)
     ends = _EndIndex(trios)
     candidates = []
     bedpe_lines = []
@@ -465,6 +483,8 @@ def write_candidates(out_dir, trios, min_trios, slack=500):
                  for p in partners), default=0)
             row["both_ends"] = int(any((info["trio"],) + p in candidate_keys
                                        for p in partners))
+            for col in NHF_COLUMNS:
+                row[col] = "." if r.get(col) is None else r[col]
             row["_evidence"] = (
                 row["both_ends"], int(bool(links)),
                 r.get("breakpoint_reads", 0) or 0,
@@ -534,6 +554,25 @@ def write_markdown(path, rows, trio_meta, candidates, recurrent, clusters,
                      f"{sum(1 for c in clean if c['both_ends'])} "
                      f"(see `rank`, `locus_flags`, `partner_flags`, "
                      f"`partner_recurrent`, `partner_multiplicity`)")
+    screened = [r for r in done if r.get("nhf_status") == "screened"]
+    failed = [r for r in done if r.get("nhf_status") == "failed"]
+    line = (f"* Non-human fraction screen (kraken2): {len(screened)} of "
+            f"{len(done)} trios screened")
+    if failed:
+        line += f", {len(failed)} failed"
+    if len(done) - len(screened) - len(failed):
+        line += f", {len(done) - len(screened) - len(failed)} not screened"
+    sampled = [float(r["nhf_sampled"]) for r in screened if r.get("nhf_sampled")]
+    if sampled:
+        line += (f"; sampled non-human fraction median {_median(sampled):.4f}, "
+                 f"max {max(sampled):.4f}")
+    if screened:
+        positive = [c for c in candidates
+                    if c["nhf"] not in (".", "") and float(c["nhf"]) > 0]
+        line += (f"; candidates with non-human reads: {len(positive)} of "
+                 f"{len(candidates)} (`nhf`, `nhf_reads`: annotated, never "
+                 f"dropped)")
+    lines.append(line)
     found = {name: sum(1 for r in done if r.get(name + "_vdj_reads", 0))
              for name in VDJ_LOCI}
     lines.append("* V(D)J rearrangement found (the child's own, the sensitivity "
@@ -573,20 +612,22 @@ def write_markdown(path, rows, trio_meta, candidates, recurrent, clusters,
             if vals:
                 lines.append(f"  * Module {mod}: median {_fmt(_median(vals), 2)} h")
     lines.append("")
-    lines.append("| Trio | Pop | Regions | SV | AMB | SMALL | DEL | DUP | INV | INS | BND | SV non-rec. | Junctions | Known SVs found | Wall h |")
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("| Trio | Pop | Regions | SV | AMB | SMALL | DEL | DUP | INV | INS | BND | SV non-rec. | Junctions | Known SVs found | NHF | Wall h |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for r in rows:
         meta = trio_meta.get(r["trio"], {})
         pop = meta.get("POPULATION", "")
         if r["status"] != "done":
-            lines.append(f"| {r['trio']} | {pop} | (missing) |" + " |" * 12)
+            lines.append(f"| {r['trio']} | {pop} | (missing) |" + " |" * 13)
             continue
         known = (f"{r['known_svs_detected']}/{r['known_svs_tested']}"
                  if r["known_svs_tested"] else "-")
-        lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+        nhf = (r["nhf_sampled"] if r.get("nhf_sampled")
+               else {"failed": "failed", "disabled": "-"}.get(r.get("nhf_status"), "-"))
+        lines.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
             r["trio"], pop, r["regions"], r["SV"], r["AMBIGUOUS"], r["SMALL"],
             r["SV_DEL"], r["SV_DUP"], r["SV_INV"], r["SV_INS"], r["SV_BND"],
-            r["SV_nonrecurrent"], r["junctions"], known, r["wall_hours"] or "-"))
+            r["SV_nonrecurrent"], r["junctions"], known, nhf, r["wall_hours"] or "-"))
     lines.append("")
     lines.append("Files: `trio_summary.tsv`, `recurrent_regions.bed`, "
                  "`sv_candidates.tsv` (with evidence and junctions), "

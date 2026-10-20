@@ -328,6 +328,7 @@ def test_setup_stage_discover_and_summarise(workspace):
         assert "--ref-jf " + str(ref) + ".k31.jf" in args
         assert "--threads 2 --memory 4" in args
         assert "--report " + str(prefix) + ".report.html" in args
+        assert "--kraken2-db" not in args          # KRAKEN2_DB empty: no screen
     args_405 = (work / "results" / "HG00405" / "HG00405.args").read_text()
     args_406 = (work / "results" / "HG00406" / "HG00406.args").read_text()
     if BCFTOOLS:
@@ -472,10 +473,13 @@ def test_flags_site_file_and_snapshot(workspace):
 
     # the site file through the environment, flags in --name=value form, and
     # a manager whose jobs see nothing but the snapshot
+    kraken2_db = workspace["work"].parent / "kraken2_db"
+    kraken2_db.mkdir()
     env2 = dict(bare, KMER_TRIOS_CONFIG=str(site), MANAGER_LOCAL="1",
                 TRIO_SLOTS="1", DISCOVERY_CPUS="2")
     result = run("01_stage_and_discover.sh", env2, f"--work-dir={work2}",
-                 "--trio-limit=1", "--set=DISCOVERY_MEM=4G")
+                 "--trio-limit=1", "--set=DISCOVERY_MEM=4G",
+                 f"--set=KRAKEN2_DB={kraken2_db}")
     assert "1 trios dispatched to discovery, 0 failed" in result.stdout
     submissions = [l for l in (logs / "sbatch.log").read_text().splitlines()
                    if "01b_discover_trio.sh" in l]
@@ -485,12 +489,17 @@ def test_flags_site_file_and_snapshot(workspace):
     args = (work2 / "results" / "HG00405" / "HG00405.args").read_text()
     assert f"--child {work2}/crams/HG00405.cram" in args
     assert "--threads 2 --memory 4" in args
+    # KRAKEN2_DB reaches the job through the snapshot: the non-human fraction
+    # screen is on, and the database directory is bound into the container
+    assert f"--kraken2-db {kraken2_db}" in args
+    assert f"export KRAKEN2_DB={kraken2_db}" in (work2 / "state" / "config.env").read_text()
     # a host directory as CONTAINER_EXAMPLE_DIR (here, this checkout) is bound
     # into the discovery job, so its helpers are reachable in the container
     running = [l for l in (logs / "jobs.log").read_text().splitlines()
                if l.startswith("[2/3] Running:")]
-    binds = running[-1].split(" --bind ")[1].split()[0].split(",")
-    assert os.path.realpath(EXAMPLE_DIR) in [os.path.realpath(b) for b in binds]
+    binds = [os.path.realpath(b) for b in running[-1].split(" --bind ")[1].split()[0].split(",")]
+    assert os.path.realpath(EXAMPLE_DIR) in binds
+    assert os.path.realpath(kraken2_db) in binds
 
     # a missing site file, and an unknown --flag, are errors not silent defaults
     result = run("02_summarize.sh", bare, "--config", str(work2 / "nope.sh"), check=False)

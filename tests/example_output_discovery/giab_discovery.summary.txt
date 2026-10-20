@@ -77,4 +77,8 @@ Known Event Evaluation (sulovari2023_dnm_regions.tsv)
   chr18:62805217              sv_like     34bp   0/2      7     0     0     0      SMALL          REGION_ONLY
   chr7:142786222             deletion  10607bp   1/2     26     0     2     7         SV            SUPPORTED
 
+Non-Human Fraction Screen
+----------------------------------------
+  Status:                      disabled (no --kraken2-db: the informative reads were not screened)
+
 ============================================================

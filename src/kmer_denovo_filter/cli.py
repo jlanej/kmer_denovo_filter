@@ -75,6 +75,47 @@ def _add_shared_args(parser):
     )
 
 
+def _add_nhf_screen_args(parser, db_required=False, compat=False):
+    """The non-human fraction screen's options (kmer-discovery and kmer-nhf).
+
+    The option names are VCF mode's (``--kraken2-db``,
+    ``--kraken2-confidence``, ``--kraken2-memory-mapping``); the compat
+    parser already defines those three, so *compat* adds only the one
+    that is discovery's own.
+    """
+    if not compat:
+        parser.add_argument(
+            "--kraken2-db", default=None, required=db_required,
+            help="Path to a Kraken2 database for the non-human fraction "
+                 "screen: the informative reads of every SV and AMBIGUOUS "
+                 "region (and of every junction end), and a sample of all "
+                 "informative reads, are classified with kraken2, and each "
+                 "screened region gets its non-human fraction in the BED "
+                 "columns nhf_reads and nhf ('.' = not screened: a blank is "
+                 "not 0). Annotated, never filtered. Without this option the "
+                 "screen is recorded as disabled; kraken2 or the database "
+                 "failing is recorded as failed and the run still succeeds "
+                 "(kmer-nhf adds the screen to a finished run). Requires "
+                 "kraken2 on PATH.",
+        )
+        parser.add_argument(
+            "--kraken2-confidence", type=float, default=0.0,
+            help="Kraken2 confidence threshold (0.0–1.0) for LCA "
+                 "classification (default: 0.0)",
+        )
+        parser.add_argument(
+            "--kraken2-memory-mapping", action="store_true", default=False,
+            help="Enable Kraken2 --memory-mapping to reduce RAM usage by "
+                 "mapping database files from disk (may run slower)",
+        )
+    parser.add_argument(
+        "--nhf-sample-reads", type=int, default=200000, metavar="N",
+        help="With --kraken2-db: at most this many informative reads (read "
+             "ends, chosen by a hash of the read name) for the run-level "
+             "non-human fraction (default: 200000)",
+    )
+
+
 # ── VCF-mode parser ─────────────────────────────────────────────────
 
 
@@ -276,6 +317,53 @@ def parse_discovery_args(argv=None):
              "the discovery results with Plotly visualizations. "
              "When omitted, no report is generated.",
     )
+    _add_nhf_screen_args(parser)
+    return parser.parse_args(argv)
+
+
+def parse_nhf_args(argv=None):
+    """Parse arguments for the after-the-fact screen (``kmer-nhf``)."""
+    parser = argparse.ArgumentParser(
+        prog="kmer-nhf",
+        description="The non-human fraction screen of an existing "
+                    "kmer-discovery run: classify its informative reads with "
+                    "kraken2 exactly as kmer-discovery --kraken2-db does, and "
+                    "rewrite the BED columns nhf_reads and nhf, the metrics "
+                    "block nonhuman_fraction and the summary section in "
+                    "place. For runs made before the option existed, or "
+                    "with a new database.",
+    )
+    parser.add_argument(
+        "--out-prefix", required=True,
+        help="The run's output prefix: [prefix].informative.bam, [prefix].bed, "
+             "[prefix].sv.bedpe and [prefix].metrics.json are read; the BED, "
+             "the metrics and [prefix].summary.txt are rewritten in place",
+    )
+    _add_nhf_screen_args(parser, db_required=True)
+    parser.add_argument(
+        "--cluster-distance", type=int, default=500,
+        help="The run's --cluster-distance: how far outside a region an "
+             "unmapped read may be placed and still belong to it "
+             "(default: 500)",
+    )
+    parser.add_argument(
+        "--threads", "-t", type=int, default=4,
+        help="Number of threads for kraken2 (default: 4)",
+    )
+    parser.add_argument(
+        "--tmp-dir", default=None,
+        help="Directory for kraken2's temporary FASTQ (default: a "
+             "subdirectory next to the output files)",
+    )
+    parser.add_argument(
+        "--sv-bedpe", default=None,
+        help="The run's BEDPE when it is not [prefix].sv.bedpe",
+    )
+    parser.add_argument(
+        "--report", default=None,
+        help="Also regenerate the interactive HTML report from the "
+             "rewritten metrics and summary, at this path",
+    )
     return parser.parse_args(argv)
 
 
@@ -425,8 +513,10 @@ def parse_args(argv=None):
         help="Path to a Kraken2 database for non-human content classification. "
              "In VCF mode, informative reads are classified with kraken2 and "
              "non-human fraction annotations are added to the output VCF. "
-             "Currently ignored in discovery mode. Requires kraken2 to be on "
-             "PATH.",
+             "In discovery mode, the informative reads of every SV and "
+             "AMBIGUOUS region and a sample of all informative reads are "
+             "classified, and the BED gets the columns nhf_reads and nhf. "
+             "Requires kraken2 to be on PATH.",
     )
     parser.add_argument(
         "--kraken2-confidence", type=float, default=0.0,
@@ -467,6 +557,7 @@ def parse_args(argv=None):
              "the k-mer filtering results with Plotly visualizations. "
              "When omitted, no report is generated.",
     )
+    _add_nhf_screen_args(parser, compat=True)
     return parser.parse_args(argv)
 
 
@@ -488,6 +579,55 @@ def discovery_main(argv=None):
               "k-mers are counted from all bases",
               file=sys.stderr)
     run_discovery_pipeline(args)
+
+
+def nhf_main(argv=None):
+    """Entry point for the after-the-fact non-human fraction screen (``kmer-nhf``).
+
+    Exit status 0 when the run was screened, 1 when the screen failed
+    (the failure is recorded in the run's files all the same) and 2 when
+    the prefix is not a kmer-discovery run.
+    """
+    import logging
+    import os
+
+    from kmer_denovo_filter.discovery import nhf
+    from kmer_denovo_filter.utils import _resolve_tmp_dir
+
+    args = parse_nhf_args(argv)
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    out_dir = os.path.dirname(os.path.abspath(args.out_prefix)) or "."
+    tmp_root = _resolve_tmp_dir(args.tmp_dir, out_dir)
+    try:
+        block = nhf.rescreen_run(
+            args.out_prefix, args.kraken2_db, bedpe_path=args.sv_bedpe,
+            cluster_distance=args.cluster_distance,
+            sample_reads=args.nhf_sample_reads,
+            confidence=args.kraken2_confidence,
+            memory_mapping=args.kraken2_memory_mapping,
+            threads=args.threads, tmpdir=tmp_root,
+        )
+    except FileNotFoundError as exc:
+        print(f"error: {exc} not found: is {args.out_prefix} the output "
+              f"prefix of a kmer-discovery run?", file=sys.stderr)
+        sys.exit(2)
+    finally:
+        try:
+            if not args.tmp_dir:
+                os.rmdir(tmp_root)  # only succeeds if empty
+        except OSError:
+            pass
+    if args.report:
+        from kmer_denovo_filter.report import generate_report
+        generate_report(
+            output_path=args.report,
+            discovery_metrics_path=f"{args.out_prefix}.metrics.json",
+            discovery_summary_path=f"{args.out_prefix}.summary.txt",
+        )
+    print(nhf.describe(block))
+    if block["status"] == nhf.STATUS_FAILED:
+        sys.exit(1)
 
 
 def parse_report_args(argv=None):

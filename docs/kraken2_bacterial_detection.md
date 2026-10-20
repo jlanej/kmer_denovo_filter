@@ -16,7 +16,11 @@ Kraken2's k-mer–based classification approach is well suited to that goal.
 > novo workflow: informative-read selection, the `DKU_*`/`DKA_*` VCF
 > annotations, the Kraken2 BED outputs, and the `--kraken2*` flags. Engine
 > internals below are summarized for context; the package docs are the source
-> of truth.
+> of truth. Discovery mode (`kmer-discovery --kraken2-db`, and `kmer-nhf` on a
+> finished run) runs the same engine on its informative reads and annotates
+> each `SV` / `AMBIGUOUS` region with its non-human fraction; that is
+> described in [Structural Variant Calling: Non-human
+> reads](sv_calling.md#non-human-reads).
 
 ---
 
