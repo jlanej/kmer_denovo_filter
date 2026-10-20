@@ -58,6 +58,18 @@ The pipeline annotates, links, classifies and types the regions after
 anchoring (Module 4). It reuses the alignment details recorded for each
 informative read during anchoring, so it never reads the BAM a second time.
 
+Anchoring (Module 3) is a vectorized scan: the proband-unique k-mers are
+loaded once as a sorted array of 2-bit codes that the workers share, and
+every batch of 10,000 reads is encoded, canonicalized and tested against
+it with numpy, one task per 20 Mb window of each contig. The reference
+subtraction of Module 1 streams the child's k-mer dump into parallel
+`jellyfish query` processes instead of writing it to disk. Both give the
+same output as the per-k-mer scan and the single query they replace
+([`tests/test_kmer_set.py`](../tests/test_kmer_set.py),
+[`tests/discovery/test_scan.py`](../tests/discovery/test_scan.py)); the
+run time and memory to expect per module are in the
+[README](../README.md#run-time-and-memory-discovery-mode).
+
 ## Evidence per region
 
 Each evidence column counts **molecules** (read names). A read pair or a

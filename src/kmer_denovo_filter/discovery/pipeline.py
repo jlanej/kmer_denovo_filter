@@ -3,10 +3,14 @@
 import bisect
 import collections
 import concurrent.futures
+import contextlib
 import json
 import logging
+import math
+import multiprocessing
 import os
 import random
+import select
 import shutil
 import statistics
 import subprocess
@@ -15,6 +19,11 @@ import tempfile
 import time
 
 import pysam
+
+try:
+    import fcntl
+except ImportError:  # not a Unix: no pipe sizing
+    fcntl = None
 
 from kmer_denovo_filter.discovery import nhf
 from kmer_denovo_filter.core.bam_scanner import (
@@ -33,6 +42,7 @@ from kmer_denovo_filter.core.jellyfish_wrappers import (
     _run_samtools_jellyfish,
     _scan_parent_jellyfish,
 )
+from kmer_denovo_filter.core.kmer_set import KmerSet, MAX_CODED_K
 from kmer_denovo_filter.core.memory_utils import (
     _get_available_memory_gb,
     _log_children_memory,
@@ -40,10 +50,10 @@ from kmer_denovo_filter.core.memory_utils import (
     _log_disk_usage,
     _log_memory,
     _log_subprocess_memory,
+    _log_subprocesses_memory,
 )
 from kmer_denovo_filter.kmer_utils import (
     canonicalize,
-    estimate_automaton_memory_gb,
     read_supports_alt,
 )
 from kmer_denovo_filter.utils import (
@@ -64,9 +74,40 @@ from kmer_denovo_filter.utils import (
 
 logger = logging.getLogger(__name__)
 
-#: How many times one contig's scan is attempted in Module 3 before the
-#: run fails (see :func:`_anchor_and_cluster`).
+#: How many times one scan task (a contig, or a window of one) is attempted
+#: in Module 3 before the run fails (see :func:`_anchor_and_cluster`).
 _SCAN_TASK_ATTEMPTS = 3
+
+#: Module 3 scans a contig in windows of about this many bases, one task
+#: each, so that the last tasks of a genome are short and the workers stay
+#: busy to the end (chr1 alone took the last 45 minutes of a 16-worker run
+#: when a contig was one task).  A read belongs to the window its alignment
+#: starts in.
+_SCAN_WINDOW_BP = 20_000_000
+
+#: What a scan worker costs beyond the k-mer set: the interpreter with
+#: pysam and numpy and the reads of one batch, and the transient arrays of
+#: the batch (a few tens of bytes per base of it; see
+#: ``core.bam_scanner._SCAN_BATCH_BASES``).  Measured in the image on a
+#: 3 M-read genome with a 6 M-k-mer set: 0.39 GB per worker at most.
+_SCAN_WORKER_BASE_GB = 0.25
+_SCAN_BYTES_PER_BATCH_BASE = 56
+
+#: The reference subtraction's splitter moves the dump in blocks of this
+#: size, each cut at a record boundary, and asks for this much pipe buffer
+#: per query process (Linux; the default pipe size elsewhere).
+_SUBTRACT_BLOCK_BYTES = 1 << 20
+_SUBTRACT_PIPE_BYTES = 1 << 20
+_F_SETPIPE_SZ = 1031  # fcntl(2) on Linux
+
+#: The filter behind each ``jellyfish query`` of the reference subtraction:
+#: keeps the k-mers whose reference count is 0 as FASTA records (headers
+#: unique across the parts), and leaves the number of k-mers seen and kept
+#: in a counts file.
+_NON_REF_AWK = (
+    '$2 == 0 { n++; print ">" p "." n; print $1 } '
+    'END { print NR, n + 0 > counts }'
+)
 
 
 # ── Discovery-mode helpers ────────────────────────────────────────
@@ -94,11 +135,11 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
                                    min_child_count, threads, tmpdir,
                                    jf_hash_size=None, memory_gb=None,
                                    bloom_filter=True):
-    """Module 1: Extract all child k-mers and filter by minimum count.
+    """Module 1a: count the child's k-mers.
 
     Child k-mers are counted with ``jellyfish count -C`` (canonical mode)
-    to match the reference index built by :func:`_ensure_ref_jf`.  This
-    ensures that ``jellyfish query`` during reference subtraction compares
+    to match the reference index built by :func:`_ensure_ref_jf`, so that
+    the reference subtraction (:func:`_subtract_reference_kmers`) compares
     k-mers in the same canonical orientation.
 
     The count is bounded in memory (``jellyfish_wrappers.size_child_count``):
@@ -117,17 +158,14 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
     the hash size.
 
     When Jellyfish leaves multiple chunk files (``--no-merge``, an older
-    jellyfish), they are merged in a streaming fashion before dumping.
-
-    The ``jellyfish dump`` output is streamed line-by-line so the full
-    dump text is never held in memory.  Each Jellyfish chunk file is
-    removed as soon as it has been processed to free disk space and OS
-    page cache.
+    jellyfish), they are merged in a streaming fashion.
 
     Returns:
-        child_candidates_fa: path to FASTA of candidate child k-mers
-            (count >= min_child_count).
-        n_candidates: number of candidate k-mers.
+        child_jf: path of the child's index (``None`` when jellyfish wrote
+            nothing), to be dumped and subtracted by
+            :func:`_subtract_reference_kmers`.
+        dump_lower: the ``-L`` bound that selects the k-mers with count
+            >= *min_child_count* from it.
     """
     child_jf = os.path.join(tmpdir, "child.jf")
 
@@ -204,138 +242,282 @@ def _extract_child_kmers_discovery(child_bam, ref_fasta, kmer_size,
     # Merge chunk files if Jellyfish produced multiple outputs
     if len(jf_files) > 1:
         merged_jf = os.path.join(tmpdir, "child_merged.jf")
-        child_jf_final = _merge_jf_files(jf_files, merged_jf, threads)
-    elif jf_files:
-        child_jf_final = jf_files[0]
-    else:
-        logger.warning("No Jellyfish output files found")
-        child_candidates_fa = os.path.join(tmpdir, "child_candidates.fa")
-        with open(child_candidates_fa, "w"):
-            pass
-        return child_candidates_fa, 0
+        return _merge_jf_files(jf_files, merged_jf, threads), dump_lower
+    if jf_files:
+        return jf_files[0], dump_lower
+    logger.warning("No Jellyfish output files found")
+    return None, dump_lower
 
-    # Step 2: Dump k-mers with count >= min_child_count (streamed to
-    # avoid holding the full dump text in memory).  With the Bloom filter the
-    # hash holds count - 1, so the bound is one lower (see use_bf above).
+
+def _stream_records_to_pipes(source_fd, sink_fds, block_bytes=_SUBTRACT_BLOCK_BYTES,
+                             on_block=None):
+    """Move a FASTA stream from *source_fd* into the pipes *sink_fds*,
+    whole records at a time.
+
+    Blocks of about *block_bytes* are read from the source and cut at the
+    last record start (``\n>``), so every sink receives complete records
+    (a k-mer's header and sequence line together).  Each block goes to an
+    idle sink, chosen round-robin among those that have nothing pending,
+    and the pending block of a sink is written as the pipe drains
+    (``select``): a slow consumer simply gets fewer blocks, and no block
+    waits in Python for a full pipe while another pipe is empty.  Nothing
+    is buffered beyond one block per sink.
+
+    *on_block* is called after every block with ``(bytes_moved,
+    records_moved)`` so far.  Returns ``(bytes_moved, records_moved)``;
+    a record is a line starting with ``>``.
+
+    Raises:
+        BrokenPipeError: when a sink's process is gone.
+    """
+    for fd in sink_fds:
+        os.set_blocking(fd, False)
+        if fcntl is not None:
+            try:
+                fcntl.fcntl(fd, _F_SETPIPE_SZ, _SUBTRACT_PIPE_BYTES)
+            except OSError:
+                pass  # not Linux, or the size is not allowed: the default holds
+    pending = {fd: memoryview(b"") for fd in sink_fds}
+    carry = b""
+    n_bytes = 0
+    n_records = 0
+    eof = False
+    next_sink = 0
+
+    def _assign(chunk):
+        nonlocal next_sink, n_bytes, n_records
+        for _ in range(len(sink_fds)):
+            fd = sink_fds[next_sink]
+            next_sink = (next_sink + 1) % len(sink_fds)
+            if not pending[fd]:
+                pending[fd] = memoryview(chunk)
+                break
+        else:
+            raise AssertionError("no idle sink")
+        n_bytes += len(chunk)
+        n_records += chunk.count(b">")
+        if on_block is not None:
+            on_block(n_bytes, n_records)
+
+    while True:
+        busy = [fd for fd in sink_fds if pending[fd]]
+        idle = len(busy) < len(sink_fds)
+        if eof and not busy:
+            break
+        readable = [source_fd] if (idle and not eof) else []
+        ready_r, ready_w, _ = select.select(readable, busy, [])
+        for fd in ready_w:
+            try:
+                written = os.write(fd, pending[fd])
+            except BlockingIOError:
+                continue
+            pending[fd] = pending[fd][written:]
+        if ready_r:
+            block = os.read(source_fd, block_bytes)
+            if not block:
+                eof = True
+                if carry:
+                    _assign(carry)
+                    carry = b""
+                continue
+            block = carry + block if carry else block
+            cut = block.rfind(b"\n>")
+            if cut < 0:
+                carry = block
+                continue
+            carry = block[cut + 1:]
+            _assign(block[:cut + 1])
+    return n_bytes, n_records
+
+
+def _stderr_tail(fh, max_lines=20):
+    fh.seek(0)
+    lines = fh.read().decode(errors="replace").strip().splitlines()
+    return "\n".join(lines[-max_lines:])
+
+
+def _subtract_reference_kmers(ref_jf, child_jf, dump_lower, tmpdir, threads,
+                              min_child_count=None, poll_interval=60):
+    """Module 1b: the child's candidate k-mers that are absent from the
+    reference, streamed from the child's index through parallel queries.
+
+    ``jellyfish dump -L dump_lower child_jf`` writes the candidate k-mers
+    (count >= *min_child_count*; *dump_lower* carries the Bloom filter's
+    offset) as FASTA, one record each.  That stream is cut at record
+    boundaries and fed, block by block, into the stdin pipes of *threads*
+    ``jellyfish query ref_jf -s /dev/stdin`` processes
+    (:func:`_stream_records_to_pipes`).  Every query process memory-maps
+    the one reference index, which the page cache holds once, so this
+    costs no more memory than the single query it replaces; each one's
+    output (``k-mer count`` lines) goes through ``awk``, which keeps the
+    k-mers whose reference count is 0 as FASTA records in a part file.
+    The parts are concatenated into ``child_non_ref_kmers.fa``.  Nothing
+    of the dump is written to disk, and nothing of it is held in Python
+    beyond one block per pipe (the old way wrote the whole dump, 100 GB
+    for a 30x genome, to a FASTA and ran one query over it).
+
+    Both the reference index and the child's are built with ``-C``, so
+    the k-mers compare in the same canonical orientation.  The child's
+    index is removed once the dump has been read.
+
+    Returns:
+        child_non_ref_fa: path to the FASTA of non-reference child k-mers.
+        n_candidates: number of candidate k-mers dumped.
+        n_non_ref: number of them absent from the reference.
+    """
+    n_query = max(1, int(threads))
+    if min_child_count is None:
+        min_child_count = dump_lower
+    parts_dir = os.path.join(tmpdir, "non_ref_parts")
+    os.makedirs(parts_dir, exist_ok=True)
+    child_non_ref_fa = os.path.join(tmpdir, "child_non_ref_kmers.fa")
     logger.info(
-        "Dumping child k-mers with count >= %d (-L %d%s) from %s (%s)…",
-        min_child_count, dump_lower, " with the Bloom filter's offset" if use_bf else "", child_jf_final,
-        _format_file_size(child_jf_final),
+        "Dumping child k-mers with count >= %d (-L %d) from %s (%s) into %d "
+        "parallel jellyfish query processes against %s (memory-mapped, held "
+        "once by the page cache); nothing of the dump touches disk…",
+        min_child_count, dump_lower, child_jf, _format_file_size(child_jf),
+        n_query, ref_jf,
     )
-    dump_start = time.monotonic()
-    dump_cmd = [
-        "jellyfish", "dump", "-c",
-        "-L", str(dump_lower),
-        child_jf_final,
-    ]
-    child_candidates_fa = os.path.join(tmpdir, "child_candidates.fa")
-    n_candidates = 0
-    with tempfile.TemporaryFile(mode="w+") as stderr_f:
+    start = time.monotonic()
+    last_log = start
+    dump_cmd = ["jellyfish", "dump", "-L", str(dump_lower), child_jf]
+    query_cmd = ["jellyfish", "query", ref_jf, "-s", "/dev/stdin"]
+    procs = []        # (label, Popen, stderr file)
+    queries = []
+    part_paths = []
+    count_paths = []
+    n_bytes = n_records = 0
+    with contextlib.ExitStack() as stack:
+        dump_err = stack.enter_context(tempfile.TemporaryFile())
         p_dump = subprocess.Popen(
-            dump_cmd, stdout=subprocess.PIPE, stderr=stderr_f, text=True,
+            dump_cmd, stdout=subprocess.PIPE, stderr=dump_err, bufsize=0,
         )
-        # Monitor dump subprocess memory during streaming
-        last_dump_log = dump_start
-        with open(child_candidates_fa, "w") as fh:
-            for line in p_dump.stdout:
-                line = line.rstrip("\n")
-                if line:
-                    kmer = line.split()[0]
-                    fh.write(f">{n_candidates}\n{kmer}\n")
-                    n_candidates += 1
-                    if n_candidates % 5_000_000 == 0:
-                        now = time.monotonic()
-                        if now - last_dump_log >= 30:
-                            logger.info(
-                                "  … dumped %d k-mers so far (%s, "
-                                "FASTA: %s)",
-                                n_candidates,
-                                _format_elapsed(now - dump_start),
-                                _format_file_size(child_candidates_fa),
-                            )
-                            _log_subprocess_memory(p_dump, "jellyfish-dump")
-                            _log_memory("during child dump")
-                            _log_disk_usage(tmpdir, "tmpdir during dump")
-                            last_dump_log = now
-        p_dump.wait()
-        if p_dump.returncode != 0:
-            stderr_f.seek(0)
-            raise RuntimeError(
-                f"jellyfish dump (child) failed: {stderr_f.read()}"
+        procs.append(("jellyfish dump (child)", p_dump, dump_err))
+        for j in range(n_query):
+            part = os.path.join(parts_dir, f"part_{j:03d}.fa")
+            counts = os.path.join(parts_dir, f"part_{j:03d}.counts")
+            part_paths.append(part)
+            count_paths.append(counts)
+            q_err = stack.enter_context(tempfile.TemporaryFile())
+            p_query = subprocess.Popen(
+                query_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=q_err, bufsize=0,
             )
+            procs.append((f"jellyfish query (ref subtraction, pipe {j})",
+                          p_query, q_err))
+            queries.append(p_query)
+            f_err = stack.enter_context(tempfile.TemporaryFile())
+            part_fh = stack.enter_context(open(part, "wb"))
+            p_filter = subprocess.Popen(
+                ["awk", "-v", f"p={j}", "-v", f"counts={counts}",
+                 _NON_REF_AWK],
+                stdin=p_query.stdout, stdout=part_fh, stderr=f_err,
+            )
+            p_query.stdout.close()  # only awk holds the read end
+            procs.append((f"awk (ref subtraction, pipe {j})", p_filter,
+                          f_err))
 
+        def _on_block(moved_bytes, moved_records):
+            nonlocal last_log
+            now = time.monotonic()
+            if now - last_log >= poll_interval:
+                elapsed = now - start
+                logger.info(
+                    "  … %d k-mers dumped and queried so far (%s, %.1f GB "
+                    "streamed, %.2g k-mers/s)",
+                    moved_records, _format_elapsed(elapsed),
+                    moved_bytes / 1024**3,
+                    moved_records / elapsed if elapsed else 0.0,
+                )
+                _log_memory("during reference subtraction")
+                _log_subprocess_memory(p_dump, "jellyfish-dump")
+                _log_subprocesses_memory(queries, "jellyfish-query")
+                last_log = now
+
+        failure = None
+        try:
+            n_bytes, n_records = _stream_records_to_pipes(
+                p_dump.stdout.fileno(), [q.stdin.fileno() for q in queries],
+                on_block=_on_block,
+            )
+        except BrokenPipeError as exc:
+            failure = exc
+        finally:
+            for q in queries:
+                try:
+                    q.stdin.close()
+                except OSError:
+                    pass
+            p_dump.stdout.close()
+        if failure is not None:
+            for _label, proc, _err in procs:
+                if proc.poll() is None:
+                    proc.kill()
+        for _label, proc, _err in procs:
+            proc.wait()
+        failed = [(label, proc, err) for label, proc, err in procs
+                  if proc.returncode != 0]
+        if failed:
+            label, proc, err = failed[0]
+            raise RuntimeError(
+                f"{label} failed with exit code {proc.returncode}: "
+                f"{_stderr_tail(err)}"
+            )
+        if failure is not None:
+            raise RuntimeError(
+                "reference subtraction: a query pipe closed early although "
+                "every process exited 0"
+            ) from failure
+
+    dump_elapsed = time.monotonic() - start
     logger.info(
-        "Child k-mer dump complete (%s, %d candidates, FASTA: %s)",
-        _format_elapsed(time.monotonic() - dump_start),
-        n_candidates, _format_file_size(child_candidates_fa),
+        "Child k-mer dump complete (%s, %d candidates, %.1f GB streamed at "
+        "%.2g k-mers/s)",
+        _format_elapsed(dump_elapsed), n_records, n_bytes / 1024**3,
+        n_records / dump_elapsed if dump_elapsed else 0.0,
     )
 
     # Remove the child jellyfish index immediately – it is no longer
-    # needed and can be very large (100+ GB for WGS).
-    for f in _find_jf_files(child_jf):
+    # needed and can be very large (30 GB for a 30x genome).
+    for f in set(_find_jf_files(os.path.join(tmpdir, "child.jf")) + [child_jf]):
         if os.path.exists(f):
             os.remove(f)
-    if child_jf_final != child_jf and os.path.exists(child_jf_final):
-        os.remove(child_jf_final)
     logger.info("Removed child Jellyfish index to free disk/cache")
     _log_memory("after child index removal")
-
     logger.info(
         "Child candidate k-mers (count >= %d): %d",
-        min_child_count, n_candidates,
+        min_child_count, n_records,
     )
-    return child_candidates_fa, n_candidates
 
-
-def _subtract_reference_kmers(ref_jf, child_candidates_fa, tmpdir):
-    """Subtract reference genome k-mers from child candidates.
-
-    Both the reference index (*ref_jf*) and the child candidates FASTA are
-    produced with ``jellyfish -C`` (canonical mode), so ``jellyfish query``
-    correctly matches k-mers regardless of strand orientation.
-
-    The query output is streamed line-by-line to avoid holding the full
-    result text in memory.  The *child_candidates_fa* file is removed
-    after the query completes because it is no longer needed.
-
-    Returns:
-        child_non_ref_fa: path to FASTA of non-reference child k-mers.
-        n_non_ref: number of surviving k-mers.
-    """
-    query_cmd = [
-        "jellyfish", "query", ref_jf, "-s", child_candidates_fa,
-    ]
-
-    child_non_ref_fa = os.path.join(tmpdir, "child_non_ref_kmers.fa")
+    # Every k-mer the splitter sent must have been queried and counted.
+    n_queried = 0
     n_non_ref = 0
-    with tempfile.TemporaryFile(mode="w+") as stderr_f:
-        p_query = subprocess.Popen(
-            query_cmd, stdout=subprocess.PIPE, stderr=stderr_f, text=True,
+    for counts in count_paths:
+        with open(counts) as fh:
+            seen, kept = fh.read().split()
+        n_queried += int(seen)
+        n_non_ref += int(kept)
+    if n_queried != n_records:
+        raise RuntimeError(
+            f"reference subtraction: {n_records} k-mers were dumped but "
+            f"the query processes reported {n_queried}"
         )
-        with open(child_non_ref_fa, "w") as fh:
-            for line in p_query.stdout:
-                line = line.rstrip("\n")
-                if not line:
-                    continue
-                parts = line.split()
-                if len(parts) >= 2 and parts[1] == "0":
-                    fh.write(f">{n_non_ref}\n{parts[0]}\n")
-                    n_non_ref += 1
-        p_query.wait()
-        if p_query.returncode != 0:
-            stderr_f.seek(0)
-            raise RuntimeError(
-                f"jellyfish query (ref subtraction) failed: {stderr_f.read()}"
-            )
-
-    # Remove the candidates FASTA – the non-ref subset is now on disk.
-    if os.path.exists(child_candidates_fa):
-        os.remove(child_candidates_fa)
+    concat_start = time.monotonic()
+    with open(child_non_ref_fa, "wb") as out:
+        for part in part_paths:
+            with open(part, "rb") as fh:
+                shutil.copyfileobj(fh, out, 16 << 20)
+            os.remove(part)
+    shutil.rmtree(parts_dir, ignore_errors=True)
 
     logger.info(
-        "Non-reference child k-mers after subtraction: %d", n_non_ref,
+        "Non-reference child k-mers after subtraction: %d (%s; %s to "
+        "collect the %d parts into %s)",
+        n_non_ref, _format_elapsed(time.monotonic() - start),
+        _format_elapsed(time.monotonic() - concat_start), n_query,
+        _format_file_size(child_non_ref_fa),
     )
-    return child_non_ref_fa, n_non_ref
+    return child_non_ref_fa, n_records, n_non_ref
 
 
 def _count_parent_jellyfish(parent_bam, ref_fasta, kmer_fasta, kmer_size,
@@ -612,52 +794,82 @@ def _filter_parents_discovery(mother_bam, father_bam, ref_fasta,
     return n_proband, proband_unique_fa
 
 
+def _scan_windows(contigs, lengths, window_size):
+    """The scan tasks of a genome: ``(contig, start, end)`` per window of
+    about *window_size* bases (a contig shorter than that is one window,
+    scanned whole: ``(contig, None, None)``), in header order, then
+    ``(None, None, None)`` for the unplaced unmapped reads."""
+    windows = []
+    for contig, length in zip(contigs, lengths):
+        n_windows = (max(1, math.ceil(length / window_size))
+                     if window_size and length else 1)
+        if n_windows == 1:
+            windows.append((contig, None, None))
+            continue
+        size = math.ceil(length / n_windows)
+        for w in range(n_windows):
+            windows.append((contig, w * size, min(length, (w + 1) * size)))
+    windows.append((None, None, None))
+    return windows
+
+
+def _window_label(contig, start, end):
+    if contig is None:
+        return "(unmapped)"
+    if start is None:
+        return contig
+    return f"{contig}:{start + 1:,}-{end:,}"
+
+
+def _scan_pool_context():
+    """The start method of the scan workers: ``fork`` where it exists, so
+    the workers share the parent's k-mer set copy-on-write (and are its
+    direct children, which the memory log reads); the platform's default
+    elsewhere (spawn on macOS, where each worker gets a copy)."""
+    if (sys.platform.startswith("linux")
+            and "fork" in multiprocessing.get_all_start_methods()):
+        return multiprocessing.get_context("fork")
+    return None
+
+
 def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                         kmer_size, merge_distance=500, threads=1,
                         min_distinct_kmers_per_read=1,
                         proband_unique_fa=None,
-                        proband_jf=None,
                         n_proband_unique=None,
                         tmpdir=None,
                         memory_limit_gb=None,
-                        informative_bam=None):
+                        informative_bam=None,
+                        window_size=_SCAN_WINDOW_BP):
     """Module 3: Find reads containing proband-unique k-mers and cluster regions.
 
     Scans **all** primary, non-duplicate child reads — including unmapped
     and low-MAPQ reads — so that no proband-unique k-mers are missed at
-    this stage.  The scan runs one task per contig plus one for unplaced
-    unmapped reads, in a process pool when more than one worker is
-    available and in-process otherwise.  Results are combined in task
-    order, so the output does not depend on which worker finishes first.
-
-    Supports two scanning backends:
-
-    - **Jellyfish-backed** (when *proband_jf* is provided) — each worker
-      opens a ``jellyfish query`` subprocess that memory-maps the hash
-      file.  The OS page cache is shared across workers, so N workers
-      ≈ 1× the hash file in memory.  This is the path for WGS discovery
-      with hundreds of millions of proband-unique k-mers.
-    - **Aho-Corasick** (when *proband_unique_fa* or *proband_unique_kmers*
-      is provided) — builds an in-memory automaton.  Fast for small k-mer
-      sets (VCF mode or unit tests).
+    this stage.  The proband-unique k-mers are loaded once, here, as a
+    :class:`KmerSet` (a sorted array of 2-bit codes, about 8 bytes per
+    k-mer) that the workers share copy-on-write; each worker tests its
+    reads against it in vectorized batches (see
+    :mod:`kmer_denovo_filter.core.kmer_set`).  The scan runs one task per
+    window of about *window_size* bases of each contig (a shorter contig
+    is one task) plus one for unplaced unmapped reads, in a process pool
+    when more than one worker is available and in-process otherwise.
+    Results are combined in task order, so the output does not depend on
+    which worker finishes first, nor on the window size.
 
     Args:
         child_bam: Path to child BAM file.
         ref_fasta: Path to reference FASTA (or None).
-        proband_unique_kmers: Set of canonical k-mer strings, or None
-            when *proband_unique_fa* or *proband_jf* is provided.
+        proband_unique_kmers: Iterable of k-mer strings, or None when
+            *proband_unique_fa* is provided.
         kmer_size: K-mer size.
         merge_distance: Maximum gap for merging adjacent regions.
         threads: Number of parallel workers (default 1).
         min_distinct_kmers_per_read: Minimum distinct proband-unique
             k-mers a read must carry to be retained (default 1).
-        proband_unique_fa: Optional FASTA path.  Workers load k-mers
-            from disk to build an Aho-Corasick automaton.
-        proband_jf: Optional Jellyfish index path (.jf).  Workers query
-            the index via ``jellyfish query`` — low memory, suited for
-            large k-mer sets.
+        proband_unique_fa: Optional FASTA path of the proband-unique
+            k-mers (one per record), loaded into the set.
         n_proband_unique: Number of proband-unique k-mers (for logging).
-        tmpdir: Writable directory for temporary files (the per-contig
+        tmpdir: Writable directory for temporary files (the per-task
             informative-read shards).
         memory_limit_gb: Explicit memory limit in GB.  When provided,
             overrides auto-detected system memory for worker-count
@@ -668,6 +880,8 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
             *min_distinct_kmers_per_read* distinct proband-unique k-mers)
             is written to this BAM with a ``dk:i:1`` tag during the same
             scan; the BAM is then sorted and indexed.
+        window_size: Bases per scan task; ``None`` or 0 scans each contig
+            as one task.
 
     Returns:
         Tuple of (regions, region_reads, total_informative, region_kmers,
@@ -675,22 +889,31 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     """
     anchor_start = time.monotonic()
 
-    # Determine scanning mode
-    use_jellyfish = proband_jf is not None
-
-    # ── Count k-mers if not provided ────────────────────────────────
-    if n_proband_unique is None and proband_unique_fa:
-        n_proband_unique = 0
-        with open(proband_unique_fa) as fh:
-            for line in fh:
-                if line and not line.startswith(">"):
-                    n_proband_unique += 1
-
-    n_kmer_count = n_proband_unique or (
-        len(proband_unique_kmers) if proband_unique_kmers else 0
+    # ── The k-mer set, loaded once and shared with the workers ──────
+    load_start = time.monotonic()
+    if proband_unique_fa:
+        kmer_set = KmerSet.from_fasta(proband_unique_fa, kmer_size)
+    else:
+        kmer_set = KmerSet.from_kmers(proband_unique_kmers or (), kmer_size)
+    n_kmer_count = len(kmer_set)
+    mp_context = _scan_pool_context()
+    if kmer_size > MAX_CODED_K:
+        logger.warning(
+            "  k=%d does not fit a 64-bit code (k <= %d does): the scan "
+            "uses the per-k-mer fallback, which is much slower",
+            kmer_size, MAX_CODED_K,
+        )
+    logger.info(
+        "  Proband-unique k-mer set: %d k-mers, %.1f MB as sorted 2-bit "
+        "codes (%s; loaded in %s)",
+        n_kmer_count, kmer_set.nbytes / 1024**2,
+        "shared copy-on-write by the workers" if mp_context is not None
+        else "copied to each worker",
+        _format_elapsed(time.monotonic() - load_start),
     )
+    _log_memory("after loading the k-mer set")
 
-    # ── Log memory planning ─────────────────────────────────────────
+    # ── Memory planning ────────────────────────────────────────────
     total_mem_gb, avail_mem_gb = _get_available_memory_gb()
     # When the caller supplies an explicit memory limit (e.g. from
     # --memory on HPC), treat it as both total and available so that
@@ -703,26 +926,18 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
             "  [MemoryPlanning] Using explicit memory limit: %.1f GB",
             memory_limit_gb,
         )
-    if use_jellyfish:
-        # Jellyfish-backed: workers share OS page cache, memory ≈ 1×
-        # the .jf file size regardless of worker count.
-        jf_size_gb = 0.0
-        try:
-            jf_size_gb = os.path.getsize(proband_jf) / (1024**3)
-        except OSError:
-            pass
-        logger.info(
-            "  [MemoryPlanning] jellyfish-backed mode: %d k-mers, "
-            "index: %.1f GB (shared via page cache)",
-            n_kmer_count, jf_size_gb,
-        )
-    else:
-        est_per_worker_gb = estimate_automaton_memory_gb(n_kmer_count)
-        logger.info(
-            "  [MemoryPlanning] Aho-Corasick mode: %d k-mers, "
-            "estimated %.1f GB per worker",
-            n_kmer_count, est_per_worker_gb,
-        )
+    from kmer_denovo_filter.core.bam_scanner import _SCAN_BATCH_BASES
+    batch_gb = _SCAN_BATCH_BASES * _SCAN_BYTES_PER_BATCH_BASE / 1024**3
+    set_gb = kmer_set.nbytes / 1024**3
+    est_per_worker_gb = _SCAN_WORKER_BASE_GB + batch_gb + (
+        0.0 if mp_context is not None else set_gb)
+    logger.info(
+        "  [MemoryPlanning] k-mer set %.3f GB (one copy%s); about %.2f GB "
+        "per worker: %.2f GB of transient arrays per batch of %d bases "
+        "plus the interpreter",
+        set_gb, "" if mp_context is not None else " per worker",
+        est_per_worker_gb, batch_gb, _SCAN_BATCH_BASES,
+    )
     if total_mem_gb is not None:
         logger.info(
             "  [MemoryPlanning] System memory: %.1f GB total, %s available",
@@ -736,64 +951,47 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         reference_filename=ref_fasta if ref_fasta else None,
     )
     contigs = list(bam.references)
+    lengths = list(bam.lengths)
     bam.close()
 
-    # One task per contig + one for unmapped reads.  With an informative
-    # BAM requested, each task writes its reads to its own shard, and the
-    # shards are combined in task (coordinate) order afterwards.
+    # One task per window of a contig + one for unmapped reads.  With an
+    # informative BAM requested, each task writes its reads to its own
+    # shard, and the shards are combined in task (coordinate) order
+    # afterwards.
+    windows = _scan_windows(contigs, lengths, window_size)
     shard_dir = None
-    shard_paths = [None] * (len(contigs) + 1)
+    shard_paths = [None] * len(windows)
     if informative_bam:
         shard_dir = tempfile.mkdtemp(prefix="informative_reads_", dir=tmpdir)
         shard_paths = [
             os.path.join(shard_dir, f"{i:06d}.bam")
-            for i in range(len(contigs) + 1)
+            for i in range(len(windows))
         ]
     tasks = [
-        (child_bam, ref_fasta, contig, shard)
-        for contig, shard in zip(contigs + [None], shard_paths)
+        (child_bam, ref_fasta, contig, shard, start, end)
+        for (contig, start, end), shard in zip(windows, shard_paths)
     ]
+    labels = [_window_label(contig, start, end)
+              for contig, start, end in windows]
 
-    # ── Dynamically cap workers based on available memory ──────────
-    if use_jellyfish:
-        # Jellyfish workers share page cache; no per-worker penalty.
-        # All workers share the same memory-mapped .jf file, so
-        # worker count is bounded only by threads and task count.
-        n_workers = min(threads, len(tasks))
-    else:
-        max_workers_by_mem = threads
-        if avail_mem_gb is not None and est_per_worker_gb > 0:
-            usable_gb = avail_mem_gb * 0.8
-            max_workers_by_mem = max(1, int(usable_gb / est_per_worker_gb))
-        elif total_mem_gb is not None and est_per_worker_gb > 0:
-            usable_gb = total_mem_gb * 0.7
-            max_workers_by_mem = max(1, int(usable_gb / est_per_worker_gb))
-        n_workers = min(threads, len(tasks), max_workers_by_mem)
-    n_workers = max(n_workers, 1)
+    # ── Cap workers by memory ───────────────────────────────────────
+    max_workers_by_mem = threads
+    if avail_mem_gb is not None and est_per_worker_gb > 0:
+        usable_gb = avail_mem_gb * 0.8 - set_gb
+        max_workers_by_mem = max(1, int(usable_gb / est_per_worker_gb))
+    elif total_mem_gb is not None and est_per_worker_gb > 0:
+        usable_gb = total_mem_gb * 0.7 - set_gb
+        max_workers_by_mem = max(1, int(usable_gb / est_per_worker_gb))
+    n_workers = max(1, min(threads, len(tasks), max_workers_by_mem))
 
     logger.info(
-        "  Anchoring: %d contigs, %d workers (requested=%d, mode=%s)",
-        len(contigs), n_workers, threads,
-        "jellyfish" if use_jellyfish else "aho-corasick",
+        "  Anchoring: %d contigs in %d scan tasks (windows of %s bases, "
+        "plus the unmapped reads), %d workers (requested=%d)",
+        len(contigs), len(tasks),
+        f"{window_size:,}" if window_size else "the whole contig",
+        n_workers, threads,
     )
-
-    # Worker init: choose data source based on mode
-    if use_jellyfish:
-        init_args = (proband_jf, kmer_size,
-                     min_distinct_kmers_per_read)
-        init_mode = "jellyfish-query"
-    elif proband_unique_fa:
-        init_args = (proband_unique_fa, kmer_size,
-                     min_distinct_kmers_per_read)
-        init_mode = "fasta-file"
-    else:
-        init_args = (proband_unique_kmers or set(), kmer_size,
-                     min_distinct_kmers_per_read)
-        init_mode = "in-memory-set"
-
-    logger.info(
-        "  Worker init mode: %s", init_mode,
-    )
+    init_args = (kmer_set, kmer_size, min_distinct_kmers_per_read)
 
     read_hits = []
     reads_seen = set()
@@ -802,12 +1000,15 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
     read_coverage = collections.defaultdict(collections.Counter)
     unmapped_informative = 0
     total_reads_scanned = 0
-    completed_contigs = 0
-    informative_received = 0  # before cross-contig dedup; for progress logs
+    completed_tasks = 0
+    informative_received = 0  # before cross-task dedup; for progress logs
     # Hits and SV metadata of finished tasks that are waiting for an
     # earlier task to finish, keyed by task index (see _merge_result).
     held = {}
     next_to_fold = 0
+    # The keys reported by the folded windows of each contig, for the
+    # coverage a window could not settle on its own (see _merge_result).
+    contig_seen = collections.defaultdict(set)
     last_progress_log = time.monotonic()
     progress_interval = 300  # seconds (5 minutes)
 
@@ -815,19 +1016,27 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         """Fold one task's scan results into the running totals.
 
         Coverage and counts are added straight away.  Hits and SV metadata
-        are de-duplicated across contigs by (read name, is_supplementary),
-        where the first contig to report a key wins — e.g. when both mates
-        of a pair are informative on different chromosomes.  Folding them
-        strictly in task order keeps that choice independent of which
-        worker finishes first, and identical to a single-worker run.
+        are de-duplicated across tasks by (read name, is_supplementary),
+        where the first task to report a key wins — e.g. when both mates
+        of a pair are informative on different chromosomes, or in
+        different windows of one.  Folding them strictly in task order
+        keeps that choice independent of which worker finishes first, and
+        identical to a single-worker run over whole contigs.
+
+        A scan of a whole contig skips a read whose key it has seen (the
+        second informative mate of a pair, say) entirely, coverage
+        included, while reads on different contigs each count.  A window
+        cannot know what the earlier windows of its contig saw, so it
+        defers the coverage of the reads whose key they may have reported
+        (``deferred``), and it is added here only when none of them did.
         """
         nonlocal unmapped_informative, total_reads_scanned
-        nonlocal completed_contigs, informative_received, next_to_fold
+        nonlocal completed_tasks, informative_received, next_to_fold
         (hits, seen, unmapped, scanned,
-         sv_meta, worker_cov, worker_read_cov) = result
+         sv_meta, worker_cov, worker_read_cov, deferred) = result
         total_reads_scanned += scanned
         unmapped_informative += unmapped
-        completed_contigs += 1
+        completed_tasks += 1
         informative_received += len(hits) + unmapped
         # Merge k-mer coverage (update is faster than += for Counters)
         for chrom, cov in worker_cov.items():
@@ -836,9 +1045,10 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         for chrom, cov in worker_read_cov.items():
             read_coverage[chrom].update(cov)
 
-        held[index] = (hits, seen, sv_meta)
+        held[index] = (hits, seen, sv_meta, deferred, windows[index][0])
         while next_to_fold in held:
-            task_hits, task_seen, task_meta = held.pop(next_to_fold)
+            (task_hits, task_seen, task_meta, task_deferred,
+             task_contig) = held.pop(next_to_fold)
             next_to_fold += 1
             for hit in task_hits:
                 # hit: (ref_name, start, end, qname, kmers, is_supp)
@@ -850,33 +1060,42 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
             for key, meta in task_meta.items():
                 if key not in read_sv_meta:
                     read_sv_meta[key] = meta
-            # Track all seen keys for cross-contig dedup
+            # Track all seen keys for cross-task dedup
             reads_seen.update(task_seen)
+            if task_deferred:
+                earlier = contig_seen[task_contig]
+                for key, cov in task_deferred:
+                    if key in earlier:
+                        continue
+                    kmer_coverage[task_contig].update(cov)
+                    for pos in cov:
+                        read_coverage[task_contig][pos] += 1
+            if task_contig is not None:
+                contig_seen[task_contig].update(task_seen)
 
-        # Log individual contig completion for large contigs
+        # Log individual task completion for large ones
         if scanned >= 1_000_000:
             logger.info(
-                "  [Anchoring] Contig %s complete: %d reads "
+                "  [Anchoring] %s complete: %d reads "
                 "scanned, %d informative hits (%s elapsed)",
-                tasks[index][2] or "(unmapped)", scanned,
-                len(hits) + unmapped,
+                labels[index], scanned, len(hits) + unmapped,
                 _format_elapsed(time.monotonic() - anchor_start),
             )
 
     def _log_progress():
-        """Log progress every 5 minutes or every 100 contigs."""
+        """Log progress every 5 minutes or every 100 tasks."""
         nonlocal last_progress_log
         now = time.monotonic()
         at_milestone = (
-            completed_contigs % 100 == 0
-            or completed_contigs == len(tasks)
+            completed_tasks % 100 == 0
+            or completed_tasks == len(tasks)
         )
         if now - last_progress_log >= progress_interval or at_milestone:
             logger.info(
-                "  [Anchoring] Progress: %d/%d contigs complete "
+                "  [Anchoring] Progress: %d/%d tasks complete "
                 "(%.0f%%), %d reads scanned, %d informative (%s)",
-                completed_contigs, len(tasks),
-                100 * completed_contigs / len(tasks),
+                completed_tasks, len(tasks),
+                100 * completed_tasks / len(tasks),
                 total_reads_scanned,
                 informative_received,
                 _format_elapsed(now - anchor_start),
@@ -887,7 +1106,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
 
     # A task that fails is run again, up to _SCAN_TASK_ATTEMPTS times in
     # all, before the run gives up: on a network filesystem a worker can
-    # lose its memory-mapped index or a shard it is writing ("Stale file
+    # lose the file it reads or a shard it is writing ("Stale file
     # handle") for reasons that are gone a moment later, and the scan of
     # a whole genome should not be lost to that.  A rerun starts the
     # task's shard afresh and reports its hits in task order like any
@@ -898,16 +1117,28 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
         attempts[index] += 1
         if attempts[index] >= _SCAN_TASK_ATTEMPTS:
             logger.error(
-                "Worker failed for contig=%s (%d attempts)",
-                tasks[index][2], attempts[index],
+                "Worker failed for %s (%d attempts)",
+                labels[index], attempts[index],
             )
             raise exc
         logger.warning(
-            "Worker failed for contig=%s (attempt %d of %d): %s; running "
-            "the contig again",
-            tasks[index][2], attempts[index], _SCAN_TASK_ATTEMPTS,
+            "Worker failed for %s (attempt %d of %d): %s; running "
+            "the task again",
+            labels[index], attempts[index], _SCAN_TASK_ATTEMPTS,
             str(exc).splitlines()[0] if str(exc) else type(exc).__name__,
         )
+
+    # Submission order: the unmapped reads first (their number is unknown),
+    # then the longest windows, so that the last tasks to finish are short.
+    # Results are still folded in task (index) order.
+    def _span(index):
+        contig, start, end = windows[index]
+        if contig is None:
+            return float("inf")
+        if start is None:
+            return lengths[contigs.index(contig)]
+        return end - start
+    submit_order = sorted(range(len(tasks)), key=_span, reverse=True)
 
     try:
         if n_workers > 1:
@@ -915,15 +1146,16 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                 max_workers=n_workers,
                 initializer=_init_scan_worker,
                 initargs=init_args,
+                mp_context=mp_context,
             ) as executor:
                 futures = {
-                    executor.submit(_scan_contig_for_hits, *t): i
-                    for i, t in enumerate(tasks)
+                    executor.submit(_scan_contig_for_hits, *tasks[i]): i
+                    for i in submit_order
                 }
 
                 # Use wait() with timeout for time-based progress
                 # reporting so users get feedback even when large
-                # contigs take hours.
+                # tasks take long.
                 pending = set(futures.keys())
                 while pending:
                     done, pending = concurrent.futures.wait(
@@ -932,12 +1164,12 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                     )
 
                     if not done:
-                        # Timeout — no contig completed; log heartbeat
+                        # Timeout — no task completed; log heartbeat
                         logger.info(
-                            "  [Anchoring] Heartbeat: %d/%d contigs "
+                            "  [Anchoring] Heartbeat: %d/%d tasks "
                             "complete, %d reads scanned, %d informative "
                             "(%s elapsed)",
-                            completed_contigs, len(tasks),
+                            completed_tasks, len(tasks),
                             total_reads_scanned,
                             informative_received,
                             _format_elapsed(
@@ -964,7 +1196,7 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
                         _merge_result(index, result)
                     _log_progress()
         else:
-            # A single worker: run the same per-contig scan in-process.
+            # A single worker: run the same per-task scan in-process.
             _init_scan_worker(*init_args)
             try:
                 for index, task in enumerate(tasks):
@@ -1063,17 +1295,19 @@ def _anchor_and_cluster(child_bam, ref_fasta, proband_unique_kmers,
 
 def _merge_informative_shards(shard_paths, child_bam, ref_fasta, output_bam,
                               unsorted_path):
-    """Combine per-contig informative-read shards into a sorted, indexed BAM.
+    """Combine per-task informative-read shards into a sorted, indexed BAM.
 
-    Shards are read in task order (contigs in header order, then unplaced
-    unmapped reads).  Each ``(query_name, is_supplementary)`` key — the key
+    Shards are read in task order (the windows of the contigs in header
+    order, then unplaced unmapped reads).  Each ``(query_name, is_supplementary)`` key — the key
     used to de-duplicate reads while anchoring — is written once, so when
     both mates of a pair are informative on different contigs only the
     first is kept.
 
     Args:
         shard_paths: Shard BAM paths in task order.  Missing files (tasks
-            without informative reads) are skipped.
+            without informative reads) are skipped.  A read that two
+            windows of one contig both report (both mates of a pair
+            straddling a window boundary share the key) is written once.
         child_bam: Child BAM/CRAM whose header the output reuses.
         ref_fasta: Reference FASTA for CRAM input (or None).
         output_bam: Final BAM path; a ``.bai`` index is written beside it.
@@ -2639,12 +2873,21 @@ def run_discovery_pipeline(args):
         step_start = time.monotonic()
         logger.info("[Module 1] Child k-mer extraction & reference subtraction")
         _log_dir_size(tmpdir, "before Module 1")
-        child_candidates_fa, n_candidates = _extract_child_kmers_discovery(
+        child_jf, dump_lower = _extract_child_kmers_discovery(
             args.child, args.ref_fasta, args.kmer_size,
             args.min_child_count, args.threads, tmpdir,
             jf_hash_size=jf_hash_size, memory_gb=memory_limit_gb,
             bloom_filter=not getattr(args, "no_child_bloom_filter", False),
         )
+        if child_jf is None:
+            n_candidates, n_non_ref, child_non_ref_fa = 0, 0, None
+        else:
+            child_non_ref_fa, n_candidates, n_non_ref = (
+                _subtract_reference_kmers(
+                    ref_jf, child_jf, dump_lower, tmpdir, args.threads,
+                    min_child_count=args.min_child_count,
+                )
+            )
 
         if n_candidates == 0:
             logger.warning("No child candidate k-mers found; writing empty outputs")
@@ -2667,9 +2910,6 @@ def run_discovery_pipeline(args):
             )
             return
 
-        child_non_ref_fa, n_non_ref = _subtract_reference_kmers(
-            ref_jf, child_candidates_fa, tmpdir,
-        )
         logger.info(
             "[Module 1] Complete (%s)",
             _format_elapsed(time.monotonic() - step_start),
@@ -2742,53 +2982,52 @@ def run_discovery_pipeline(args):
             )
             return
 
-        # ── Module 2b: Build Jellyfish index of proband-unique k-mers ──
+        # ── Module 2b: the kept Jellyfish index of proband-unique k-mers ──
         #
-        # Build a .jf hash index from the proband-unique FASTA so that
-        # Module 3 workers can query k-mer membership via disk-backed
-        # jellyfish query instead of loading them into Python memory.
-        # The .jf is memory-mapped and shared across workers via the
-        # OS page cache (N workers ≈ 1× hash file in RAM).
-        step_start = time.monotonic()
-        logger.info(
-            "[Module 2b] Building Jellyfish index of %d proband-unique k-mers",
-            n_proband_unique,
-        )
-        _log_dir_size(tmpdir, "before proband index build")
-        proband_jf = _build_proband_jf_index(
-            proband_unique_fa, args.kmer_size, tmpdir,
-            n_proband_unique=n_proband_unique,
-        )
-        logger.info(
-            "[Module 2b] Complete (%s, index: %s)",
-            _format_elapsed(time.monotonic() - step_start),
-            _format_file_size(proband_jf),
-        )
-        _log_memory("after proband index build")
-        _log_dir_size(tmpdir, "after proband index build")
-
         # The proband-unique k-mer index is small (tens of MB for a 30x
         # genome) and is the one intermediate worth keeping: across a
         # cohort, k-mers recurring in unrelated probands are errors, and
         # that set can only be built from these files.  It is copied out
-        # before the temporary directory goes.
+        # before the temporary directory goes.  Module 3 does not read it:
+        # it loads the FASTA itself.
+        step_start = time.monotonic()
         if getattr(args, "discard_proband_kmers", False):
-            logger.info("  Proband-unique k-mer index discarded with the "
-                        "temporary directory (--discard-proband-kmers)")
+            logger.info("[Module 2b] Proband-unique k-mer index not built "
+                        "(--discard-proband-kmers)")
+            logger.info(
+                "[Module 2b] Complete (%s, index: not kept)",
+                _format_elapsed(time.monotonic() - step_start),
+            )
         else:
+            logger.info(
+                "[Module 2b] Building Jellyfish index of %d proband-unique "
+                "k-mers", n_proband_unique,
+            )
+            _log_dir_size(tmpdir, "before proband index build")
+            proband_jf = _build_proband_jf_index(
+                proband_unique_fa, args.kmer_size, tmpdir,
+                n_proband_unique=n_proband_unique,
+            )
             kept_jf = f"{out_prefix}.proband_unique.jf"
             shutil.copyfile(proband_jf, kept_jf)
+            os.remove(proband_jf)
+            logger.info(
+                "[Module 2b] Complete (%s, index: %s)",
+                _format_elapsed(time.monotonic() - step_start),
+                _format_file_size(kept_jf),
+            )
             logger.info("  Proband-unique k-mer index kept: %s (%s)",
                         kept_jf, _format_file_size(kept_jf))
+            _log_memory("after proband index build")
 
         # ── Module 3: Anchoring & Region Clustering ────────────────
         # The informative reads BAM is written during this same scan.
         step_start = time.monotonic()
         logger.info(
             "[Module 3] Anchoring %d proband-unique k-mers to child reads "
-            "(jellyfish index: %s)",
-            n_proband_unique,
-            _format_file_size(proband_jf),
+            "(from %s, %s)",
+            n_proband_unique, proband_unique_fa,
+            _format_file_size(proband_unique_fa),
         )
         _log_memory("before Module 3")
         (regions, region_reads, total_informative, region_kmers,
@@ -2799,7 +3038,7 @@ def run_discovery_pipeline(args):
                 args.kmer_size, merge_distance=args.cluster_distance,
                 threads=args.threads,
                 min_distinct_kmers_per_read=min_dk_per_read,
-                proband_jf=proband_jf,
+                proband_unique_fa=proband_unique_fa,
                 n_proband_unique=n_proband_unique,
                 tmpdir=tmpdir,
                 memory_limit_gb=memory_limit_gb,

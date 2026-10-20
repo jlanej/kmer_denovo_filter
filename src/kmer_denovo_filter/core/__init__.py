@@ -10,8 +10,10 @@ Sub-modules
 * :mod:`memory_utils` — process / system memory and disk diagnostics.
 * :mod:`jellyfish_wrappers` — Jellyfish subprocess helpers (count,
   merge, dump, query).
-* :mod:`bam_scanner` — BAM/CRAM scanning, CIGAR parsing, and the
-  multi-backend k-mer hit engine.
+* :mod:`kmer_set` — canonical k-mers as sorted 2-bit codes, and the
+  vectorized membership scan of read batches.
+* :mod:`bam_scanner` — BAM/CRAM scanning, CIGAR parsing, and the k-mer
+  hit engine built on :mod:`kmer_set`.
 """
 
 from kmer_denovo_filter.core.bam_scanner import (  # noqa: F401
@@ -32,6 +34,7 @@ from kmer_denovo_filter.core.jellyfish_wrappers import (  # noqa: F401
     _merge_jf_files,
     _scan_parent_jellyfish,
 )
+from kmer_denovo_filter.core.kmer_set import KmerSet  # noqa: F401
 from kmer_denovo_filter.core.memory_utils import (  # noqa: F401
     _get_available_memory_gb,
     _log_children_memory,
@@ -39,4 +42,5 @@ from kmer_denovo_filter.core.memory_utils import (  # noqa: F401
     _log_disk_usage,
     _log_memory,
     _log_subprocess_memory,
+    _log_subprocesses_memory,
 )

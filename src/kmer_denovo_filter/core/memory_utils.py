@@ -151,15 +151,54 @@ def _get_available_memory_gb():
     return total_gb, available_gb
 
 
-def _log_children_memory(label=""):
-    """Log aggregate memory of all child processes (Linux only).
+def _proc_rss_kb(pid):
+    """RSS of a process in kB from ``/proc`` (Linux only), else 0."""
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])
+    except (FileNotFoundError, PermissionError, ProcessLookupError,
+            OSError):
+        pass
+    return 0
 
-    Reads ``/proc/{pid}/status`` for each child process to report total
-    RSS across all subprocesses.
+
+def _log_subprocesses_memory(procs, label=""):
+    """Log the total and the largest RSS of a group of subprocesses
+    (Linux only): one line for, say, the sixteen ``jellyfish query``
+    processes of the reference subtraction.  Processes that have exited
+    are skipped; nothing is logged when none is running."""
+    sizes = []
+    for proc in procs:
+        if proc is None or proc.poll() is not None:
+            continue
+        rss_kb = _proc_rss_kb(proc.pid)
+        if rss_kb:
+            sizes.append(rss_kb)
+    if sizes:
+        logger.info(
+            "  [SubprocessMem] %s — %d processes, total RSS=%.2f GB, "
+            "largest=%.2f GB (file pages mapped by all of them are "
+            "counted in each)",
+            label, len(sizes), sum(sizes) / (1024 * 1024),
+            max(sizes) / (1024 * 1024),
+        )
+
+
+def _log_children_memory(label=""):
+    """Log the memory of all child processes (Linux only): their number,
+    their total RSS and the largest one's.
+
+    Reads ``/proc/{pid}/status`` for each child process.  Pages shared
+    copy-on-write after a fork (the k-mer set of the scan workers) are
+    counted in every child's RSS, so the total overstates what they use
+    together.
     """
     try:
         my_pid = os.getpid()
         total_rss_kb = 0
+        largest_rss_kb = 0
         n_children = 0
 
         # Walk /proc for children
@@ -183,20 +222,18 @@ def _log_children_memory(label=""):
                     continue
 
         for cpid in child_pids:
-            try:
-                with open(f"/proc/{cpid}/status") as f:
-                    for line in f:
-                        if line.startswith("VmRSS:"):
-                            total_rss_kb += int(line.split()[1])
-                            n_children += 1
-                            break
-            except (FileNotFoundError, PermissionError):
-                continue
+            rss_kb = _proc_rss_kb(cpid)
+            if rss_kb:
+                total_rss_kb += rss_kb
+                largest_rss_kb = max(largest_rss_kb, rss_kb)
+                n_children += 1
 
         if n_children > 0:
             logger.info(
-                "  [ChildProcessMem] %s — %d children, total RSS=%.2f GB",
+                "  [ChildProcessMem] %s — %d children, total RSS=%.2f GB, "
+                "largest=%.2f GB",
                 label, n_children, total_rss_kb / (1024 * 1024),
+                largest_rss_kb / (1024 * 1024),
             )
     except Exception:
         pass

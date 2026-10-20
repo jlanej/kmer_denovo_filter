@@ -30,7 +30,7 @@ jobs:
         run: pip install -e '.[test]' || pip install -e . && pip install pytest
 
       - name: Run unit tests
-        run: pytest tests/test_cli.py tests/test_kmer_utils.py tests/test_kraken2_bed.py -v
+        run: pytest tests/test_cli.py tests/test_kmer_utils.py tests/test_kmer_set.py tests/test_kraken2_bed.py -v
 
       - name: Run 1000 Genomes trio screen script tests
         run: pytest tests/test_1kg_trios_helpers.py tests/test_1kg_trios_pipeline.py -v

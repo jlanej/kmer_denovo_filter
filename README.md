@@ -59,8 +59,13 @@ outputs, and the `--kraken2*` flags.
 
 2. **Extract & filter child k-mers** – Count all k-mers in the child
    BAM/CRAM with Jellyfish. Keep only k-mers with at least
-   `--min-child-count` occurrences (default 3), then subtract any k-mers
-   present in the reference. The remaining k-mers are non-reference child
+   `--min-child-count` occurrences (default 3), then subtract the k-mers
+   present in the reference: the child's index is dumped straight into
+   `--threads` parallel `jellyfish query` processes against the reference
+   index (memory-mapped, held once by the page cache), and only the
+   k-mers with a reference count of 0 are written out; nothing of the
+   dump (100 GB of text for a 30x genome) is written to disk or held in
+   Python. The remaining k-mers are non-reference child
    k-mers. The count is bounded in memory: the hash is sized from
    `--memory` and from what the reads hold, `jellyfish count --disk` dumps
    a full table to disk and merges the pieces at the end instead of
@@ -68,9 +73,9 @@ outputs, and the `--kraken2*` flags.
    k-mers seen once (most of a WGS child's distinct k-mers: sequencing
    errors) out of it - the filter admits a k-mer from its second
    occurrence, so the dump bound is lowered by one to compensate
-   (`--no-child-bloom-filter` to count without it). Intermediate data (the
-   child Jellyfish index and candidates FASTA) is removed as soon as each
-   step completes to keep disk and memory usage low.
+   (`--no-child-bloom-filter` to count without it). The child Jellyfish
+   index is removed as soon as it has been dumped, to keep disk and memory
+   usage low.
 
 3. **Filter against parents** – Stream each parent's BAM/CRAM through
    Jellyfish to count the non-reference child k-mers. Remove any k-mer
@@ -78,21 +83,28 @@ outputs, and the `--kraken2*` flags.
    Each parent's Jellyfish index is removed immediately after it is
    queried.
 
-4. **Build proband-unique index** – Build a Jellyfish hash index from the
-   proband-unique k-mers FASTA. This index is memory-mapped and shared
-   across workers via the OS page cache, so N workers ≈ 1× the index
-   size in RAM (typically 2–10 GB for WGS data).
+4. **Keep the proband-unique index** – Build a small Jellyfish index of
+   the proband-unique k-mers and keep it beside the output
+   (`[out-prefix].proband_unique.jf`, tens of MB; `--discard-proband-kmers`
+   skips it): across a cohort, the k-mers recurring in unrelated probands
+   are errors, and that set can only be built from these files.
 
-5. **Anchor & cluster** – Scan each child read with a sliding k-mer
-   window. Each k-mer is canonicalized and queried against the
-   proband-unique Jellyfish index in batched ``jellyfish query`` calls.
-   Reads with at least `--min-distinct-kmers-per-read` (default k/4)
-   distinct proband-unique k-mers are retained and written to the
-   informative-reads BAM during the same scan. Cluster
-   nearby reads (within `--cluster-distance` bp) into candidate genomic
-   regions. Regions are then filtered by `--min-supporting-reads` and
-   `--min-distinct-kmers`. The number of parallel workers is dynamically
-   capped based on available system memory.
+5. **Anchor & cluster** – Load the proband-unique k-mers once, as a sorted
+   array of 2-bit codes (8 bytes per k-mer: 20–50 MB for a 30x genome at
+   the defaults), which the scan workers share copy-on-write. Each worker
+   takes its reads in batches of 10,000, encodes them with numpy, derives
+   every k-mer window by shifts, canonicalizes, masks the windows holding
+   an N and tests membership against the sorted set with a binary search:
+   no per-k-mer Python loop and no subprocess. Reads with at least
+   `--min-distinct-kmers-per-read` (default k/4) distinct proband-unique
+   k-mers are retained and written to the informative-reads BAM during the
+   same scan. The scan runs one task per 20 Mb window of each contig,
+   plus one for the unmapped reads, so the workers stay busy to the end
+   (a contig used to be one task, and chr1 alone took the last 45 minutes
+   of a 16-worker run). Cluster nearby reads (within `--cluster-distance`
+   bp) into candidate genomic regions. Regions are then filtered by
+   `--min-supporting-reads` and `--min-distinct-kmers`. See [Run time and
+   memory](#run-time-and-memory-discovery-mode).
 
 6. **Annotate structural variants** – The informative reads that cross an
    SV junction align as split reads, discordant pairs, reads with an
@@ -313,7 +325,7 @@ k-mer parameters. Each command also has its own mode-specific arguments.
 | `--ref-fasta` / `-r` | – | Reference FASTA with `.fai` index (required for CRAM; required for `kmer-discovery` unless `--ref-jf` is provided) |
 | `--kmer-size` / `-k` | 31 | K-mer size (must be odd, 3–201) |
 | `--min-baseq` | 20 | Minimum base quality for read k-mers. Used by `kmer-denovo` only: `kmer-discovery` counts k-mers from all bases (one-off sequencing errors are removed by `--min-child-count`) and warns if this is set |
-| `--threads` / `-t` | 4 | Number of threads for Jellyfish and parallel anchoring workers |
+| `--threads` / `-t` | 4 | Number of threads for Jellyfish, of parallel `jellyfish query` processes in the reference subtraction, and of anchoring workers |
 | `--memory` | auto | Available memory in GB. On HPC (e.g. SLURM), set this to the allocated memory so worker counts and hash sizes are tuned correctly. When omitted, auto-detected from the system |
 | `--debug-kmers` | false | Enable per-variant debug output |
 | `--no-child-bloom-filter` | false | Count the child's k-mers without the Bloom filter that keeps k-mers seen once out of the hash (several times smaller with it; see step 2) |
@@ -805,8 +817,8 @@ Discovery mode applies filters at four levels, in this order:
      parent are removed (default 0, meaning any parental occurrence
      removes the k-mer).
 
-    After filtering, a Jellyfish hash index is built from the surviving
-    proband-unique k-mers and shared across workers via the OS page cache.
+    After filtering, the surviving proband-unique k-mers are loaded once,
+    as a sorted array of 2-bit codes that the anchoring workers share.
 
 2. **Read-level** (anchoring):
    * `--min-distinct-kmers-per-read` — A read must carry at least this
@@ -832,6 +844,25 @@ Discovery mode applies filters at four levels, in this order:
 
 The BED file header records the applied filter values so that output
 provenance is self-documenting.
+
+### Run time and memory (discovery mode)
+
+Measured on ten 1000 Genomes 30x trios (CRAM input, 16 CPUs, `--memory
+128`, GRCh38 with decoys) before the vectorized scan and the streamed
+subtraction, and projected for them from the measurements of the change
+(a synthetic 3 M-read BAM; the dump's own rate), to be replaced by the
+next cohort pass:
+
+| Module | Before (median of 10 trios) | Now expected | Memory now |
+|---|---|---|---|
+| 1a: child k-mer count (`jellyfish count --disk`, Bloom filter) | 35–65 min | unchanged | the peak of the run: hash + filter sized to `--memory` (63 GB resident at 128) |
+| 1b: dump + reference subtraction | 29 min dump to a 107 GB FASTA + 64 min single `jellyfish query` | about 10–15 min: the dump's own rate is the floor (4 M k-mers/s measured; 2.6 G k-mers per 30x genome), and 16 query processes keep up with it | the reference index once in the page cache (28 GB for GRCh38), 16 query processes mapping it; no intermediate file |
+| 2: parent filtering (`jellyfish count --if`, mother then father) | 37–112 min | unchanged | the `--if` hashes, 0.7–3.5 GB |
+| 3: anchoring (771 M reads, 16 workers) | 2.5–3.5 h (5,200 reads/s per worker; the last 45 min on three workers) | about 15–25 min: 83,000 reads/s per worker measured on a BAM (the pysam read loop alone runs at about 1 M reads/s), CRAM decoding and the node's cores decide; the 20 Mb windows end within a minute of each other | k-mer set once (20–50 MB, shared copy-on-write) + 0.3–0.4 GB per worker (measured: 8 workers 3.1 GB, the largest 0.39 GB, the shared set counted in each); 16 workers 5–6 GB; the parent 8–10 GB while clustering 1.3 M informative reads |
+
+`--threads` sets the number of query processes in 1b and of scan workers
+in 3; `--memory` bounds the child count in 1a and caps the workers in 3.
+The outputs of a run do not depend on the thread count or the window size.
 
 ## Notes & Limitations
 
@@ -986,9 +1017,9 @@ apptainer exec --bind /data,/scratch "$SIF" kmer-denovo \
 # itself to --memory: a Bloom filter of about 1.2 bytes per distinct
 # k-mer of the reads (a 40x child ~15 GB, a 70x child ~35 GB) plus a
 # hash of the k-mers seen twice or more (~45 GB), counted with --disk
-# so that it can never grow past the budget. Module 3 (anchoring) uses a disk-backed
-# Jellyfish index, keeping per-worker memory low (~2–10 GB shared
-# via page cache). The --tmp-dir flag defaults to a subdirectory
+# so that it can never grow past the budget. Module 3 (anchoring) holds
+# the proband-unique k-mers once (tens of MB) and needs 0.3-0.4 GB
+# more per worker: 16 workers fit in 6 GB. The --tmp-dir flag defaults to a subdirectory
 # next to --out-prefix; on HPC systems, point it to a fast scratch
 # filesystem (avoid RAM-backed /tmp or tmpfs).
 # Use --memory to tell the tool how much RAM your SLURM job has

@@ -1,13 +1,12 @@
 """BAM/CRAM scanning engine and alignment helpers.
 
-Provides the multi-backend k-mer hit scanner used by both VCF-mode and
-discovery-mode pipelines.  Two backends are supported:
-
-* **Aho-Corasick automaton** — fast C-level multi-pattern matching;
-  used when the proband-unique k-mer set fits in Python memory.
-* **JellyfishKmerQuery** — disk-backed queries via ``jellyfish query``;
-  used for large k-mer sets where the Aho-Corasick automaton would
-  exceed available RAM.
+Provides the k-mer hit scanner of discovery mode's Module 3.  The
+proband-unique k-mers live in a
+:class:`~kmer_denovo_filter.core.kmer_set.KmerSet` (a sorted array of
+2-bit codes, loaded once by the parent and shared copy-on-write by the
+forked workers), and every batch of reads is tested against it with
+vectorized ``numpy`` operations: no per-k-mer Python loop and no
+subprocess per batch.
 
 No function in this module accepts an ``argparse.Namespace`` object.
 """
@@ -18,33 +17,9 @@ import re
 
 import pysam
 
-from kmer_denovo_filter.kmer_utils import (
-    JellyfishKmerQuery,
-    _extract_read_kmers,
-    build_kmer_automaton,
-)
+from kmer_denovo_filter.core.kmer_set import KmerSet
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# FASTA I/O (local helper to avoid circular import with utils.py)
-# ---------------------------------------------------------------------------
-
-
-def _load_kmers_from_fasta(fasta_path):
-    """Load k-mer strings from a FASTA file.
-
-    Reads the file line-by-line, yielding only sequence lines (not
-    header lines starting with ``>``).
-    """
-    kmers = set()
-    with open(fasta_path) as fh:
-        for line in fh:
-            line = line.rstrip("\n")
-            if line and not line.startswith(">"):
-                kmers.add(line)
-    return kmers
 
 
 # ---------------------------------------------------------------------------
@@ -299,51 +274,42 @@ def _collect_read_alignment_metadata(
 # ---------------------------------------------------------------------------
 
 # Module-level worker state — set by _init_scan_worker via
-# multiprocessing pool initialiser.
-_worker_automaton = None       # Aho-Corasick automaton (small k-mer sets)
-_worker_jf_query = None        # JellyfishKmerQuery (large k-mer sets)
+# multiprocessing pool initialiser.  With the fork start method the
+# parent builds the k-mer set before the pool starts and every worker
+# shares its array copy-on-write; with spawn each worker gets a copy.
+_worker_kmer_set = None        # KmerSet of the proband-unique k-mers
 _worker_kmer_size = None
 _worker_min_distinct_kmers_per_read = 1
 
-# Number of reads to accumulate before issuing a single jellyfish
-# subprocess call.  Larger batches amortize subprocess overhead
-# but temporarily hold more read objects in memory.
-_JF_READ_BATCH_SIZE = 5000
+# Reads are scanned in batches: a batch ends at this many reads or this
+# many bases, whichever comes first.  The batch's transient arrays are a
+# few tens of bytes per base, so 1.5 million bases cost about 100 MB.
+_SCAN_BATCH_READS = 10_000
+_SCAN_BATCH_BASES = 1_500_000
 
 # Structural-variant evidence recorded for each informative read.
 _SV_MIN_INDEL = 50  # bp: CIGAR insertions/deletions at least this long
 _SV_MIN_CLIP = 20   # bp: soft clips at least this long mark a breakpoint
 
 
-def _init_scan_worker(proband_data, kmer_size,
-                      min_distinct_kmers_per_read=1):
-    """Initializer for per-contig scan workers.
+def _init_scan_worker(kmer_set, kmer_size, min_distinct_kmers_per_read=1):
+    """Initializer for the scan workers.
 
-    *proband_data* may be:
-    - A path ending in ``.jf`` — opens a :class:`JellyfishKmerQuery`
-      that queries k-mers against a memory-mapped jellyfish hash.
-      This is the low-memory path used for WGS discovery mode with
-      hundreds of millions of proband-unique k-mers.
-    - A FASTA file path — loads k-mers into a Python set and builds
-      an Aho-Corasick automaton (fast but memory-intensive).
-    - A Python set — builds an Aho-Corasick automaton directly.
+    *kmer_set* may be:
+    - A :class:`KmerSet`, as the discovery pipeline builds it once in the
+      parent (shared copy-on-write by forked workers).
+    - A FASTA file path — loaded into a :class:`KmerSet`.
+    - An iterable of k-mer strings — encoded into a :class:`KmerSet`.
     """
-    global _worker_automaton, _worker_jf_query, _worker_kmer_size
+    global _worker_kmer_set, _worker_kmer_size
     global _worker_min_distinct_kmers_per_read
 
-    _worker_automaton = None
-    _worker_jf_query = None
-
-    if isinstance(proband_data, str) and proband_data.endswith(".jf"):
-        # Jellyfish-backed mode: each query subprocess memory-maps
-        # the same .jf file; the OS page cache is shared across workers.
-        _worker_jf_query = JellyfishKmerQuery(proband_data)
-    elif isinstance(proband_data, str):
-        kmers = _load_kmers_from_fasta(proband_data)
-        _worker_automaton = build_kmer_automaton(kmers)
-        del kmers
+    if isinstance(kmer_set, KmerSet):
+        _worker_kmer_set = kmer_set
+    elif isinstance(kmer_set, str):
+        _worker_kmer_set = KmerSet.from_fasta(kmer_set, kmer_size)
     else:
-        _worker_automaton = build_kmer_automaton(proband_data)
+        _worker_kmer_set = KmerSet.from_kmers(kmer_set or (), kmer_size)
 
     _worker_kmer_size = kmer_size
     _worker_min_distinct_kmers_per_read = min_distinct_kmers_per_read
@@ -353,13 +319,12 @@ def _reset_scan_worker():
     """Drop the state set by :func:`_init_scan_worker`.
 
     Needed when the scan runs in-process rather than in a pool worker, so
-    the automaton or query cache does not outlive the scan.
+    the k-mer set does not outlive the scan.
     """
-    global _worker_automaton, _worker_jf_query, _worker_kmer_size
+    global _worker_kmer_set, _worker_kmer_size
     global _worker_min_distinct_kmers_per_read
 
-    _worker_automaton = None
-    _worker_jf_query = None
+    _worker_kmer_set = None
     _worker_kmer_size = None
     _worker_min_distinct_kmers_per_read = 1
 
@@ -392,7 +357,8 @@ class _InformativeReadWriter:
 def _process_informative_read(read, unique_in_read, kmer_hit_indices,
                               kmer_size, reads_seen, read_hits,
                               read_sv_meta, kmer_coverage, read_coverage,
-                              bam_out=None):
+                              bam_out=None, deferred_coverage=None,
+                              window=None):
     """Record an informative read's hits, coverage, and SV metadata.
 
     When *bam_out* is given (an :class:`_InformativeReadWriter`), the read
@@ -403,9 +369,18 @@ def _process_informative_read(read, unique_in_read, kmer_hit_indices,
     mate's mapping quality when the MQ tag gives it: evidence of
     unmappable sequence at the locus.
 
+    A read whose de-duplication key may also be reported by another
+    window of the same contig - a supplementary alignment, or a read
+    whose mate maps to this contig outside *window* ``(start, end)`` -
+    has its coverage put in *deferred_coverage* (as ``(key, coverage)``)
+    instead of *kmer_coverage* and *read_coverage*, when that list is
+    given: the caller adds it only if the key was not seen by an earlier
+    window, exactly as a scan of the whole contig would have skipped the
+    read.
+
     Returns 1 if the read is unmapped-informative, 0 otherwise.
     Mutates *reads_seen*, *read_hits*, *read_sv_meta*, *kmer_coverage*,
-    and *read_coverage* in place.
+    *read_coverage* and *deferred_coverage* in place.
     """
     dedup_key = (read.query_name, read.is_supplementary)
     if dedup_key in reads_seen:
@@ -436,12 +411,15 @@ def _process_informative_read(read, unique_in_read, kmer_hit_indices,
     cov = _collect_kmer_ref_positions(
         read, kmer_hit_indices, kmer_size,
     )
-    # update(), not +=: Counter.__iadd__ rescans the whole Counter on
-    # every call, which makes a contig scan quadratic.
-    kmer_coverage[chrom].update(cov)
-    # Count one read per touched position
-    for pos in cov:
-        read_coverage[chrom][pos] += 1
+    if deferred_coverage is not None and _key_may_recur_in_contig(read, window):
+        deferred_coverage.append((dedup_key, cov))
+    else:
+        # update(), not +=: Counter.__iadd__ rescans the whole Counter on
+        # every call, which makes a contig scan quadratic.
+        kmer_coverage[chrom].update(cov)
+        # Count one read per touched position
+        for pos in cov:
+            read_coverage[chrom][pos] += 1
 
     # Collect SV metadata for this informative read
     sc_left, sc_right = _extract_softclips(read.cigartuples)
@@ -491,24 +469,60 @@ def _process_informative_read(read, unique_in_read, kmer_hit_indices,
     return 0
 
 
-def _scan_contig_for_hits(child_bam, ref_fasta, contig, informative_bam=None):
-    """Scan reads mapped to *contig* for proband-unique k-mers.
+def _key_may_recur_in_contig(read, window):
+    """Whether another record of this contig, outside *window*, may carry
+    the read's de-duplication key: its mate (same name, both primary) when
+    it maps to this contig outside the window - or when the record does
+    not say where the mate is - or, for a supplementary alignment, another
+    supplementary part of the read anywhere."""
+    if window is None:
+        return False
+    if read.is_supplementary:
+        return True
+    if not read.is_paired:
+        return False
+    if read.next_reference_id < 0:
+        return True
+    if read.next_reference_id != read.reference_id:
+        return False
+    start, end = window
+    return read.next_reference_start < start or read.next_reference_start >= end
 
-    When *contig* is ``None``, unmapped reads are scanned instead.  When
+
+def _scan_contig_for_hits(child_bam, ref_fasta, contig, informative_bam=None,
+                          start=None, end=None):
+    """Scan the reads of *contig* (or of a window of it) for proband-unique
+    k-mers.
+
+    When *contig* is ``None``, unmapped reads are scanned instead.  With
+    *start* and *end*, only the reads whose alignment starts in
+    ``[start, end)`` are scanned (a read overlapping the window from before
+    it belongs to the window of its start), so the windows of a contig
+    together scan each read once, in the order of the file.  When
     *informative_bam* is given, every informative read recorded by this
     scan is also written to that path (created only if there is at least
     one such read), tagged ``dk:i:1``.
 
-    Supports two scanning backends:
-    - **Aho-Corasick automaton** (``_worker_automaton``) — fast C-level
-      multi-pattern matching; used when the k-mer set fits in memory.
-    - **JellyfishKmerQuery** (``_worker_jf_query``) — disk-backed
-      queries via ``jellyfish query``; used for large k-mer sets in
-      discovery mode where the set is too large for Aho-Corasick.
+    Reads are taken in batches (:data:`_SCAN_BATCH_READS` reads or
+    :data:`_SCAN_BATCH_BASES` bases) and each batch is scanned at once
+    with :meth:`KmerSet.scan`; the informative reads of a batch are then
+    recorded in file order, so the result is that of scanning the reads
+    one by one.
 
     Returns:
         (read_hits, reads_seen, unmapped_informative, total_reads_scanned,
-         read_sv_meta, kmer_coverage, read_coverage)
+         read_sv_meta, kmer_coverage, read_coverage, deferred_coverage)
+
+    ``read_hits`` holds, per informative mapped read, its contig, start,
+    end, name, the set of proband-unique k-mers it carries (as 2-bit
+    codes: only their number is used downstream) and whether it is
+    supplementary.
+
+    ``deferred_coverage`` is empty for a whole-contig scan.  For a window
+    it holds the coverage of the reads whose key another window of the
+    contig may also report (see :func:`_process_informative_read`), as
+    ``(key, Counter)`` in file order, for the caller to add once the
+    windows are folded in order.
 
     ``read_sv_meta`` is a dict keyed by ``(query_name, is_supplementary)``
     with per-read SV metadata (has_sa, sa_str, is_paired, is_proper_pair,
@@ -523,10 +537,11 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig, informative_bam=None):
     positions where at least one novel k-mer was found, counting the
     number of distinct reads touching each position.
     """
-    automaton = _worker_automaton
-    jf_query = _worker_jf_query
+    kmer_set = _worker_kmer_set
     kmer_size = _worker_kmer_size
     min_dk_per_read = _worker_min_distinct_kmers_per_read
+    if kmer_set is None:
+        kmer_set = KmerSet(kmer_size or 1)
     bam = pysam.AlignmentFile(
         child_bam, reference_filename=ref_fasta if ref_fasta else None,
     )
@@ -536,8 +551,10 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig, informative_bam=None):
     read_sv_meta = {}
     kmer_coverage = collections.defaultdict(collections.Counter)
     read_coverage = collections.defaultdict(collections.Counter)
+    deferred_coverage = []
     unmapped_informative = 0
     total_reads_scanned = 0
+    window = None
 
     if contig is None:
         try:
@@ -546,128 +563,64 @@ def _scan_contig_for_hits(child_bam, ref_fasta, contig, informative_bam=None):
             bam.close()
             return (read_hits, reads_seen, unmapped_informative,
                     total_reads_scanned, read_sv_meta, kmer_coverage,
-                    read_coverage)
-    else:
+                    read_coverage, deferred_coverage)
+    elif start is None and end is None:
         iterator = bam.fetch(contig=contig)
+    else:
+        iterator = bam.fetch(contig=contig, start=start, stop=end)
+        window = (start, end)
 
     bam_out = None
     if informative_bam is not None:
         bam_out = _InformativeReadWriter(informative_bam, bam.header)
 
-    if jf_query is not None:
-        # ── Batched jellyfish path ─────────────────────────────────
-        # Reads are accumulated in batches so that k-mers from many
-        # reads are queried in a single jellyfish subprocess call.
-        # This reduces subprocess overhead from O(n_reads) to
-        # O(n_reads / batch_size).
-        pending = []   # (read, canon_at_pos)
-        pending_kmers = set()
+    pending = []        # the reads of the batch, in file order
+    pending_seqs = []   # their sequences, as bytes
+    pending_bases = 0
 
-        for read in iterator:
-            if read.is_secondary:
-                continue
-            if read.is_duplicate:
-                continue
-
-            total_reads_scanned += 1
-            seq = read.query_sequence
-            if seq is None:
-                continue
-
-            canon_at_pos, unique_candidates = _extract_read_kmers(
-                seq, kmer_size,
-            )
-            pending_kmers.update(unique_candidates)
-            pending.append((read, canon_at_pos))
-
-            if len(pending) < _JF_READ_BATCH_SIZE:
-                continue
-
-            # Query all unique k-mers from this batch in one subprocess.
-            # Avoid unbounded per-worker cache growth by processing each
-            # batch against this local hit set, then clearing cache.
-            batch_hits = set()
-            if pending_kmers:
-                batch_hits = jf_query.query_batch(list(pending_kmers))
-                pending_kmers = set()
-
-            # Process each read against batch-level hits
-            for read_obj, c_at_pos in pending:
-                unique_in_read = set()
-                kmer_hit_indices = set()
-                for pos, canon in c_at_pos.items():
-                    if canon in batch_hits:
-                        unique_in_read.add(canon)
-                        kmer_hit_indices.add(pos)
-
-                if len(unique_in_read) < min_dk_per_read:
-                    continue
-
-                unmapped_informative += _process_informative_read(
-                    read_obj, unique_in_read, kmer_hit_indices,
-                    kmer_size, reads_seen, read_hits,
-                    read_sv_meta, kmer_coverage, read_coverage,
-                    bam_out=bam_out,
-                )
-            pending = []
-            jf_query.close()
-
-        # Flush remaining reads
-        if pending:
-            batch_hits = set()
-            if pending_kmers:
-                batch_hits = jf_query.query_batch(list(pending_kmers))
-            for read_obj, c_at_pos in pending:
-                unique_in_read = set()
-                kmer_hit_indices = set()
-                for pos, canon in c_at_pos.items():
-                    if canon in batch_hits:
-                        unique_in_read.add(canon)
-                        kmer_hit_indices.add(pos)
-
-                if len(unique_in_read) < min_dk_per_read:
-                    continue
-
-                unmapped_informative += _process_informative_read(
-                    read_obj, unique_in_read, kmer_hit_indices,
-                    kmer_size, reads_seen, read_hits,
-                    read_sv_meta, kmer_coverage, read_coverage,
-                    bam_out=bam_out,
-                )
-            jf_query.close()
-    else:
-        # ── Aho-Corasick path (or no backend) ──────────────────────
-        for read in iterator:
-            if read.is_secondary:
-                continue
-            if read.is_duplicate:
-                continue
-
-            total_reads_scanned += 1
-            seq = read.query_sequence
-            if seq is None:
-                continue
-
-            unique_in_read = set()
-            kmer_hit_indices = set()
-            if automaton is not None:
-                for _end_idx, canonical_kmer in automaton.iter(seq):
-                    unique_in_read.add(canonical_kmer)
-                    kmer_hit_indices.add(_end_idx - kmer_size + 1)
-
+    def _scan_batch():
+        nonlocal unmapped_informative
+        for index, positions, codes in kmer_set.scan(pending_seqs):
+            unique_in_read = set(
+                codes.tolist() if hasattr(codes, "tolist") else codes)
             if len(unique_in_read) < min_dk_per_read:
                 continue
-
             unmapped_informative += _process_informative_read(
-                read, unique_in_read, kmer_hit_indices,
-                kmer_size, reads_seen, read_hits,
-                read_sv_meta, kmer_coverage, read_coverage,
-                bam_out=bam_out,
+                pending[index], unique_in_read, set(positions.tolist()),
+                kmer_size, reads_seen, read_hits, read_sv_meta,
+                kmer_coverage, read_coverage, bam_out=bam_out,
+                deferred_coverage=deferred_coverage, window=window,
             )
+
+    for read in iterator:
+        if read.is_secondary:
+            continue
+        if read.is_duplicate:
+            continue
+        if start is not None and read.reference_start < start:
+            continue  # scanned by the window its alignment starts in
+
+        total_reads_scanned += 1
+        seq = read.query_sequence
+        if seq is None or len(seq) < kmer_size:
+            continue
+
+        pending.append(read)
+        pending_seqs.append(seq.encode("ascii"))
+        pending_bases += len(seq)
+        if (len(pending) >= _SCAN_BATCH_READS
+                or pending_bases >= _SCAN_BATCH_BASES):
+            _scan_batch()
+            pending = []
+            pending_seqs = []
+            pending_bases = 0
+
+    if pending:
+        _scan_batch()
 
     if bam_out is not None:
         bam_out.close()
     bam.close()
     return (read_hits, reads_seen, unmapped_informative,
             total_reads_scanned, read_sv_meta, kmer_coverage,
-            read_coverage)
+            read_coverage, deferred_coverage)

@@ -17,8 +17,6 @@ from nonhuman_screen.bam import classify_reads_from_bam
 from kmer_denovo_filter.core.bam_scanner import (
     _collect_read_alignment_metadata,
     _extract_softclips,
-    _init_scan_worker,
-    _scan_contig_for_hits,
 )
 from kmer_denovo_filter.core.jellyfish_wrappers import (
     _scan_parent_jellyfish,
@@ -32,14 +30,10 @@ from kmer_denovo_filter.core.memory_utils import (
     _log_subprocess_memory,
 )
 from kmer_denovo_filter.kmer_utils import (
-    JellyfishKmerQuery,
     Kraken2Runner,
     _HUMAN_TAXID,
-    _extract_read_kmers,
     _is_symbolic,
-    build_kmer_automaton,
     canonicalize,
-    estimate_automaton_memory_gb,
     extract_variant_spanning_kmers,
     read_supports_alt,
 )
