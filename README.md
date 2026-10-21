@@ -74,8 +74,14 @@ outputs, and the `--kraken2*` flags.
    errors) out of it - the filter admits a k-mer from its second
    occurrence, so the dump bound is lowered by one to compensate
    (`--no-child-bloom-filter` to count without it). The child Jellyfish
-   index is removed as soon as it has been dumped, to keep disk and memory
-   usage low.
+   index is removed as soon as it has been dumped. On the scratch
+   filesystem (`--tmp-dir`) this step is the run's peak: the index while
+   it is dumped (12 bytes per kept k-mer, 29 GB for a 30x genome at
+   k=31), the non-reference parts beside it (about 10% of the dump's
+   text, 8 GB at 30x), then the parts and their concatenation once the
+   index is removed - about 40 GB in all. The free space is checked
+   against this estimate before the dump starts, and the run stops with
+   the numbers and the remedy when it is short.
 
 3. **Filter against parents** – Stream each parent's BAM/CRAM through
    Jellyfish to count the non-reference child k-mers. Remove any k-mer
@@ -330,7 +336,7 @@ k-mer parameters. Each command also has its own mode-specific arguments.
 | `--debug-kmers` | false | Enable per-variant debug output |
 | `--no-child-bloom-filter` | false | Count the child's k-mers without the Bloom filter that keeps k-mers seen once out of the hash (several times smaller with it; see step 2) |
 | `--jf-hash-size` | auto | Hash size for the child's `jellyfish count` (e.g. `4G`, `500M`). Sized from `--memory` and the input by default; the count runs with `--disk`, so a table that fills is dumped and merged, never doubled in memory. Give this only to override the automatic size. Was: estimated from the child BAM file size and capped at 4G, which sent every WGS child into jellyfish's in-memory doubling (a 4G table doubled to 8G, 16G and died asking for 32G creates multi-file indexes requiring more memory to merge/dump). **Note:** This argument only applies to the discovery mode child k-mer counting step; VCF mode parent hash sizes are automatically sized from the number of child k-mers and are not affected by this flag |
-| `--tmp-dir` | auto | Directory for temporary files (jellyfish indexes, intermediate FASTA files). Defaults to a subdirectory next to the output files. Avoid RAM-backed filesystems like tmpfs (`/tmp` on many HPC systems), as intermediate files can exceed 100 GB for WGS data |
+| `--tmp-dir` | auto | Directory for temporary files (jellyfish indexes, intermediate FASTA files). Defaults to a subdirectory next to the output files. Discovery mode needs about 40 GB here for a 30x genome, all of it in Module 1: the child's ~29 GB k-mer index while it is dumped, the non-reference k-mer parts beside it, then the parts and their concatenation once the index is removed; the free space is checked against the estimate before the subtraction starts, and the run stops with the numbers when it is short. A network scratch is fine (the run removes its working directory at the end and leaves the directory given here to the caller); node-local disk is faster for the `--disk` count. Avoid RAM-backed filesystems like tmpfs (`/tmp` on many HPC systems) |
 
 #### `kmer-denovo` arguments (VCF mode)
 
@@ -864,6 +870,23 @@ next cohort pass:
 in 3; `--memory` bounds the child count in 1a and caps the workers in 3.
 The outputs of a run do not depend on the thread count or the window size.
 
+Scratch (`--tmp-dir`): Module 1 is the peak. The child's index stays on
+it while it is dumped (12 bytes per kept k-mer: 28.7–29.1 GB on the ten
+30x trios at k=31), the non-reference parts are written beside it (about
+10% of the dump's text: 150–190 M of 2.6 G dumped k-mers were absent from
+the reference, 8 GB of FASTA), and once the index is removed the parts
+and their concatenation hold as much again - about 40 GB in all. Before
+the dump starts, the run reads the k-mer count from the index's header,
+estimates the parts, compares with the free space and stops with the
+numbers and the remedy when it is short (a per-job scratch of 31.5 GB
+held the 29 GB index and 2.5 GB of parts, then every part hit "No space
+left on device"); a `[Disk]` line samples the filesystem every minute of
+the subtraction, as it does during the count. A network scratch is fine
+when the caller removes the `--tmp-dir` afterwards (the run removes its
+own working directory); node-local disk is faster for the `--disk`
+count's dumped tables. Modules 2 and 3 need little beside it (the
+parents' `--if` hashes, the informative-read shards).
+
 ## Notes & Limitations
 
 * **Multiallelic variants** – When a VCF record contains multiple ALT
@@ -1019,9 +1042,15 @@ apptainer exec --bind /data,/scratch "$SIF" kmer-denovo \
 # hash of the k-mers seen twice or more (~45 GB), counted with --disk
 # so that it can never grow past the budget. Module 3 (anchoring) holds
 # the proband-unique k-mers once (tens of MB) and needs 0.3-0.4 GB
-# more per worker: 16 workers fit in 6 GB. The --tmp-dir flag defaults to a subdirectory
-# next to --out-prefix; on HPC systems, point it to a fast scratch
-# filesystem (avoid RAM-backed /tmp or tmpfs).
+# more per worker: 16 workers fit in 6 GB. The --tmp-dir flag defaults
+# to a subdirectory next to --out-prefix; on HPC systems, point it to a
+# fast scratch filesystem (avoid RAM-backed /tmp or tmpfs). Module 1
+# needs about 40 GB there for a 30x genome: the child's ~29 GB k-mer
+# index while it is dumped, the non-reference parts beside it, then the
+# parts and their concatenation. A per-job local scratch (SLURM's --tmp)
+# must be at least that, or --tmp-dir goes to a larger filesystem; the
+# run checks the free space before the subtraction and stops with the
+# numbers when it is short.
 # Use --memory to tell the tool how much RAM your SLURM job has
 # so that worker counts are tuned correctly (system-reported memory
 # may reflect the full node, not your allocation).

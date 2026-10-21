@@ -111,7 +111,7 @@ and the manager picks the staged files up.
 | SLURM | `sbatch`/`squeue`; site flags via `SBATCH_EXTRA_ARGS` |
 | Internet | On the node that runs `00_setup.sh` and on the node that runs the manager (a DTN or login node with `MANAGER_LOCAL=1`, or a compute partition with outbound access) |
 | python3 ≥ 3.9 | On the setup/summary node (standard library only; the container's python is used otherwise) |
-| Disk | Reference + index ~25 GB; SV call set 1.7 GB; **~45 GB per staged trio × `MAX_STAGED_TRIOS`**; **~40 GB of scratch per running discovery job** (`TMP_ROOT`, not a RAM-backed `/tmp`: the child's ~30 GB k-mer index while it is dumped, plus the non-reference k-mer parts; the dump itself is streamed, never written); results ~1 GB per trio (informative BAM and report included) |
+| Disk | Reference + index ~25 GB; SV call set 1.7 GB; **~45 GB per staged trio × `MAX_STAGED_TRIOS`**; **~40 GB of scratch per running discovery job** (`TMP_ROOT` or `DISCOVERY_TMP_DIR`, not a RAM-backed `/tmp`: the child's ~29 GB k-mer index while it is dumped, the non-reference k-mer parts beside it, then the parts and their concatenation; the dump itself is streamed, never written; the engine checks the free space before the subtraction and stops with the numbers when it is short); results ~1 GB per trio (informative BAM and report included) |
 | Memory | 64 GB for the reference index job (23 GB used); `DISCOVERY_MEM` (default 128 GB) per trio job |
 
 ## Quick start
@@ -373,7 +373,8 @@ or `SV_VCF` at a downloaded call set.
 | `TRIO_SLOTS`, `MAX_STAGED_TRIOS`, `TRIO_LIMIT` | 2, 4, 0 | trios staged at once; disk backpressure; sweep limit |
 | `KEEP_CRAMS` | 0 | 1 keeps CRAMs after discovery |
 | `DISCOVERY_CPUS`, `DISCOVERY_MEM`, `DISCOVERY_TIME` | 16, 128G, 36:00:00 | per-trio job resources |
-| `MIN_CHILD_COUNT`, `KMER_SIZE`, `DISCOVERY_EXTRA_ARGS`, `DISCOVERY_TMP_DIR` | 3, 31, –, – | discovery parameters |
+| `MIN_CHILD_COUNT`, `KMER_SIZE`, `DISCOVERY_EXTRA_ARGS` | 3, 31, – | discovery parameters |
+| `DISCOVERY_TMP_DIR` | – (a per-trio directory under `TMP_ROOT`) | the job's `--tmp-dir`. Module 1 needs about 40 GB free there per running 30x trio: the child's ~29 GB k-mer index while it is dumped, the non-reference parts beside it, then the parts and their concatenation. A node-local per-job scratch must be sized for it (the engine stops before the subtraction, with the numbers, when it is short); never a RAM-backed `/tmp` |
 | `KRAKEN2_DB` | empty | a Kraken2 database directory for the non-human fraction screen of each run's informative reads (`--kraken2-db`; `scripts/download_kraken2_db.sh` fetches PrackenDB). Bound into the job; loaded into its memory, so size `DISCOVERY_MEM` for it or add `--kraken2-memory-mapping` to `DISCOVERY_EXTRA_ARGS`. Empty = no screen, recorded as `disabled` |
 | `REF_INDEX_CPUS`, `REF_INDEX_MEM`, `REF_INDEX_TIME`, `REF_JF_HASH_SIZE` | 8, 64G, 06:00:00, 4G | reference index job |
 | `RECURRENT_MIN_TRIOS`, `RECURRENT_SLACK_BP` | 2, 500 | recurrence filter |
@@ -405,7 +406,11 @@ grep -h "download complete" $WORK_DIR/logs/stage_*.log | sort | uniq -c   # tran
   sizes itself to `--memory`, so the log's "hash ... entries" line says
   what it asked for.
 * **Scratch full**: lower `MAX_STAGED_TRIOS`, or point `TMP_ROOT` at a
-  larger filesystem. Never a RAM-backed `/tmp`.
+  larger filesystem. Never a RAM-backed `/tmp`. A trio job that stops
+  before the reference subtraction with "Module 1b cannot start" says what
+  is free and what the subtraction needs: give the job a bigger scratch
+  (about 40 GB for a 30x trio) or set `DISCOVERY_TMP_DIR` to a larger
+  filesystem.
 * **Changing the cohort**: delete `trios.tsv` and `trio_files.tsv`, re-run
   setup; finished trios not in the new selection keep their results.
 * **Two managers at once** fight over the same files; run one, and let it

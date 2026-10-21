@@ -12,6 +12,7 @@ import os
 import random
 import select
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
@@ -108,6 +109,50 @@ _NON_REF_AWK = (
     '$2 == 0 { n++; print ">" p "." n; print $1 } '
     'END { print NR, n + 0 > counts }'
 )
+
+#: What the reference subtraction writes to the tmp filesystem while the
+#: child's index is still on it: the non-reference parts, about this
+#: fraction of the dump's text.  Measured on 30x genomes at k = 31:
+#: 150-190 M of 2.6 G dumped k-mers were absent from the reference, about
+#: 8 GB of FASTA parts for 95 GB of dump text (6-9 %); the 10 % leaves a
+#: margin.  Once the index is removed, their concatenation needs as much
+#: again.
+_NON_REF_PARTS_FRACTION = 0.10
+
+#: Bytes of a ``jellyfish dump`` FASTA record beyond the k-mer itself:
+#: ``>``, the count (two or three digits at 30x) and two newlines
+#: (measured: 36 bytes per record at k = 31).
+_DUMP_RECORD_OVERHEAD = 5
+
+#: A jellyfish index starts with its header's length as this many decimal
+#: digits, then the JSON header, then one fixed-size record per k-mer: the
+#: key (``key_len`` bits, rounded up to bytes) and the count
+#: (``counter_len`` bytes) - 12 bytes per k-mer at k = 31.
+_JF_HEADER_LEN_DIGITS = 9
+
+#: When the tmp filesystem holds less than this many times the
+#: subtraction's estimated need, the run goes on with a warning: the
+#: estimate is a rule of thumb, and a child with more non-reference
+#: sequence writes bigger parts.
+_SUBTRACT_SCRATCH_HEADROOM = 1.5
+
+#: When a query pipe breaks, the subtraction waits this long for the
+#: processes that were failing on their own to end (awk's write error, the
+#: SIGPIPE it leaves its query) before it stops the rest, so that a process
+#: the cleanup killed is never named as the cause.
+_SUBTRACT_FAILURE_GRACE_S = 1.0
+
+#: What the subtraction's processes are to each other: the dump writes to
+#: the queries, each query to its awk.  When two processes of one pipe
+#: fail, the reader failed first - the writer's failure is the broken pipe
+#: behind it - so a later stage is named before an earlier one.
+_SUBTRACT_STAGE_DUMP, _SUBTRACT_STAGE_QUERY, _SUBTRACT_STAGE_FILTER = 0, 1, 2
+
+#: How a process of the subtraction ended: its label, exit code, stderr
+#: tail, whether it ended on its own (before the cleanup closed or killed
+#: anything) and its stage.
+_ProcessEnd = collections.namedtuple(
+    "_ProcessEnd", "label returncode stderr own stage")
 
 
 # ── Discovery-mode helpers ────────────────────────────────────────
@@ -336,8 +381,289 @@ def _stderr_tail(fh, max_lines=20):
     return "\n".join(lines[-max_lines:])
 
 
+def _format_bytes(n):
+    """*n* bytes as GB with one decimal, or as MB below 0.1 GB."""
+    if n >= 0.1 * 1024**3:
+        return f"{n / 1024**3:.1f} GB"
+    return f"{n / 1024**2:.1f} MB"
+
+
+def _file_bytes(path):
+    """The size of *path* on disk (``os.path.getsize``)."""
+    return os.path.getsize(path)
+
+
+def _tmp_space(path):
+    """``(free, total)`` bytes of the filesystem holding *path*, or
+    ``None`` when it cannot be read."""
+    try:
+        st = os.statvfs(path)
+    except OSError:
+        return None
+    return st.f_bavail * st.f_frsize, st.f_blocks * st.f_frsize
+
+
+def _jf_index_records(path):
+    """What a jellyfish index holds, from its header and size:
+    ``(n_records, record_bytes, k)``, or ``None`` when the file is not a
+    binary jellyfish index (a text dump, something else, nothing).
+
+    The file starts with the header's length as :data:`_JF_HEADER_LEN_DIGITS`
+    decimal digits and the JSON header (``key_len`` in bits, ``counter_len``
+    in bytes, ``format``); the rest is one fixed-size record per k-mer, so
+    the count is exact.
+    """
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as fh:
+            digits = fh.read(_JF_HEADER_LEN_DIGITS)
+            if len(digits) < _JF_HEADER_LEN_DIGITS or not digits.isdigit():
+                return None
+            header_len = int(digits)
+            text = fh.read(header_len).decode("ascii", errors="replace")
+        header = json.loads(text[:text.rfind("}") + 1])
+        if header.get("format") != "binary/sorted":
+            return None
+        key_len = int(header["key_len"])
+        record_bytes = (key_len + 7) // 8 + int(header["counter_len"])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    if key_len <= 0 or record_bytes <= 0:
+        return None
+    data_bytes = max(0, size - _JF_HEADER_LEN_DIGITS - header_len)
+    return data_bytes // record_bytes, record_bytes, key_len // 2
+
+
+def _child_index_files(tmpdir, child_jf):
+    """The child's index and any chunk files beside it: what the
+    subtraction removes once the dump has been read."""
+    return sorted(set(_find_jf_files(os.path.join(tmpdir, "child.jf")) + [child_jf]))
+
+
+def _estimate_subtraction_scratch(child_jf, tmpdir, kmer_size=None):
+    """What the reference subtraction will write to the tmp filesystem,
+    from the child index's size.
+
+    The number of k-mers to dump comes from the index's header (its
+    records are fixed-size: :func:`_jf_index_records`), or from the size
+    alone at ``(2k + 7) // 8 + 4`` bytes per k-mer when the header cannot
+    be read and *kmer_size* is given.  The dump's text is *k* +
+    :data:`_DUMP_RECORD_OVERHEAD` bytes per k-mer; the non-reference parts
+    are :data:`_NON_REF_PARTS_FRACTION` of it, written beside the index;
+    their concatenation takes as much again once the index is removed.
+    ``needed_bytes`` is what must be free before the dump starts: the
+    parts, plus what the concatenation needs beyond the space the index's
+    removal gives back.
+
+    Returns a dict (``index_bytes``, ``n_kmers``, ``k``, ``dump_text_bytes``,
+    ``parts_bytes``, ``needed_bytes``, ``from_header``), or ``None`` when
+    neither the header nor *kmer_size* gives the record size.
+    """
+    try:
+        index_bytes = sum(_file_bytes(f)
+                          for f in _child_index_files(tmpdir, child_jf))
+        dumped_bytes = _file_bytes(child_jf)
+    except OSError:
+        return None
+    records = _jf_index_records(child_jf)
+    if records is not None:
+        n_kmers, _record_bytes, k = records
+    elif kmer_size:
+        k = int(kmer_size)
+        n_kmers = dumped_bytes // ((2 * k + 7) // 8 + 4)
+    else:
+        return None
+    dump_text = n_kmers * (k + _DUMP_RECORD_OVERHEAD)
+    parts = int(dump_text * _NON_REF_PARTS_FRACTION)
+    return {
+        "index_bytes": index_bytes,
+        "n_kmers": n_kmers,
+        "k": k,
+        "dump_text_bytes": dump_text,
+        "parts_bytes": parts,
+        "needed_bytes": parts + max(0, parts - index_bytes),
+        "from_header": records is not None,
+    }
+
+
+def _check_subtraction_scratch(child_jf, tmpdir, kmer_size=None):
+    """Before the dump starts: the tmp filesystem's free space against
+    :func:`_estimate_subtraction_scratch`, logged with the numbers.
+
+    Raises :class:`RuntimeError` naming the numbers and the remedy (a
+    bigger scratch, or ``--tmp-dir`` on a larger filesystem) when the
+    space is short - before any process of the subtraction has started,
+    the index left as it is; warns when it is within
+    :data:`_SUBTRACT_SCRATCH_HEADROOM` of the estimate.  Returns the
+    estimate (``None`` when it could not be made, which is logged).
+    """
+    est = _estimate_subtraction_scratch(child_jf, tmpdir, kmer_size)
+    if est is None:
+        logger.warning(
+            "Module 1b: could not size the scratch the reference subtraction "
+            "needs (the header of %s is not a jellyfish index's and no k-mer "
+            "size was given); the free space is not checked", child_jf,
+        )
+        return None
+    space = _tmp_space(tmpdir)
+    pct = int(round(_NON_REF_PARTS_FRACTION * 100))
+    logger.info(
+        "Module 1b scratch: the child index (%s, %s k-mers at k=%d%s) stays "
+        "on the tmp filesystem while it is dumped; the non-reference parts "
+        "are estimated at %s (%d%% of the %s of text the dumped k-mers make) "
+        "beside it, their concatenation at as much again once the index is "
+        "removed; %s free on %s",
+        _format_bytes(est["index_bytes"]), f"{est['n_kmers']:,}", est["k"],
+        "" if est["from_header"] else ", from the size alone",
+        _format_bytes(est["parts_bytes"]), pct,
+        _format_bytes(est["dump_text_bytes"]),
+        _format_bytes(space[0]) if space else "(unknown)", tmpdir,
+    )
+    if space is None:
+        return est
+    free, total = space
+    needed = est["needed_bytes"]
+    if free < needed:
+        recommended = est["index_bytes"] + est["parts_bytes"] * _SUBTRACT_SCRATCH_HEADROOM
+        raise RuntimeError(
+            f"Module 1b cannot start: the tmp filesystem holding {tmpdir} has "
+            f"{_format_bytes(free)} free of {_format_bytes(total)}, and the "
+            f"reference subtraction needs about {_format_bytes(needed)}: the "
+            f"non-reference parts, estimated at {_format_bytes(est['parts_bytes'])} "
+            f"({pct}% of the {_format_bytes(est['dump_text_bytes'])} of text that "
+            f"{est['n_kmers']:,} dumped k-mers make at k={est['k']}), are written "
+            f"beside the {_format_bytes(est['index_bytes'])} child index, and their "
+            f"concatenation takes as much again once the index is removed. Nothing "
+            f"of the subtraction has started. Give the job a scratch of at least "
+            f"{_format_bytes(recommended)} for Module 1 (about 40 GB for a 30x genome "
+            f"at k=31), or point --tmp-dir at a larger filesystem."
+        )
+    if free < needed * _SUBTRACT_SCRATCH_HEADROOM:
+        logger.warning(
+            "Module 1b scratch is tight: %s free for an estimated %s; the "
+            "estimate is a rule of thumb, and a child with more non-reference "
+            "sequence writes bigger parts", _format_bytes(free), _format_bytes(needed),
+        )
+    return est
+
+
+def _exit_text(returncode):
+    """``2``, or ``-13 (SIGPIPE)`` for a death by signal."""
+    if returncode is not None and returncode < 0:
+        try:
+            name = signal.Signals(-returncode).name
+        except ValueError:
+            name = "signal"
+        return f"{returncode} ({name})"
+    return str(returncode)
+
+
+def _ended_on_their_own(procs, grace_s):
+    """The processes among *procs* (Popen objects) that have ended by the
+    time the caller noticed a failure, polled again for *grace_s* seconds
+    so that one that was failing then (its error written, its exit a
+    moment away) is seen to have ended before the cleanup touches anything.
+    Returns their ids; what the cleanup then closes or kills can never be
+    named as the cause."""
+    deadline = time.monotonic() + grace_s
+    ended = set()
+    while True:
+        for proc in procs:
+            if proc.poll() is not None:
+                ended.add(id(proc))
+        if len(ended) == len(procs) or time.monotonic() >= deadline:
+            return ended
+        time.sleep(0.02)
+
+
+def _attribute_subtraction_failure(ends):
+    """Which process to name for a failed subtraction.
+
+    *ends* are :class:`_ProcessEnd` records in pipeline order.  The cause
+    is the process that failed first and on its own: among those that
+    ended non-zero before the cleanup touched anything, one that exited
+    with an error code before one killed by a signal (a reader's write
+    error before the SIGPIPE it gave its writer), one with something on
+    stderr before one with nothing, a later stage before an earlier one
+    (the reader of a pipe before its writer), then pipeline order.  A
+    process the cleanup stopped is never the cause.
+
+    Returns ``(cause, also_own, stopped)``: the record named (``None`` when
+    no process failed on its own), the other processes that failed on
+    their own and those the cleanup stopped (every non-zero exit after it
+    began), both in pipeline order.
+    """
+    own = [e for e in ends if e.own and e.returncode != 0]
+    stopped = [e for e in ends if not e.own and e.returncode != 0]
+    if not own:
+        return None, [], stopped
+    cause = min(
+        own,
+        key=lambda e: (e.returncode < 0, not e.stderr.strip(), -e.stage,
+                       ends.index(e)),
+    )
+    return cause, [e for e in own if e is not cause], stopped
+
+
+def _subtraction_failure_message(ends, tmpdir, parts_dir, estimate=None):
+    """The message of a failed subtraction: the process named by
+    :func:`_attribute_subtraction_failure` with its stderr, the other
+    processes that failed on their own, those the cleanup stopped, every
+    other non-empty stderr tail, and the tmp filesystem's state - with
+    the remedy when the scratch ran out (a part's "No space left on
+    device", or (nearly) nothing free)."""
+    cause, also_own, stopped = _attribute_subtraction_failure(ends)
+    lines = []
+    if cause is not None:
+        head = (f"reference subtraction failed: {cause.label} failed with exit "
+                f"code {_exit_text(cause.returncode)} - the first failure, on its own")
+        if cause.stderr.strip():
+            lines.append(head + ":\n" + cause.stderr)
+        else:
+            lines.append(head + " (nothing on its stderr)")
+        if also_own:
+            lines.append("Also ended on their own: " + ", ".join(
+                f"{e.label} ({_exit_text(e.returncode)})" for e in also_own))
+    else:
+        lines.append("reference subtraction failed: a query pipe closed early "
+                     "although no process failed on its own")
+    if stopped:
+        lines.append("Stopped by the cleanup, not the cause: " + ", ".join(
+            f"{e.label} ({_exit_text(e.returncode)})" for e in stopped))
+    for e in ends:
+        if e is not cause and e.stderr.strip():
+            lines.append(f"[{e.label}] stderr:\n{e.stderr}")
+    out_of_space = any("No space left on device" in e.stderr or "ENOSPC" in e.stderr
+                       for e in ends)
+    space = _tmp_space(tmpdir)
+    if space is not None:
+        free, total = space
+        parts_bytes = 0
+        try:
+            for entry in os.scandir(parts_dir):
+                if entry.is_file(follow_symlinks=False):
+                    parts_bytes += entry.stat().st_size
+        except OSError:
+            pass
+        disk = (f"The tmp filesystem holding {tmpdir} has {_format_bytes(free)} free "
+                f"of {_format_bytes(total)}; the non-reference parts in {parts_dir} "
+                f"hold {_format_bytes(parts_bytes)}.")
+        if out_of_space or free < min(1 << 30, 0.01 * total):
+            disk += " The scratch ran out:"
+            if estimate is not None:
+                disk += (f" the subtraction needs about "
+                         f"{_format_bytes(estimate['parts_bytes'])} for the parts "
+                         f"beside the {_format_bytes(estimate['index_bytes'])} child "
+                         f"index, then as much again for their concatenation.")
+            disk += (" Give the job a bigger scratch (about 40 GB for a 30x genome "
+                     "at k=31), or point --tmp-dir at a larger filesystem.")
+        lines.append(disk)
+    return "\n".join(lines)
+
+
 def _subtract_reference_kmers(ref_jf, child_jf, dump_lower, tmpdir, threads,
-                              min_child_count=None, poll_interval=60):
+                              min_child_count=None, poll_interval=60,
+                              kmer_size=None):
     """Module 1b: the child's candidate k-mers that are absent from the
     reference, streamed from the child's index through parallel queries.
 
@@ -360,6 +686,18 @@ def _subtract_reference_kmers(ref_jf, child_jf, dump_lower, tmpdir, threads,
     the k-mers compare in the same canonical orientation.  The child's
     index is removed once the dump has been read.
 
+    Scratch: the index stays on the tmp filesystem while it is dumped,
+    the parts grow beside it (about 10 % of the dump's text: 8 GB for a
+    30x genome whose index is 29 GB) and their concatenation needs as
+    much again once the index is removed.  The free space is checked
+    against this estimate before the dump starts
+    (:func:`_check_subtraction_scratch`; *kmer_size* sizes the records
+    when the index's header cannot be read) and sampled while it runs.
+    When a part runs out of space, the error names the process that
+    failed first and on its own (awk's write error), with every non-empty
+    stderr tail and the filesystem's state - never the dump or a query
+    the cleanup stopped (:func:`_attribute_subtraction_failure`).
+
     Returns:
         child_non_ref_fa: path to the FASTA of non-reference child k-mers.
         n_candidates: number of candidate k-mers dumped.
@@ -368,6 +706,7 @@ def _subtract_reference_kmers(ref_jf, child_jf, dump_lower, tmpdir, threads,
     n_query = max(1, int(threads))
     if min_child_count is None:
         min_child_count = dump_lower
+    estimate = _check_subtraction_scratch(child_jf, tmpdir, kmer_size)
     parts_dir = os.path.join(tmpdir, "non_ref_parts")
     os.makedirs(parts_dir, exist_ok=True)
     child_non_ref_fa = os.path.join(tmpdir, "child_non_ref_kmers.fa")
@@ -382,7 +721,7 @@ def _subtract_reference_kmers(ref_jf, child_jf, dump_lower, tmpdir, threads,
     last_log = start
     dump_cmd = ["jellyfish", "dump", "-L", str(dump_lower), child_jf]
     query_cmd = ["jellyfish", "query", ref_jf, "-s", "/dev/stdin"]
-    procs = []        # (label, Popen, stderr file)
+    procs = []        # (label, Popen, stderr file, stage)
     queries = []
     part_paths = []
     count_paths = []
@@ -392,7 +731,8 @@ def _subtract_reference_kmers(ref_jf, child_jf, dump_lower, tmpdir, threads,
         p_dump = subprocess.Popen(
             dump_cmd, stdout=subprocess.PIPE, stderr=dump_err, bufsize=0,
         )
-        procs.append(("jellyfish dump (child)", p_dump, dump_err))
+        procs.append(("jellyfish dump (child)", p_dump, dump_err,
+                      _SUBTRACT_STAGE_DUMP))
         for j in range(n_query):
             part = os.path.join(parts_dir, f"part_{j:03d}.fa")
             counts = os.path.join(parts_dir, f"part_{j:03d}.counts")
@@ -404,7 +744,7 @@ def _subtract_reference_kmers(ref_jf, child_jf, dump_lower, tmpdir, threads,
                 stderr=q_err, bufsize=0,
             )
             procs.append((f"jellyfish query (ref subtraction, pipe {j})",
-                          p_query, q_err))
+                          p_query, q_err, _SUBTRACT_STAGE_QUERY))
             queries.append(p_query)
             f_err = stack.enter_context(tempfile.TemporaryFile())
             part_fh = stack.enter_context(open(part, "wb"))
@@ -415,7 +755,7 @@ def _subtract_reference_kmers(ref_jf, child_jf, dump_lower, tmpdir, threads,
             )
             p_query.stdout.close()  # only awk holds the read end
             procs.append((f"awk (ref subtraction, pipe {j})", p_filter,
-                          f_err))
+                          f_err, _SUBTRACT_STAGE_FILTER))
 
         def _on_block(moved_bytes, moved_records):
             nonlocal last_log
@@ -432,16 +772,25 @@ def _subtract_reference_kmers(ref_jf, child_jf, dump_lower, tmpdir, threads,
                 _log_memory("during reference subtraction")
                 _log_subprocess_memory(p_dump, "jellyfish-dump")
                 _log_subprocesses_memory(queries, "jellyfish-query")
+                _log_disk_usage(tmpdir, "tmpdir during reference subtraction")
+                _log_dir_size(parts_dir, "non-reference parts so far")
                 last_log = now
 
         failure = None
+        own = None        # ids of the processes that ended before the cleanup
         try:
             n_bytes, n_records = _stream_records_to_pipes(
                 p_dump.stdout.fileno(), [q.stdin.fileno() for q in queries],
                 on_block=_on_block,
             )
         except BrokenPipeError as exc:
+            # A reader is gone.  Before anything is closed or killed: which
+            # processes ended on their own (an awk out of space, the query
+            # it left without a reader) - the cleanup's own closing and
+            # killing must never be mistaken for the cause.
             failure = exc
+            own = _ended_on_their_own([p for _label, p, _err, _stage in procs],
+                                      _SUBTRACT_FAILURE_GRACE_S)
         finally:
             for q in queries:
                 try:
@@ -450,24 +799,22 @@ def _subtract_reference_kmers(ref_jf, child_jf, dump_lower, tmpdir, threads,
                     pass
             p_dump.stdout.close()
         if failure is not None:
-            for _label, proc, _err in procs:
+            for _label, proc, _err, _stage in procs:
                 if proc.poll() is None:
                     proc.kill()
-        for _label, proc, _err in procs:
+        for _label, proc, _err, _stage in procs:
             proc.wait()
-        failed = [(label, proc, err) for label, proc, err in procs
-                  if proc.returncode != 0]
-        if failed:
-            label, proc, err = failed[0]
-            raise RuntimeError(
-                f"{label} failed with exit code {proc.returncode}: "
-                f"{_stderr_tail(err)}"
-            )
-        if failure is not None:
-            raise RuntimeError(
-                "reference subtraction: a query pipe closed early although "
-                "every process exited 0"
-            ) from failure
+        ends = [
+            _ProcessEnd(label, proc.returncode, _stderr_tail(err),
+                        own is None or id(proc) in own, stage)
+            for label, proc, err, stage in procs
+        ]
+        if failure is not None or any(e.returncode != 0 for e in ends):
+            error = RuntimeError(
+                _subtraction_failure_message(ends, tmpdir, parts_dir, estimate))
+            if failure is not None:
+                raise error from failure
+            raise error
 
     dump_elapsed = time.monotonic() - start
     logger.info(
@@ -479,7 +826,7 @@ def _subtract_reference_kmers(ref_jf, child_jf, dump_lower, tmpdir, threads,
 
     # Remove the child jellyfish index immediately – it is no longer
     # needed and can be very large (30 GB for a 30x genome).
-    for f in set(_find_jf_files(os.path.join(tmpdir, "child.jf")) + [child_jf]):
+    for f in _child_index_files(tmpdir, child_jf):
         if os.path.exists(f):
             os.remove(f)
     logger.info("Removed child Jellyfish index to free disk/cache")
@@ -2886,6 +3233,7 @@ def run_discovery_pipeline(args):
                 _subtract_reference_kmers(
                     ref_jf, child_jf, dump_lower, tmpdir, args.threads,
                     min_child_count=args.min_child_count,
+                    kmer_size=args.kmer_size,
                 )
             )
 

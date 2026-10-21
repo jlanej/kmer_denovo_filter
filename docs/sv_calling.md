@@ -70,6 +70,15 @@ same output as the per-k-mer scan and the single query they replace
 run time and memory to expect per module are in the
 [README](../README.md#run-time-and-memory-discovery-mode).
 
+On the scratch filesystem (`--tmp-dir`), Module 1 is the run's peak: the
+child's index while it is dumped (about 29 GB for a 30x genome at k = 31),
+the non-reference parts beside it (about 8 GB), then the parts and their
+concatenation once the index is removed - about 40 GB in all. The run
+checks the free space against this estimate before the subtraction starts
+and stops with the numbers and the remedy when it is short. A network
+scratch works when the caller removes the directory afterwards; node-local
+disk is faster for the `--disk` count.
+
 ## Evidence per region
 
 Each evidence column counts **molecules** (read names). A read pair or a

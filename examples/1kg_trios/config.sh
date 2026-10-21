@@ -238,9 +238,13 @@ DISCOVERY_MEM="${DISCOVERY_MEM:-128G}"
 DISCOVERY_TIME="${DISCOVERY_TIME:-36:00:00}"
 MIN_CHILD_COUNT="${MIN_CHILD_COUNT:-3}"
 DISCOVERY_EXTRA_ARGS="${DISCOVERY_EXTRA_ARGS:-}"   # appended to kmer-discovery
-# Scratch for kmer-discovery intermediates (100+ GB per trio). Empty = a
-# per-trio directory under TMP_ROOT. Point it at node-local disk only if that
-# disk is large enough; never at a RAM-backed /tmp.
+# Scratch for kmer-discovery intermediates: about 40 GB per 30x trio (the
+# child's ~29 GB k-mer index while it is dumped, the non-reference parts
+# beside it, then the parts and their concatenation; the engine checks the
+# free space before the subtraction and stops with the numbers when it is
+# short). Empty = a per-trio directory under TMP_ROOT. Point it at
+# node-local disk only if that disk is large enough; never at a RAM-backed
+# /tmp.
 DISCOVERY_TMP_DIR="${DISCOVERY_TMP_DIR:-}"
 # The non-human fraction screen (kmer-discovery --kraken2-db): a Kraken2
 # database directory (hash.k2d, opts.k2d, taxo.k2d and its taxonomy; the
