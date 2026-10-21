@@ -15,6 +15,13 @@
   reference subtraction streamed into parallel `jellyfish query` processes
   against a single query over the dumped FASTA, the record splitter, a
   failing query, an empty dump.
+- **discovery/test_subtraction_scratch.py** – Module 1b's scratch: the
+  k-mer count read from the index's header, the estimate of the
+  non-reference parts, the space check that stops the run before the dump
+  starts, the `[Disk]` sample during the subtraction, and the attribution
+  of a failure when a part runs out of space (a stand-in `awk` exits with
+  "No space left on device": it is named, never the dump the cleanup
+  stopped).
 - **vcf/test_pipeline.py** – VCF-mode pipeline integration tests using synthetic BAM/VCF data.
 - **discovery/test_pipeline.py** – Discovery-mode pipeline integration tests using synthetic BAM data.
 - **discovery/test_sv_demo.py** – End-to-end SV calling on the simulated trio

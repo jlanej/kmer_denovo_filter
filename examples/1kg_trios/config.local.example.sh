@@ -34,7 +34,9 @@ MODULES_TO_LOAD="${MODULES_TO_LOAD:-apptainer}"
 # DISCOVERY_TIME="${DISCOVERY_TIME:-36:00:00}"
 
 # Node-local scratch for discovery intermediates, only if it is large enough
-# (100+ GB per running trio) and not a RAM-backed filesystem.
+# (about 40 GB per running 30x trio: the child's ~29 GB k-mer index while it
+# is dumped, plus the non-reference parts and their concatenation) and not a
+# RAM-backed filesystem.
 # DISCOVERY_TMP_DIR="${DISCOVERY_TMP_DIR:-/local/scratch/${USER:-$(id -un)}}"
 
 # A Kraken2 database for the non-human fraction screen of each run's
